@@ -3,22 +3,12 @@ use std::{
     io::{self, Write},
 };
 
-pub(crate) enum ReadlineResult {
-    Line(String),
-    Cancel,
-}
+use dialoguer::theme::ColorfulTheme;
 
-pub(crate) struct TerminalIO {
-    prompt: String,
-}
+#[derive(Default)]
+pub(crate) struct TerminalIO;
 
 impl TerminalIO {
-    pub fn new(prompt: impl Into<String>) -> anyhow::Result<Self> {
-        Ok(Self {
-            prompt: prompt.into(),
-        })
-    }
-
     pub fn print(&self, msg: &str) {
         print!("{msg}")
     }
@@ -67,16 +57,9 @@ impl TerminalIO {
         anyhow::bail!("No item selected")
     }
 
-    pub fn readline(&self) -> anyhow::Result<ReadlineResult> {
-        self.print(self.prompt.as_str());
-        self.flush_stdout();
-
-        let mut line = String::new();
-        if io::stdin().read_line(&mut line)? == 0 {
-            return Ok(ReadlineResult::Cancel);
-        }
-
-        let line = line.trim_end_matches(['\r', '\n']).to_owned();
-        Ok(ReadlineResult::Line(line))
+    pub fn readline(&self) -> anyhow::Result<String> {
+        let result =
+            dialoguer::Input::<String>::with_theme(&ColorfulTheme::default()).interact_text()?;
+        Ok(result)
     }
 }

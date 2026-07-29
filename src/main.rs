@@ -19,8 +19,7 @@ mod use_cases;
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let terminal_io = Arc::new(TerminalIO::new("> ")?);
-
+    let terminal_io = Arc::new(TerminalIO::default());
     let index_deps = IndexControllerDeps::new(terminal_io.clone());
 
     if let Err(e) = cli.index.handle(index_deps).await {

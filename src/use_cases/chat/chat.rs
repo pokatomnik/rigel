@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     prompts::recovery::{missing_answer_recovery_prompt, recovery_prompt},
-    shared::terminal_io::{ReadlineResult, TerminalIO},
+    shared::terminal_io::TerminalIO,
     use_cases::chat::stream_output_state::StreamOutputState,
 };
 
@@ -170,9 +170,7 @@ where
         loop {
             let messages = self.messages.lock().await.clone();
 
-            let ReadlineResult::Line(user_message) = self.terminal_io.readline()? else {
-                return Ok(());
-            };
+            let user_message = self.terminal_io.readline()?;
 
             if user_message == EXIT {
                 break;
