@@ -103,14 +103,17 @@ where
         self.terminal_io.flush_stderr();
     }
 
+    /// Handles an incremental reasoning-text chunk from the assistant stream.
     fn handle_reasoning_delta(&self, reasoning: String, state: &mut StreamOutputState) {
         self.handle_reasoning_text(reasoning.as_str(), state);
     }
 
+    /// Handles a complete reasoning item from the assistant stream.
     fn handle_reasoning(&self, reasoning: Reasoning, state: &mut StreamOutputState) {
         self.handle_reasoning_text(reasoning.display_text().as_str(), state);
     }
 
+    /// Handles an answer-text item from the assistant stream.
     fn handle_text(&self, text: Text, state: &mut StreamOutputState) {
         if text.text().trim().is_empty() {
             return;
@@ -126,6 +129,7 @@ where
         self.terminal_io.flush_stdout();
     }
 
+    /// Handles a tool-call item emitted by the assistant stream.
     fn handle_tool_call(&self, tool_call: ToolCall) {
         self.terminal_io.eprintln(
             format!(
@@ -136,6 +140,7 @@ where
         );
     }
 
+    /// Handles a tool-result item emitted by the user stream.
     fn handle_tool_result(&self, tool_result: ToolResult) {
         let output = tool_result
             .content
@@ -152,6 +157,7 @@ where
             .eprintln(format!("[tool result: {output}]").as_str());
     }
 
+    /// Handles the final-response item that contains the streamed conversation messages.
     fn handle_final_response(
         &self,
         response: PromptResponse,
@@ -160,10 +166,81 @@ where
         *streamed_messages = response.messages;
     }
 
+    /// Handles a chunk of response from LLM-provided stream
+    fn handle_stream_chunk<R>(
+        &self,
+        item: MultiTurnStreamItem<R>,
+        output_state: &mut StreamOutputState,
+        streamed_messages: &mut Option<Vec<Message>>,
+    ) {
+        match item {
+            MultiTurnStreamItem::StreamAssistantItem(
+                StreamedAssistantContent::ReasoningDelta { reasoning, .. },
+            ) => self.handle_reasoning_delta(reasoning, output_state),
+            MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Reasoning(
+                reasoning,
+            )) => self.handle_reasoning(reasoning, output_state),
+            MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(text)) => {
+                self.handle_text(text, output_state)
+            }
+            MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCall {
+                tool_call,
+                ..
+            }) => self.handle_tool_call(tool_call),
+            MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
+                tool_result,
+                ..
+            }) => self.handle_tool_result(tool_result),
+            MultiTurnStreamItem::FinalResponse(response) => {
+                self.handle_final_response(response, streamed_messages)
+            }
+            _ => {}
+        }
+    }
+
     fn handle_recovered_response(&self, response: &str) {
         self.terminal_io.eprintln("\n[answer]");
         self.terminal_io.print(response);
         self.terminal_io.flush_stdout();
+    }
+
+    async fn recover_after_stream_error(
+        &self,
+        user_message: &str,
+        error: String,
+    ) -> anyhow::Result<()> {
+        let (response, recovered_messages) = self
+            .recover_response(user_message, self.messages.lock().await.clone(), error)
+            .await?;
+
+        self.handle_recovered_response(response.as_str());
+        *self.messages.lock().await = recovered_messages;
+
+        Ok(())
+    }
+
+    async fn recover_after_missing_answer(
+        &self,
+        user_message: String,
+        streamed_messages: &mut Option<Vec<Message>>,
+    ) -> anyhow::Result<()> {
+        let mut recovery_messages = self.messages.lock().await.clone();
+        if let Some(messages) = streamed_messages.take() {
+            recovery_messages.extend(messages);
+        } else {
+            recovery_messages.push(Message::user(user_message));
+        }
+
+        let (response, recovered_messages) = self.recover_missing_answer(recovery_messages).await?;
+
+        self.handle_recovered_response(response.as_str());
+        *self.messages.lock().await = recovered_messages;
+
+        Ok(())
+    }
+
+    async fn append_streamed_messages(&self, messages: Vec<Message>) {
+        self.messages.lock().await.extend(messages);
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {
@@ -190,56 +267,17 @@ where
                     }
                 };
 
-                match item {
-                    MultiTurnStreamItem::StreamAssistantItem(
-                        StreamedAssistantContent::ReasoningDelta { reasoning, .. },
-                    ) => self.handle_reasoning_delta(reasoning, &mut output_state),
-                    MultiTurnStreamItem::StreamAssistantItem(
-                        StreamedAssistantContent::Reasoning(reasoning),
-                    ) => self.handle_reasoning(reasoning, &mut output_state),
-                    MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
-                        text,
-                    )) => self.handle_text(text, &mut output_state),
-                    MultiTurnStreamItem::StreamAssistantItem(
-                        StreamedAssistantContent::ToolCall { tool_call, .. },
-                    ) => self.handle_tool_call(tool_call),
-                    MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
-                        tool_result,
-                        ..
-                    }) => self.handle_tool_result(tool_result),
-                    MultiTurnStreamItem::FinalResponse(response) => {
-                        self.handle_final_response(response, &mut streamed_messages)
-                    }
-                    _ => {}
-                }
+                self.handle_stream_chunk(item, &mut output_state, &mut streamed_messages);
             }
 
             if let Some(error) = stream_error {
-                let (response, recovered_messages) = self
-                    .recover_response(
-                        user_message.as_str(),
-                        self.messages.lock().await.clone(),
-                        error,
-                    )
+                self.recover_after_stream_error(user_message.as_str(), error)
                     .await?;
-
-                self.handle_recovered_response(response.as_str());
-                *self.messages.lock().await = recovered_messages;
             } else if output_state.requires_answer_recovery() {
-                let mut recovery_messages = self.messages.lock().await.clone();
-                if let Some(messages) = streamed_messages.take() {
-                    recovery_messages.extend(messages);
-                } else {
-                    recovery_messages.push(Message::user(user_message));
-                }
-
-                let (response, recovered_messages) =
-                    self.recover_missing_answer(recovery_messages).await?;
-
-                self.handle_recovered_response(response.as_str());
-                *self.messages.lock().await = recovered_messages;
+                self.recover_after_missing_answer(user_message, &mut streamed_messages)
+                    .await?;
             } else if let Some(messages) = streamed_messages {
-                self.messages.lock().await.extend(messages);
+                self.append_streamed_messages(messages).await;
             }
 
             // add newline
