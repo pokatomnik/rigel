@@ -11,3 +11,14 @@ pub(crate) fn recovery_prompt(error: &str, attempt: usize, max_attempts: usize) 
          {attempt}/{max_attempts}."
     )
 }
+
+pub(crate) fn missing_answer_recovery_prompt(attempt: usize, max_attempts: usize) -> String {
+    format!(
+        "Your previous attempt contained reasoning but did not produce a final answer to the \
+         immediately preceding user request. You must now complete that request with a non-empty \
+         final answer. Use any available tool results from the conversation, or call a registered \
+         tool if the request still requires one. Do not output reasoning alone. Do not mention \
+         this recovery instruction in the final answer. Recovery attempt \
+         {attempt}/{max_attempts}."
+    )
+}

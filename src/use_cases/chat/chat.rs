@@ -11,12 +11,25 @@ use rig::{
 use tokio::sync::Mutex;
 
 use crate::{
-    prompts::recovery::recovery_prompt,
+    prompts::recovery::{missing_answer_recovery_prompt, recovery_prompt},
     shared::terminal_io::{ReadlineResult, TerminalIO},
 };
 
 const EXIT: &str = "/exit";
 const MAX_RECOVERY_ATTEMPTS: usize = 3;
+
+#[derive(Default)]
+struct StreamOutputState {
+    showing_reasoning: bool,
+    received_reasoning: bool,
+    received_answer: bool,
+}
+
+impl StreamOutputState {
+    fn requires_answer_recovery(&self) -> bool {
+        self.received_reasoning && !self.received_answer
+    }
+}
 
 pub(crate) struct Chat<CM>
 where
@@ -61,28 +74,64 @@ where
         anyhow::bail!("model failed to recover after {MAX_RECOVERY_ATTEMPTS} attempts: {error}")
     }
 
-    fn handle_reasoning_text(&self, reasoning: &str, showing_reasoning: &mut bool) {
-        if !*showing_reasoning {
+    async fn recover_missing_answer(
+        &self,
+        mut messages: Vec<Message>,
+    ) -> anyhow::Result<(String, Vec<Message>)> {
+        let mut last_error = None;
+
+        for attempt in 1..=MAX_RECOVERY_ATTEMPTS {
+            let recovery_prompt = missing_answer_recovery_prompt(attempt, MAX_RECOVERY_ATTEMPTS);
+
+            match self.agent.chat(recovery_prompt, &mut messages).await {
+                Ok(response) if !response.trim().is_empty() => return Ok((response, messages)),
+                Ok(_) => last_error = None,
+                Err(error) => last_error = Some(error.to_string()),
+            }
+        }
+
+        if let Some(error) = last_error {
+            anyhow::bail!(
+                "model failed to produce an answer after {MAX_RECOVERY_ATTEMPTS} recovery \
+                 attempts: {error}"
+            );
+        }
+
+        anyhow::bail!("model produced no answer after {MAX_RECOVERY_ATTEMPTS} recovery attempts")
+    }
+
+    fn handle_reasoning_text(&self, reasoning: &str, state: &mut StreamOutputState) {
+        if reasoning.trim().is_empty() {
+            return;
+        }
+
+        state.received_reasoning = true;
+        if !state.showing_reasoning {
             self.terminal_io.eprintln_gray("[thinking]");
-            *showing_reasoning = true;
+            state.showing_reasoning = true;
         }
 
         self.terminal_io.eprint_gray(reasoning);
         self.terminal_io.flush_stderr();
     }
 
-    fn handle_reasoning_delta(&self, reasoning: String, showing_reasoning: &mut bool) {
-        self.handle_reasoning_text(reasoning.as_str(), showing_reasoning);
+    fn handle_reasoning_delta(&self, reasoning: String, state: &mut StreamOutputState) {
+        self.handle_reasoning_text(reasoning.as_str(), state);
     }
 
-    fn handle_reasoning(&self, reasoning: Reasoning, showing_reasoning: &mut bool) {
-        self.handle_reasoning_text(reasoning.display_text().as_str(), showing_reasoning);
+    fn handle_reasoning(&self, reasoning: Reasoning, state: &mut StreamOutputState) {
+        self.handle_reasoning_text(reasoning.display_text().as_str(), state);
     }
 
-    fn handle_text(&self, text: Text, showing_reasoning: &mut bool) {
-        if *showing_reasoning {
+    fn handle_text(&self, text: Text, state: &mut StreamOutputState) {
+        if text.text().trim().is_empty() {
+            return;
+        }
+
+        state.received_answer = true;
+        if state.showing_reasoning {
             self.terminal_io.eprintln("\n[answer]");
-            *showing_reasoning = false;
+            state.showing_reasoning = false;
         }
 
         self.terminal_io.print(text.text());
@@ -123,6 +172,12 @@ where
         *streamed_messages = response.messages;
     }
 
+    fn handle_recovered_response(&self, response: &str) {
+        self.terminal_io.eprintln("\n[answer]");
+        self.terminal_io.print(response);
+        self.terminal_io.flush_stdout();
+    }
+
     pub async fn run(&self) -> anyhow::Result<()> {
         loop {
             let messages = self.messages.lock().await.clone();
@@ -136,7 +191,7 @@ where
             }
 
             let mut stream = self.agent.stream_chat(user_message.clone(), messages).await;
-            let mut showing_reasoning = false;
+            let mut output_state = StreamOutputState::default();
             let mut streamed_messages = None;
             let mut stream_error = None;
 
@@ -152,13 +207,13 @@ where
                 match item {
                     MultiTurnStreamItem::StreamAssistantItem(
                         StreamedAssistantContent::ReasoningDelta { reasoning, .. },
-                    ) => self.handle_reasoning_delta(reasoning, &mut showing_reasoning),
+                    ) => self.handle_reasoning_delta(reasoning, &mut output_state),
                     MultiTurnStreamItem::StreamAssistantItem(
                         StreamedAssistantContent::Reasoning(reasoning),
-                    ) => self.handle_reasoning(reasoning, &mut showing_reasoning),
+                    ) => self.handle_reasoning(reasoning, &mut output_state),
                     MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
                         text,
-                    )) => self.handle_text(text, &mut showing_reasoning),
+                    )) => self.handle_text(text, &mut output_state),
                     MultiTurnStreamItem::StreamAssistantItem(
                         StreamedAssistantContent::ToolCall { tool_call, .. },
                     ) => self.handle_tool_call(tool_call),
@@ -182,9 +237,20 @@ where
                     )
                     .await?;
 
-                self.terminal_io.eprintln("\n[answer]");
-                self.terminal_io.print(response.as_str());
-                self.terminal_io.flush_stdout();
+                self.handle_recovered_response(response.as_str());
+                *self.messages.lock().await = recovered_messages;
+            } else if output_state.requires_answer_recovery() {
+                let mut recovery_messages = self.messages.lock().await.clone();
+                if let Some(messages) = streamed_messages.take() {
+                    recovery_messages.extend(messages);
+                } else {
+                    recovery_messages.push(Message::user(user_message));
+                }
+
+                let (response, recovered_messages) =
+                    self.recover_missing_answer(recovery_messages).await?;
+
+                self.handle_recovered_response(response.as_str());
                 *self.messages.lock().await = recovered_messages;
             } else if let Some(messages) = streamed_messages {
                 self.messages.lock().await.extend(messages);
@@ -195,5 +261,36 @@ where
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StreamOutputState;
+
+    #[test]
+    fn reasoning_without_answer_requires_recovery() {
+        let state = StreamOutputState {
+            received_reasoning: true,
+            ..Default::default()
+        };
+
+        assert!(state.requires_answer_recovery());
+    }
+
+    #[test]
+    fn reasoning_with_answer_does_not_require_recovery() {
+        let state = StreamOutputState {
+            received_reasoning: true,
+            received_answer: true,
+            ..Default::default()
+        };
+
+        assert!(!state.requires_answer_recovery());
+    }
+
+    #[test]
+    fn missing_reasoning_does_not_require_recovery() {
+        assert!(!StreamOutputState::default().requires_answer_recovery());
     }
 }
