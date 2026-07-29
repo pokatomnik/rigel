@@ -13,23 +13,11 @@ use tokio::sync::Mutex;
 use crate::{
     prompts::recovery::{missing_answer_recovery_prompt, recovery_prompt},
     shared::terminal_io::{ReadlineResult, TerminalIO},
+    use_cases::chat::stream_output_state::StreamOutputState,
 };
 
 const EXIT: &str = "/exit";
 const MAX_RECOVERY_ATTEMPTS: usize = 3;
-
-#[derive(Default)]
-struct StreamOutputState {
-    showing_reasoning: bool,
-    received_reasoning: bool,
-    received_answer: bool,
-}
-
-impl StreamOutputState {
-    fn requires_answer_recovery(&self) -> bool {
-        self.received_reasoning && !self.received_answer
-    }
-}
 
 pub(crate) struct Chat<CM>
 where
@@ -105,10 +93,10 @@ where
             return;
         }
 
-        state.received_reasoning = true;
-        if !state.showing_reasoning {
+        state.set_received_reasoning(true);
+        if !state.showing_reasoning() {
             self.terminal_io.eprintln_gray("[thinking]");
-            state.showing_reasoning = true;
+            state.set_showing_reasoning(true);
         }
 
         self.terminal_io.eprint_gray(reasoning);
@@ -128,10 +116,10 @@ where
             return;
         }
 
-        state.received_answer = true;
-        if state.showing_reasoning {
+        state.set_received_answer(true);
+        if state.showing_reasoning() {
             self.terminal_io.eprintln("\n[answer]");
-            state.showing_reasoning = false;
+            state.set_showing_reasoning(false);
         }
 
         self.terminal_io.print(text.text());
@@ -270,21 +258,14 @@ mod tests {
 
     #[test]
     fn reasoning_without_answer_requires_recovery() {
-        let state = StreamOutputState {
-            received_reasoning: true,
-            ..Default::default()
-        };
+        let state = StreamOutputState::new(false, true, false);
 
         assert!(state.requires_answer_recovery());
     }
 
     #[test]
     fn reasoning_with_answer_does_not_require_recovery() {
-        let state = StreamOutputState {
-            received_reasoning: true,
-            received_answer: true,
-            ..Default::default()
-        };
+        let state = StreamOutputState::new(false, true, true);
 
         assert!(!state.requires_answer_recovery());
     }
