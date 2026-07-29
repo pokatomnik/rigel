@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     controllers::controller::Controller,
-    prompts::system::SYSTEM_PROMPT,
+    prompts::system::system_prompt,
     shared::terminal_io::TerminalIO,
     tools::add::Adder,
     use_cases::{chat::chat::Chat, model_selector::model_selector::ModelSelector},
@@ -53,7 +53,7 @@ impl Controller<IndexControllerDeps> for IndexController {
 
         let agent = client
             .agent(model_id)
-            .preamble(SYSTEM_PROMPT)
+            .preamble(system_prompt())
             .tool(Adder)
             .default_max_turns(usize::MAX)
             .build();
