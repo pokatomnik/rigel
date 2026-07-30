@@ -11,6 +11,71 @@ agent-callable tools live in `src/tools/`. Keep each module exported through its
 nearest `mod.rs`. Dependencies and crate metadata are maintained in
 `Cargo.toml`, with reproducible versions recorded in `Cargo.lock`.
 
+## Filesystem Tool Architecture
+
+- A tool may access only the workspace in which Rigel started. Capture and
+  canonicalize that root when constructing the tool. Accept workspace-relative
+  paths only; reject absolute paths and `..`. Resolve existing ancestors and
+  symlinks before I/O so neither source nor destination can escape the root.
+  Explicitly protect the workspace root from delete or move operations.
+- Use `tokio::fs` for every filesystem operation. Keep path validation,
+  matching, formatting, hashing, and edit planning as pure functions where
+  practical.
+- Give each tool one narrow responsibility. `list_directory` inspects one
+  directory, `find_paths` recursively matches path globs, `search_text` searches
+  file contents, `stat` returns metadata, and `read_file` returns content.
+  Search tools must not grow into general filesystem APIs.
+- Tool descriptions and successful results must be short, deterministic, and
+  explicit about what changed. Return normalized workspace-relative paths,
+  never canonical absolute paths. Sort collections deterministically.
+- Errors are model-facing recovery data. State what failed, why, which path or
+  argument caused it, and the next corrective action. Prefer stable structured
+  codes such as `PATH_NOT_FOUND`, `PATH_OUTSIDE_WORKSPACE`, or `INVALID_GLOB`
+  where the tool has structured output. Never hide an I/O error behind a generic
+  failure message.
+- Preserve idempotent outcomes as explicit non-errors when the contract calls
+  for them, for example deleting a missing directory returns `not_found`.
+  Conversely, creating an existing file is an error and must direct the model
+  to `apply_patch`.
+- File reads are UTF-8 and return a SHA-256 `revision`. `apply_patch` requires
+  that revision, validates every edit before writing, evaluates edits against
+  the same original text, rejects missing/ambiguous/overlapping matches, and
+  commits atomically. On success it returns the new revision and asks the model
+  to read the file again.
+- Recursive search skips binary files when searching a directory but rejects a
+  directly selected binary file. Built-in search exclusions live in data files
+  included with `include_str!`, not duplicated as Rust literals. Keep search
+  result limits bounded and report truncation.
+
+## Tool Error Recovery
+
+Recovery is designed for weak models, where both malformed and unnecessary tool
+calls are expected. A tool error requires an intelligible next step, not
+necessarily another tool call.
+
+- After an error, accept either a corrected tool call or a non-empty final
+  answer when the failed call was unnecessary or the user request is already
+  complete. Retry only responses containing neither. Prompts must explicitly
+  forbid unrelated calls made only to clear an error state.
+- Do not treat arbitrary success as recovery. Only a later, non-no-op success
+  from the same tool clears its pending failure. In particular, `not_found`
+  does not resolve a previous failure. A final answer may still close the
+  pending state.
+- Recovery state is scoped to one Rig agent run. Do not reconstruct pending
+  failures by scanning old chat history: an older error may already have been
+  intentionally closed by a final answer.
+- Budgets are hard and do not reset after a successful call: at most 12 model
+  turns, 6 failed tool executions, 2 identical failures, 2 empty recovery
+  responses, and 2 invalid-tool retries. Detect a repeated A-B-A-B invocation
+  cycle, including error/no-op cycles.
+- When a failure budget or cycle guard fires, set `ToolChoice::None` for the
+  following completion and request a concise final report of what succeeded and
+  what could not be completed. If the model still emits tools, stop after the
+  invalid-call budget instead of reopening an unbounded loop.
+- `ToolRecoveryHook` writes small `rigel_tool_status` markers into model-visible
+  tool results. `StreamOutputState` consumes those markers but must never
+  suppress a non-empty final answer merely because an earlier tool failed.
+
 ## Build, Test, and Development Commands
 
 - `cargo run -- --help` displays the available CLI options.
