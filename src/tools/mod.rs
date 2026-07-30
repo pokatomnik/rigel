@@ -1,1 +1,12 @@
 pub(crate) mod add;
+pub(crate) mod apply_patch;
+pub(crate) mod create_directory;
+pub(crate) mod create_file;
+pub(crate) mod delete_directory;
+pub(crate) mod find_paths;
+pub(crate) mod list_directory;
+pub(crate) mod move_path;
+pub(crate) mod read_file;
+pub(crate) mod revision;
+pub(crate) mod search_text;
+pub(crate) mod stat;

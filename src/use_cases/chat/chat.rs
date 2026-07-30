@@ -11,9 +11,13 @@ use rig::{
 use tokio::sync::Mutex;
 
 use crate::{
-    prompts::recovery::{missing_answer_recovery_prompt, recovery_prompt},
+    prompts::recovery::{
+        missing_answer_recovery_prompt, recovery_prompt, unresolved_tool_recovery_prompt,
+    },
     shared::terminal_io::TerminalIO,
-    use_cases::chat::stream_output_state::StreamOutputState,
+    use_cases::chat::{
+        stream_output_state::StreamOutputState, tool_recovery::tool_recovery_status,
+    },
 };
 
 const EXIT: &str = "/exit";
@@ -88,6 +92,35 @@ where
         anyhow::bail!("model produced no answer after {MAX_RECOVERY_ATTEMPTS} recovery attempts")
     }
 
+    async fn recover_unresolved_tool(
+        &self,
+        mut messages: Vec<Message>,
+    ) -> anyhow::Result<(String, Vec<Message>)> {
+        let mut last_error = None;
+
+        for attempt in 1..=MAX_RECOVERY_ATTEMPTS {
+            let recovery_prompt = unresolved_tool_recovery_prompt(attempt, MAX_RECOVERY_ATTEMPTS);
+
+            match self.agent.chat(recovery_prompt, &mut messages).await {
+                Ok(response) if !response.trim().is_empty() => return Ok((response, messages)),
+                Ok(_) => last_error = None,
+                Err(error) => last_error = Some(error.to_string()),
+            }
+        }
+
+        if let Some(error) = last_error {
+            anyhow::bail!(
+                "model failed to correct a tool error after {MAX_RECOVERY_ATTEMPTS} recovery \
+                 attempts: {error}"
+            );
+        }
+
+        anyhow::bail!(
+            "model produced no answer after correcting a tool error in \
+             {MAX_RECOVERY_ATTEMPTS} recovery attempts"
+        )
+    }
+
     fn handle_reasoning_text(&self, reasoning: &str, state: &mut StreamOutputState) {
         if reasoning.trim().is_empty() {
             return;
@@ -115,7 +148,7 @@ where
 
     /// Handles an answer-text item from the assistant stream.
     fn handle_text(&self, text: Text, state: &mut StreamOutputState) {
-        if text.text().trim().is_empty() {
+        if text.text().trim().is_empty() || !state.can_emit_answer() {
             return;
         }
 
@@ -141,7 +174,8 @@ where
     }
 
     /// Handles a tool-result item emitted by the user stream.
-    fn handle_tool_result(&self, tool_result: ToolResult) {
+    fn handle_tool_result(&self, tool_result: ToolResult, state: &mut StreamOutputState) {
+        state.record_tool_result(tool_recovery_status(&tool_result));
         let output = tool_result
             .content
             .iter()
@@ -190,7 +224,7 @@ where
             MultiTurnStreamItem::StreamUserItem(StreamedUserContent::ToolResult {
                 tool_result,
                 ..
-            }) => self.handle_tool_result(tool_result),
+            }) => self.handle_tool_result(tool_result, output_state),
             MultiTurnStreamItem::FinalResponse(response) => {
                 self.handle_final_response(response, streamed_messages)
             }
@@ -239,6 +273,27 @@ where
         Ok(())
     }
 
+    async fn recover_after_unresolved_tool(
+        &self,
+        user_message: String,
+        streamed_messages: &mut Option<Vec<Message>>,
+    ) -> anyhow::Result<()> {
+        let mut recovery_messages = self.messages.lock().await.clone();
+        if let Some(messages) = streamed_messages.take() {
+            recovery_messages.extend(messages);
+        } else {
+            recovery_messages.push(Message::user(user_message));
+        }
+
+        let (response, recovered_messages) =
+            self.recover_unresolved_tool(recovery_messages).await?;
+
+        self.handle_recovered_response(response.as_str());
+        *self.messages.lock().await = recovered_messages;
+
+        Ok(())
+    }
+
     async fn append_streamed_messages(&self, messages: Vec<Message>) {
         self.messages.lock().await.extend(messages);
     }
@@ -273,6 +328,9 @@ where
             if let Some(error) = stream_error {
                 self.recover_after_stream_error(user_message.as_str(), error)
                     .await?;
+            } else if output_state.requires_tool_recovery() {
+                self.recover_after_unresolved_tool(user_message, &mut streamed_messages)
+                    .await?;
             } else if output_state.requires_answer_recovery() {
                 self.recover_after_missing_answer(user_message, &mut streamed_messages)
                     .await?;
@@ -291,6 +349,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::StreamOutputState;
+    use crate::use_cases::chat::tool_recovery::ToolRecoveryStatus;
 
     #[test]
     fn reasoning_without_answer_requires_recovery() {
@@ -309,5 +368,37 @@ mod tests {
     #[test]
     fn missing_reasoning_does_not_require_recovery() {
         assert!(!StreamOutputState::default().requires_answer_recovery());
+    }
+
+    #[test]
+    fn tool_error_blocks_answer_and_requires_tool_recovery() {
+        let mut state = StreamOutputState::default();
+
+        state.record_tool_result(ToolRecoveryStatus::Error);
+
+        assert!(!state.can_emit_answer());
+        assert!(state.requires_tool_recovery());
+        assert!(!state.requires_answer_recovery());
+    }
+
+    #[test]
+    fn successful_correction_unblocks_answer() {
+        let mut state = StreamOutputState::default();
+        state.record_tool_result(ToolRecoveryStatus::Error);
+
+        state.record_tool_result(ToolRecoveryStatus::Recovered);
+
+        assert!(state.can_emit_answer());
+        assert!(!state.requires_tool_recovery());
+        assert!(state.requires_answer_recovery());
+    }
+
+    #[test]
+    fn tool_result_without_answer_requires_answer_recovery() {
+        let mut state = StreamOutputState::default();
+
+        state.record_tool_result(ToolRecoveryStatus::None);
+
+        assert!(state.requires_answer_recovery());
     }
 }

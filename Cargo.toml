@@ -9,7 +9,11 @@ clap = { version = "4.6.4", features = ["derive"] }
 console = "0.16.4"
 dialoguer = { version = "0.12.0", features = ["fuzzy-select"] }
 futures = "0.3.32"
+glob = "0.3.4"
+ignore = "0.4.25"
+regex = "1.13.1"
 rig = "0.41.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = "0.10.9"
 tokio = { version = "1.53.1", features = ["full", "macros", "rt-multi-thread"] }

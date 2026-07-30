@@ -22,3 +22,14 @@ pub(crate) fn missing_answer_recovery_prompt(attempt: usize, max_attempts: usize
          {attempt}/{max_attempts}."
     )
 }
+
+pub(crate) fn unresolved_tool_recovery_prompt(attempt: usize, max_attempts: usize) -> String {
+    format!(
+        "A tool required by the immediately preceding user request failed, and the previous \
+         response did not recover from that failure. Review the tool error already present in \
+         the conversation. Continue the original request now: correct the tool choice or its \
+         arguments and call a registered tool again. Do not replace the required operation with \
+         a text answer. Do not finish until a corrective tool call succeeds, then provide a \
+         non-empty final answer. Recovery attempt {attempt}/{max_attempts}."
+    )
+}

@@ -37,7 +37,10 @@ Tests currently use Rust's built-in test framework and sit beside the code in
 `#[cfg(test)] mod tests` blocks. Name tests after observable behavior, such as
 `reasoning_without_answer_requires_recovery`. Add tests for success, failure,
 and edge cases when changing chat state or recovery logic. No coverage threshold
-is configured; prioritize meaningful behavioral assertions.
+is configured; prioritize meaningful behavioral assertions. Unit tests must not
+perform any I/O, including filesystem or network access. Do not create temporary
+files or directories or contact external services from unit tests. Extract pure
+logic or inject and mock I/O boundaries instead.
 
 ## Commit & Pull Request Guidelines
 

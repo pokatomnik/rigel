@@ -1,8 +1,12 @@
+use crate::use_cases::chat::tool_recovery::ToolRecoveryStatus;
+
 #[derive(Default)]
 pub(crate) struct StreamOutputState {
     showing_reasoning: bool,
     received_reasoning: bool,
     received_answer: bool,
+    received_tool_result: bool,
+    pending_tool_recovery: bool,
 }
 
 impl StreamOutputState {
@@ -13,9 +17,11 @@ impl StreamOutputState {
         received_answer: bool,
     ) -> StreamOutputState {
         Self {
-            showing_reasoning: showing_reasoning,
-            received_reasoning: received_reasoning,
-            received_answer: received_answer,
+            showing_reasoning,
+            received_reasoning,
+            received_answer,
+            received_tool_result: false,
+            pending_tool_recovery: false,
         }
     }
 
@@ -35,7 +41,27 @@ impl StreamOutputState {
         self.received_answer = received_answer;
     }
 
+    pub fn record_tool_result(&mut self, status: ToolRecoveryStatus) {
+        self.received_tool_result = true;
+
+        match status {
+            ToolRecoveryStatus::Error => self.pending_tool_recovery = true,
+            ToolRecoveryStatus::Recovered => self.pending_tool_recovery = false,
+            ToolRecoveryStatus::None => {}
+        }
+    }
+
+    pub fn can_emit_answer(&self) -> bool {
+        !self.pending_tool_recovery
+    }
+
+    pub fn requires_tool_recovery(&self) -> bool {
+        self.pending_tool_recovery
+    }
+
     pub fn requires_answer_recovery(&self) -> bool {
-        self.received_reasoning && !self.received_answer
+        (self.received_reasoning || self.received_tool_result)
+            && !self.received_answer
+            && !self.pending_tool_recovery
     }
 }
