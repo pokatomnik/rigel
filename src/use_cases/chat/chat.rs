@@ -22,6 +22,7 @@ use crate::{
 
 const EXIT: &str = "/exit";
 const MAX_RECOVERY_ATTEMPTS: usize = 3;
+const MAX_TOOL_RECOVERY_ATTEMPTS: usize = 2;
 
 pub(crate) struct Chat<CM>
 where
@@ -98,8 +99,9 @@ where
     ) -> anyhow::Result<(String, Vec<Message>)> {
         let mut last_error = None;
 
-        for attempt in 1..=MAX_RECOVERY_ATTEMPTS {
-            let recovery_prompt = unresolved_tool_recovery_prompt(attempt, MAX_RECOVERY_ATTEMPTS);
+        for attempt in 1..=MAX_TOOL_RECOVERY_ATTEMPTS {
+            let recovery_prompt =
+                unresolved_tool_recovery_prompt(attempt, MAX_TOOL_RECOVERY_ATTEMPTS);
 
             match self.agent.chat(recovery_prompt, &mut messages).await {
                 Ok(response) if !response.trim().is_empty() => return Ok((response, messages)),
@@ -110,14 +112,14 @@ where
 
         if let Some(error) = last_error {
             anyhow::bail!(
-                "model failed to correct a tool error after {MAX_RECOVERY_ATTEMPTS} recovery \
+                "model failed to correct a tool error after {MAX_TOOL_RECOVERY_ATTEMPTS} recovery \
                  attempts: {error}"
             );
         }
 
         anyhow::bail!(
             "model produced no answer after correcting a tool error in \
-             {MAX_RECOVERY_ATTEMPTS} recovery attempts"
+             {MAX_TOOL_RECOVERY_ATTEMPTS} recovery attempts"
         )
     }
 
@@ -148,7 +150,7 @@ where
 
     /// Handles an answer-text item from the assistant stream.
     fn handle_text(&self, text: Text, state: &mut StreamOutputState) {
-        if text.text().trim().is_empty() || !state.can_emit_answer() {
+        if text.text().trim().is_empty() {
             return;
         }
 
@@ -371,24 +373,33 @@ mod tests {
     }
 
     #[test]
-    fn tool_error_blocks_answer_and_requires_tool_recovery() {
+    fn tool_error_requires_a_follow_up_action() {
         let mut state = StreamOutputState::default();
 
         state.record_tool_result(ToolRecoveryStatus::Error);
 
-        assert!(!state.can_emit_answer());
         assert!(state.requires_tool_recovery());
         assert!(!state.requires_answer_recovery());
     }
 
     #[test]
-    fn successful_correction_unblocks_answer() {
+    fn final_answer_after_tool_error_completes_recovery() {
+        let mut state = StreamOutputState::default();
+        state.record_tool_result(ToolRecoveryStatus::Error);
+
+        state.set_received_answer(true);
+
+        assert!(!state.requires_tool_recovery());
+        assert!(!state.requires_answer_recovery());
+    }
+
+    #[test]
+    fn successful_correction_requires_a_final_answer() {
         let mut state = StreamOutputState::default();
         state.record_tool_result(ToolRecoveryStatus::Error);
 
         state.record_tool_result(ToolRecoveryStatus::Recovered);
 
-        assert!(state.can_emit_answer());
         assert!(!state.requires_tool_recovery());
         assert!(state.requires_answer_recovery());
     }

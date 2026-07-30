@@ -25,11 +25,11 @@ pub(crate) fn missing_answer_recovery_prompt(attempt: usize, max_attempts: usize
 
 pub(crate) fn unresolved_tool_recovery_prompt(attempt: usize, max_attempts: usize) -> String {
     format!(
-        "A tool required by the immediately preceding user request failed, and the previous \
-         response did not recover from that failure. Review the tool error already present in \
-         the conversation. Continue the original request now: correct the tool choice or its \
-         arguments and call a registered tool again. Do not replace the required operation with \
-         a text answer. Do not finish until a corrective tool call succeeds, then provide a \
-         non-empty final answer. Recovery attempt {attempt}/{max_attempts}."
+        "A tool call failed and the previous response contained neither a corrective tool call nor \
+         a final answer. Review the tool error already present in the conversation. If the failed \
+         operation is still required, correct the tool choice or arguments and try again. If the \
+         call was unnecessary or the user request is already complete, return a non-empty final \
+         answer instead. Do not call an unrelated tool. Recovery attempt \
+         {attempt}/{max_attempts}."
     )
 }

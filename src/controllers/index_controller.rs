@@ -23,6 +23,7 @@ use rig::{
 };
 
 const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
+const MAX_AGENT_TURNS: usize = 12;
 
 #[derive(Args, Debug)]
 #[clap(rename_all = "kebab-case")]
@@ -84,7 +85,7 @@ impl Controller<IndexControllerDeps> for IndexController {
             .tool(read_file)
             .tool(search_text)
             .tool(stat)
-            .default_max_turns(usize::MAX)
+            .default_max_turns(MAX_AGENT_TURNS)
             .build();
 
         let chat = Chat::new(agent, deps.terminal_io.clone(), chat_history);

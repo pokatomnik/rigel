@@ -39,6 +39,9 @@ impl StreamOutputState {
 
     pub fn set_received_answer(&mut self, received_answer: bool) {
         self.received_answer = received_answer;
+        if received_answer {
+            self.pending_tool_recovery = false;
+        }
     }
 
     pub fn record_tool_result(&mut self, status: ToolRecoveryStatus) {
@@ -51,12 +54,8 @@ impl StreamOutputState {
         }
     }
 
-    pub fn can_emit_answer(&self) -> bool {
-        !self.pending_tool_recovery
-    }
-
     pub fn requires_tool_recovery(&self) -> bool {
-        self.pending_tool_recovery
+        self.pending_tool_recovery && !self.received_answer
     }
 
     pub fn requires_answer_recovery(&self) -> bool {
