@@ -470,6 +470,10 @@ where
                 command_parser::CommandParserResult::Prompt(prompt) => {
                     user_message = prompt;
                 }
+                command_parser::CommandParserResult::New => {
+                    self.replace_messages(Vec::new()).await;
+                    continue;
+                }
             }
 
             let mut stream = self.agent.stream_chat(user_message.clone(), messages).await;

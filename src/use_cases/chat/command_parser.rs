@@ -20,6 +20,7 @@ pub(crate) enum CommandParserResult {
     CommandExit,
     CommandContinue,
     Prompt(String),
+    New,
 }
 
 pub(crate) struct CommandParser {
@@ -33,6 +34,8 @@ impl CommandParser {
         self.terminal_io
             .eprintln("/skill - Get a skill's instructions");
         self.terminal_io.eprintln("/help - Show this help message");
+        self.terminal_io
+            .eprintln("/new - forget everything and start from the beginning");
 
         CommandParserResult::CommandContinue
     }
@@ -156,6 +159,7 @@ impl CommandParser {
             "/exit" => CommandParserResult::CommandExit,
             "/skill" => self.get_skill().await,
             "/help" => self.handle_help(),
+            "/new" => CommandParserResult::New,
             _ => CommandParserResult::Prompt(raw_input),
         }
     }
