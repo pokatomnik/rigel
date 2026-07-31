@@ -70,10 +70,11 @@ impl Controller<IndexControllerDeps> for IndexController {
         let read_file = ReadFile::new().await?;
         let search_text = SearchText::new().await?;
         let stat = Stat::new().await?;
+        let system_prompt = system_prompt().await;
 
         let agent = client
             .agent(model_id)
-            .preamble(system_prompt())
+            .preamble(system_prompt.as_str())
             .add_hook(ToolRecoveryHook)
             .tool(Adder)
             .tool(apply_patch)
