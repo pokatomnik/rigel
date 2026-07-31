@@ -114,6 +114,7 @@ impl Controller<IndexControllerDeps> for IndexController {
             },
         );
 
+        terminal_io.eprintln("Let's chat. Type /help to get available commands");
         let chat_result = chat.run().await;
         drop(chat);
         let history_result = history.shutdown().await;
