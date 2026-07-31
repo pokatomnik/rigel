@@ -6,9 +6,9 @@ use crate::{
     shared::terminal_io::TerminalIO,
     tools::{
         add::Adder, apply_patch::ApplyPatch, create_directory::CreateDirectory,
-        create_file::CreateFile, delete_directory::DeleteDirectory, find_paths::FindPaths,
-        list_directory::ListDirectory, move_path::MovePath, read_file::ReadFile,
-        search_text::SearchText, stat::Stat,
+        create_file::CreateFile, delete_directory::DeleteDirectory, delete_file::DeleteFile,
+        find_paths::FindPaths, list_directory::ListDirectory, move_path::MovePath,
+        read_file::ReadFile, search_text::SearchText, stat::Stat,
     },
     use_cases::{
         chat::{chat::Chat, tool_recovery::ToolRecoveryHook},
@@ -62,10 +62,11 @@ impl Controller<IndexControllerDeps> for IndexController {
         let apply_patch = ApplyPatch::new().await?;
         let create_directory = CreateDirectory::new().await?;
         let create_file = CreateFile::new().await?;
-        let delete_directory = DeleteDirectory::new().await?;
+        let delete_directory = DeleteDirectory::new(deps.terminal_io.clone()).await?;
+        let delete_file = DeleteFile::new(deps.terminal_io.clone()).await?;
         let find_paths = FindPaths::new().await?;
         let list_directory = ListDirectory::new().await?;
-        let move_path = MovePath::new().await?;
+        let move_path = MovePath::new(deps.terminal_io.clone()).await?;
         let read_file = ReadFile::new().await?;
         let search_text = SearchText::new().await?;
         let stat = Stat::new().await?;
@@ -79,6 +80,7 @@ impl Controller<IndexControllerDeps> for IndexController {
             .tool(create_directory)
             .tool(create_file)
             .tool(delete_directory)
+            .tool(delete_file)
             .tool(find_paths)
             .tool(list_directory)
             .tool(move_path)

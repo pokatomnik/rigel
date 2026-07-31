@@ -10,6 +10,7 @@ use crate::{
 
 mod cmd;
 mod controllers;
+mod entities;
 mod prompts;
 mod shared;
 mod tools;

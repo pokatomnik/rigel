@@ -5,6 +5,8 @@ use std::{
 
 use dialoguer::theme::ColorfulTheme;
 
+use crate::entities::tool_confirm_result::ToolConfirmResult;
+
 #[derive(Default)]
 pub(crate) struct TerminalIO;
 
@@ -33,6 +35,21 @@ impl TerminalIO {
 
     pub fn flush_stdout(&self) {
         let _ = io::stdout().flush();
+    }
+
+    pub fn confirm_toll_call(&self, prompt: &str) -> ToolConfirmResult {
+        let items: &'static [ToolConfirmResult] =
+            &[ToolConfirmResult::No, ToolConfirmResult::YesOnce];
+        let answer_idx = dialoguer::Select::new()
+            .with_prompt(prompt)
+            .items(items)
+            .default(0)
+            .interact()
+            .unwrap_or_default();
+        items
+            .get(answer_idx)
+            .map(ToOwned::to_owned)
+            .unwrap_or_default()
     }
 
     pub fn fuzzy_select<'a, I>(&self, prompt: &str, items: &'a [I]) -> anyhow::Result<&'a I>

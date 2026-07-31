@@ -1,11 +1,14 @@
 use std::{
     env,
     path::{Component, Path, PathBuf},
+    sync::Arc,
 };
 
 use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
+
+use crate::{entities::tool_confirm_result::ToolConfirmResult, shared::terminal_io::TerminalIO};
 
 #[derive(Deserialize)]
 pub(crate) struct DeleteDirectoryArgs {
@@ -29,10 +32,11 @@ enum DeleteDirectoryStatus {
 
 pub(crate) struct DeleteDirectory {
     root: PathBuf,
+    terminal_io: Arc<TerminalIO>,
 }
 
 impl DeleteDirectory {
-    pub(crate) async fn new() -> Result<Self, ToolExecutionError> {
+    pub(crate) async fn new(terminal_io: Arc<TerminalIO>) -> Result<Self, ToolExecutionError> {
         let current_dir = env::current_dir().map_err(|error| {
             ToolExecutionError::other(format!("Cannot determine the project root: {error}"))
                 .with_source(error)
@@ -45,7 +49,17 @@ impl DeleteDirectory {
             .with_source(error)
         })?;
 
-        Ok(Self { root })
+        Ok(Self { root, terminal_io })
+    }
+
+    pub(crate) fn confirm(&self, target: &Path) -> ToolConfirmResult {
+        self.terminal_io.confirm_toll_call(
+            format!(
+                "Are you sure about removing a directory \"{}\"",
+                target.to_string_lossy().to_string()
+            )
+            .as_str(),
+        )
     }
 
     fn normalize_relative_path(path: &str) -> Result<PathBuf, ToolExecutionError> {
@@ -140,6 +154,13 @@ impl Tool for DeleteDirectory {
     ) -> Result<Self::Output, Self::Error> {
         let relative_path = Self::normalize_relative_path(&args.path)?;
         let target = self.root.join(relative_path);
+
+        let confirmed = self.confirm(target.as_path());
+
+        if let ToolConfirmResult::No = confirmed {
+            return Err(user_forbid());
+        }
+
         let (existing_ancestor, resolved_target) =
             self.closest_existing_ancestor(&target, &args.path).await?;
 
@@ -242,6 +263,12 @@ fn directory_result(path: &str, status: DeleteDirectoryStatus) -> DeleteDirector
         status,
         message,
     }
+}
+
+fn user_forbid() -> ToolExecutionError {
+    ToolExecutionError::refused(format!(
+        "The user has prohibited deletion of this directory. Try another method or ask the user what to do instead."
+    )).with_code("USER_FORBID")
 }
 
 fn outside_project_error(path: &str) -> ToolExecutionError {

@@ -1,12 +1,15 @@
 use std::{
     env,
     path::{Component, Path, PathBuf},
+    sync::Arc,
 };
 
 use futures::future::BoxFuture;
 use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
+
+use crate::{entities::tool_confirm_result::ToolConfirmResult, shared::terminal_io::TerminalIO};
 
 #[derive(Deserialize)]
 pub(crate) struct MovePathArgs {
@@ -75,10 +78,11 @@ struct MergePlan {
 
 pub(crate) struct MovePath {
     root: PathBuf,
+    terminal_io: Arc<TerminalIO>,
 }
 
 impl MovePath {
-    pub(crate) async fn new() -> Result<Self, ToolExecutionError> {
+    pub(crate) async fn new(terminal_io: Arc<TerminalIO>) -> Result<Self, ToolExecutionError> {
         let current_dir = env::current_dir().map_err(|error| {
             ToolExecutionError::other(format!("Cannot determine the project root: {error}"))
                 .with_source(error)
@@ -91,7 +95,18 @@ impl MovePath {
             .with_source(error)
         })?;
 
-        Ok(Self { root })
+        Ok(Self { root, terminal_io })
+    }
+
+    pub(crate) fn confirm(&self, from: &Path, to: &Path) -> ToolConfirmResult {
+        self.terminal_io.confirm_toll_call(
+            format!(
+                "Are you sure about moving \"{}\" to \"{}\"?",
+                from.to_string_lossy(),
+                to.to_string_lossy(),
+            )
+            .as_str(),
+        )
     }
 
     fn normalize_relative_path(
@@ -667,6 +682,15 @@ impl Tool for MovePath {
     ) -> Result<Self::Output, Self::Error> {
         let source_relative = Self::normalize_relative_path(&args.from, "from", false)?;
         let destination_relative = Self::normalize_relative_path(&args.to, "to", true)?;
+        let confirmed = self.confirm(
+            self.root.join(&source_relative).as_path(),
+            self.root.join(&destination_relative).as_path(),
+        );
+
+        if let ToolConfirmResult::No = confirmed {
+            return Err(user_forbid(&args.from, &args.to));
+        }
+
         let source = self
             .inspect_path(&source_relative, &args.from, "from")
             .await?;
@@ -757,6 +781,13 @@ fn outside_project_error(path: &str, argument: &str) -> ToolExecutionError {
     ToolExecutionError::refused(format!(
         "Cannot move path: \"{argument}\" value \"{path}\" resolves outside the project root."
     ))
+}
+
+fn user_forbid(from: &str, to: &str) -> ToolExecutionError {
+    ToolExecutionError::refused(format!(
+        "The user has prohibited moving \"{from}\" to \"{to}\". Try another method or ask the user what to do instead."
+    ))
+    .with_code("USER_FORBID")
 }
 
 fn same_path_error(from: &str, to: &str) -> ToolExecutionError {
@@ -932,6 +963,20 @@ mod tests {
             error.model_feedback(),
             Some(
                 "Cannot move \"file.txt\" to \"file.txt\": source and destination are the same path."
+            )
+        );
+    }
+
+    #[test]
+    fn user_refusal_is_clear_and_model_visible() {
+        let error = user_forbid("old.txt", "archive/new.txt");
+
+        assert!(error.is_refusal());
+        assert_eq!(error.code(), Some("USER_FORBID"));
+        assert_eq!(
+            error.model_feedback(),
+            Some(
+                "The user has prohibited moving \"old.txt\" to \"archive/new.txt\". Try another method or ask the user what to do instead."
             )
         );
     }
