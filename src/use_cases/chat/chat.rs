@@ -16,6 +16,7 @@ use crate::{
     },
     shared::terminal_io::TerminalIO,
     use_cases::chat::{
+        command_parser::{self, CommandParser},
         recovery_error::{
             format_recovery_stopped_notice, recovery_context_from_prompt_error,
             recovery_context_from_streaming_error,
@@ -25,7 +26,6 @@ use crate::{
     },
 };
 
-const EXIT: &str = "/exit";
 const MAX_RECOVERY_ATTEMPTS: usize = 3;
 const MAX_TOOL_RECOVERY_ATTEMPTS: usize = 2;
 
@@ -45,6 +45,7 @@ where
     terminal_io: Arc<TerminalIO>,
     messages: Arc<Mutex<Vec<Message>>>,
     on_messages_change: F,
+    command_parser: CommandParser,
 }
 
 impl<CM, F> Chat<CM, F>
@@ -63,11 +64,13 @@ where
         on_messages_change: F,
     ) -> Self {
         let messages = Arc::new(Mutex::new(messages));
+        let command_parser = CommandParser::new(terminal_io.clone());
         Self {
             agent,
-            terminal_io,
+            terminal_io: terminal_io.clone(),
             messages,
             on_messages_change,
+            command_parser,
         }
     }
 
@@ -459,10 +462,14 @@ where
         loop {
             let messages = self.messages.lock().await.clone();
 
-            let user_message = self.terminal_io.readline()?;
-
-            if user_message == EXIT {
-                break;
+            let mut user_message = self.terminal_io.readline()?;
+            let command = self.command_parser.parse(user_message).await;
+            match command {
+                command_parser::CommandParserResult::CommandExit => break,
+                command_parser::CommandParserResult::CommandContinue => continue,
+                command_parser::CommandParserResult::Prompt(prompt) => {
+                    user_message = prompt;
+                }
             }
 
             let mut stream = self.agent.stream_chat(user_message.clone(), messages).await;
