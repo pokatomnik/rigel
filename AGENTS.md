@@ -11,6 +11,27 @@ agent-callable tools live in `src/tools/`. Keep each module exported through its
 nearest `mod.rs`. Dependencies and crate metadata are maintained in
 `Cargo.toml`, with reproducible versions recorded in `Cargo.lock`.
 
+## Chat Run Loop Architecture
+
+`Chat::run` in `src/use_cases/chat/chat.rs` is core project functionality and
+must remain a simple, linear orchestration loop. Treat this as a strict
+contribution rule, not a style preference.
+
+- Keep `Chat::run` focused on sequencing the high-level chat steps: read user
+  input, run the model stream, choose the completion or recovery path, report
+  the turn outcome, and continue or exit.
+- Any new substantive step added to the chat loop must be implemented as a
+  clearly named method on `Chat` and invoked from `run`. This includes parsing,
+  formatting, state transitions, history mutation, recovery preparation, and
+  error-handling details.
+- Do not add nested workflow logic, multi-step transformations, or detailed
+  branch bodies directly to `run` unless they are strictly necessary to express
+  the top-level control flow.
+- If a change makes `run` harder to read from top to bottom, refactor the new
+  logic out before considering the change complete. A reviewer should be able
+  to understand the full lifecycle of one user turn from `run` without reading
+  implementation details there.
+
 ## Filesystem Tool Architecture
 
 - A tool may access only the workspace in which Rigel started. Capture and

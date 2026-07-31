@@ -4,7 +4,7 @@ use futures::StreamExt;
 use rig::{
     Agent,
     agent::{MultiTurnStreamItem, PromptResponse, StreamingError},
-    completion::{Chat as RigChat, CompletionModel, PromptError},
+    completion::{Chat as RigChat, CompletionModel},
     message::{Message, Reasoning, Text, ToolCall, ToolResult, ToolResultContent},
     streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
 };
@@ -16,7 +16,12 @@ use crate::{
     },
     shared::terminal_io::TerminalIO,
     use_cases::chat::{
-        stream_output_state::StreamOutputState, tool_recovery::tool_recovery_status,
+        recovery_error::{
+            format_recovery_stopped_notice, recovery_context_from_prompt_error,
+            recovery_context_from_streaming_error,
+        },
+        stream_output_state::StreamOutputState,
+        tool_recovery::tool_recovery_status,
     },
 };
 
@@ -24,38 +29,13 @@ const EXIT: &str = "/exit";
 const MAX_RECOVERY_ATTEMPTS: usize = 3;
 const MAX_TOOL_RECOVERY_ATTEMPTS: usize = 2;
 
+/// An exhausted recovery run together with the latest conversation state it produced.
 struct RecoveryFailure {
     error: String,
     messages: Vec<Message>,
 }
 
-fn prompt_error_context(error: PromptError) -> (String, Option<Vec<Message>>) {
-    let error_message = error.to_string();
-    let messages = match error {
-        PromptError::MaxTurnsError { chat_history, .. }
-        | PromptError::UnknownToolCall { chat_history, .. } => Some(*chat_history),
-        PromptError::PromptCancelled { chat_history, .. } => Some(chat_history),
-        _ => None,
-    };
-
-    (error_message, messages)
-}
-
-fn streaming_error_context(error: StreamingError) -> (String, Option<Vec<Message>>) {
-    match error {
-        StreamingError::Prompt(error) => prompt_error_context(*error),
-        error => (error.to_string(), None),
-    }
-}
-
-fn recovery_stopped_message(error: &str) -> String {
-    format!(
-        "[automatic recovery stopped: {error}]\n\
-         Review the tool errors above, then enter a new message with instructions for the model, \
-         or /exit."
-    )
-}
-
+/// Owns the interactive conversation, streams model output, and coordinates automatic recovery.
 pub(crate) struct Chat<CM, F>
 where
     CM: CompletionModel,
@@ -72,6 +52,10 @@ where
     CM: CompletionModel + 'static,
     F: Fn(&[&Message]) + 'static,
 {
+    /// Creates a chat session from an agent, terminal adapter, existing history, and change hook.
+    ///
+    /// The supplied history becomes the initial model context. `on_messages_change` is called
+    /// whenever this session commits a new version of that history.
     pub fn new(
         agent: Agent<CM>,
         terminal_io: Arc<TerminalIO>,
@@ -87,6 +71,14 @@ where
         }
     }
 
+    /// Retries a model run that ended with a streaming or runtime error.
+    ///
+    /// Each retry includes the latest error in a corrective prompt. When Rig returns canonical
+    /// history with a failed attempt, that history replaces the local recovery copy so later
+    /// retries and eventual user guidance retain all attempted tool calls and results.
+    ///
+    /// Returns the first successful response and its accumulated history, or `RecoveryFailure`
+    /// after [`MAX_RECOVERY_ATTEMPTS`] attempts.
     async fn recover_response(
         &self,
         mut messages: Vec<Message>,
@@ -100,9 +92,9 @@ where
             match self.agent.chat(recovery_prompt, &mut messages).await {
                 Ok(response) => return Ok((response, messages)),
                 Err(recovery_error) => {
-                    let (recovery_error, failure_messages) = prompt_error_context(recovery_error);
-                    error = recovery_error;
-                    if let Some(failure_messages) = failure_messages {
+                    let context = recovery_context_from_prompt_error(recovery_error);
+                    error = context.message;
+                    if let Some(failure_messages) = context.chat_history {
                         messages = failure_messages;
                     }
                 }
@@ -117,6 +109,11 @@ where
         })
     }
 
+    /// Requests a non-empty final answer after a stream produced reasoning but no answer text.
+    ///
+    /// Empty successful responses are treated as incomplete and retried. Prompt failures update
+    /// the working history when Rig provides a canonical failure history. Exhausting the retry
+    /// budget returns the latest history so it can still be saved for a user follow-up.
     async fn recover_missing_answer(
         &self,
         mut messages: Vec<Message>,
@@ -130,9 +127,9 @@ where
                 Ok(response) if !response.trim().is_empty() => return Ok((response, messages)),
                 Ok(_) => last_error = None,
                 Err(error) => {
-                    let (error, failure_messages) = prompt_error_context(error);
-                    last_error = Some(error);
-                    if let Some(failure_messages) = failure_messages {
+                    let context = recovery_context_from_prompt_error(error);
+                    last_error = Some(context.message);
+                    if let Some(failure_messages) = context.chat_history {
                         messages = failure_messages;
                     }
                 }
@@ -151,6 +148,11 @@ where
         Err(RecoveryFailure { error, messages })
     }
 
+    /// Asks the model to resolve a tool failure that was left without a corrective action.
+    ///
+    /// A recovery succeeds only when the model returns a non-empty final answer; further tool
+    /// calls are handled internally by the agent run. The smaller tool-recovery budget prevents
+    /// an unresolved tool loop from indefinitely delaying control from returning to the user.
     async fn recover_unresolved_tool(
         &self,
         mut messages: Vec<Message>,
@@ -165,9 +167,9 @@ where
                 Ok(response) if !response.trim().is_empty() => return Ok((response, messages)),
                 Ok(_) => last_error = None,
                 Err(error) => {
-                    let (error, failure_messages) = prompt_error_context(error);
-                    last_error = Some(error);
-                    if let Some(failure_messages) = failure_messages {
+                    let context = recovery_context_from_prompt_error(error);
+                    last_error = Some(context.message);
+                    if let Some(failure_messages) = context.chat_history {
                         messages = failure_messages;
                     }
                 }
@@ -188,6 +190,10 @@ where
         Err(RecoveryFailure { error, messages })
     }
 
+    /// Records and prints non-empty reasoning text while maintaining reasoning display state.
+    ///
+    /// The first reasoning fragment opens a `[thinking]` section. All fragments are written to
+    /// stderr in the subdued terminal style and flushed immediately for live streaming output.
     fn handle_reasoning_text(&self, reasoning: &str, state: &mut StreamOutputState) {
         if reasoning.trim().is_empty() {
             return;
@@ -203,17 +209,20 @@ where
         self.terminal_io.flush_stderr();
     }
 
-    /// Handles an incremental reasoning-text chunk from the assistant stream.
+    /// Adapts an incremental reasoning delta to the shared reasoning renderer.
     fn handle_reasoning_delta(&self, reasoning: String, state: &mut StreamOutputState) {
         self.handle_reasoning_text(reasoning.as_str(), state);
     }
 
-    /// Handles a complete reasoning item from the assistant stream.
+    /// Extracts display text from a complete reasoning item and sends it to the shared renderer.
     fn handle_reasoning(&self, reasoning: Reasoning, state: &mut StreamOutputState) {
         self.handle_reasoning_text(reasoning.display_text().as_str(), state);
     }
 
-    /// Handles an answer-text item from the assistant stream.
+    /// Records and prints a non-empty answer-text item from the assistant stream.
+    ///
+    /// If reasoning was being displayed, this closes the thinking section and opens an `[answer]`
+    /// section before writing and immediately flushing the response text to stdout.
     fn handle_text(&self, text: Text, state: &mut StreamOutputState) {
         if text.text().trim().is_empty() {
             return;
@@ -229,7 +238,10 @@ where
         self.terminal_io.flush_stdout();
     }
 
-    /// Handles a tool-call item emitted by the assistant stream.
+    /// Prints the name and serialized arguments of a tool call emitted by the model.
+    ///
+    /// Tool execution is owned by Rig; this method only exposes the attempted invocation to the
+    /// user as terminal diagnostics.
     fn handle_tool_call(&self, tool_call: ToolCall) {
         self.terminal_io.eprintln(
             format!(
@@ -240,7 +252,10 @@ where
         );
     }
 
-    /// Handles a tool-result item emitted by the user stream.
+    /// Records a tool result for recovery decisions and prints its model-visible content.
+    ///
+    /// Recovery status markers update `StreamOutputState`. Text and JSON results are rendered as
+    /// received, while image payloads are represented by a stable `<image>` placeholder.
     fn handle_tool_result(&self, tool_result: ToolResult, state: &mut StreamOutputState) {
         state.record_tool_result(tool_recovery_status(&tool_result));
         let output = tool_result
@@ -258,7 +273,10 @@ where
             .eprintln(format!("[tool result: {output}]").as_str());
     }
 
-    /// Handles the final-response item that contains the streamed conversation messages.
+    /// Stores the canonical messages delivered with the stream's final response.
+    ///
+    /// The caller commits these messages only after it has confirmed that no additional answer or
+    /// tool recovery is required for the completed stream.
     fn handle_final_response(
         &self,
         response: PromptResponse,
@@ -267,7 +285,10 @@ where
         *streamed_messages = response.messages;
     }
 
-    /// Handles a chunk of response from LLM-provided stream
+    /// Routes one agent-stream item to the matching terminal or state handler.
+    ///
+    /// Reasoning, answer text, tool calls, tool results, and final history are handled explicitly.
+    /// Telemetry and lifecycle variants that do not affect the CLI presentation are ignored.
     fn handle_stream_chunk<R>(
         &self,
         item: MultiTurnStreamItem<R>,
@@ -299,23 +320,40 @@ where
         }
     }
 
+    /// Prints a final answer produced by a non-streaming automatic recovery attempt.
+    ///
+    /// Recovery calls do not pass through the normal streamed text handler, so this method emits
+    /// the answer section and flushes stdout explicitly.
     fn handle_recovered_response(&self, response: &str) {
         self.terminal_io.eprintln("\n[answer]");
         self.terminal_io.print(response);
         self.terminal_io.flush_stdout();
     }
 
+    /// Notifies the configured history observer about the current committed messages.
+    ///
+    /// Messages are borrowed rather than cloned; the observer is expected to serialize or enqueue
+    /// them during the callback.
     fn notify_messages_changed(&self, messages: &[Message]) {
         let messages = messages.iter().collect::<Vec<_>>();
         (self.on_messages_change)(&messages);
     }
 
+    /// Atomically replaces the session history and notifies the history observer.
+    ///
+    /// This is used for recovery outcomes because Rig may return a canonical history that differs
+    /// from the history available before the failed run.
     async fn replace_messages(&self, new_messages: Vec<Message>) {
         let mut messages = self.messages.lock().await;
         *messages = new_messages;
         self.notify_messages_changed(&messages);
     }
 
+    /// Commits either outcome of an automatic recovery attempt.
+    ///
+    /// Successful recovery prints the answer and stores its history. Exhausted recovery still
+    /// stores the latest history, then returns the diagnostic error to the interactive loop so it
+    /// can inform the user without losing the failed tool context.
     async fn handle_recovery_result(
         &self,
         result: Result<(String, Vec<Message>), RecoveryFailure>,
@@ -333,13 +371,17 @@ where
         }
     }
 
+    /// Builds recovery context after the agent stream itself returns an error.
+    ///
+    /// Canonical history embedded in the streaming error is preferred. If none is available, the
+    /// previous session history plus the current user message becomes the recovery context.
     async fn recover_after_stream_error(
         &self,
         user_message: &str,
         error: StreamingError,
     ) -> anyhow::Result<()> {
-        let (error, failure_messages) = streaming_error_context(error);
-        let recovery_messages = if let Some(failure_messages) = failure_messages {
+        let context = recovery_context_from_streaming_error(error);
+        let recovery_messages = if let Some(failure_messages) = context.chat_history {
             failure_messages
         } else {
             let mut messages = self.messages.lock().await.clone();
@@ -347,10 +389,16 @@ where
             messages
         };
 
-        let result = self.recover_response(recovery_messages, error).await;
+        let result = self
+            .recover_response(recovery_messages, context.message)
+            .await;
         self.handle_recovery_result(result).await
     }
 
+    /// Recovers after a completed stream contained reasoning but no final answer.
+    ///
+    /// Canonical streamed messages are appended to the session history when available. Otherwise,
+    /// the original user message is appended so the recovery prompt still has the request context.
     async fn recover_after_missing_answer(
         &self,
         user_message: String,
@@ -367,6 +415,10 @@ where
         self.handle_recovery_result(result).await
     }
 
+    /// Recovers after a stream ended with an unresolved tool error and no final answer.
+    ///
+    /// The method prepares the most complete available history, delegates the corrective run to
+    /// `recover_unresolved_tool`, and commits either its successful or exhausted result.
     async fn recover_after_unresolved_tool(
         &self,
         user_message: String,
@@ -383,6 +435,10 @@ where
         self.handle_recovery_result(result).await
     }
 
+    /// Appends canonical messages from a successful stream to the committed session history.
+    ///
+    /// Empty message collections are ignored. A non-empty append triggers the history observer so
+    /// persisted chat state stays synchronized with the in-memory conversation.
     async fn append_streamed_messages(&self, messages: Vec<Message>) {
         if messages.is_empty() {
             return;
@@ -393,6 +449,12 @@ where
         self.notify_messages_changed(&current_messages);
     }
 
+    /// Runs the interactive prompt loop until the user enters `/exit` or terminal input fails.
+    ///
+    /// Each user message starts a streamed agent run. Stream items are displayed as they arrive,
+    /// then the completed turn is either committed or sent through the appropriate recovery path.
+    /// Exhausted model recovery is reported to the terminal and control returns to `readline` so
+    /// the user can guide the model; it does not terminate the application.
     pub async fn run(&self) -> anyhow::Result<()> {
         loop {
             let messages = self.messages.lock().await.clone();
@@ -438,7 +500,7 @@ where
 
             if let Err(error) = turn_result {
                 self.terminal_io.eprintln(
-                    format!("\n{}", recovery_stopped_message(&error.to_string())).as_str(),
+                    format!("\n{}", format_recovery_stopped_notice(&error.to_string())).as_str(),
                 );
             }
 
@@ -452,45 +514,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{StreamOutputState, prompt_error_context, recovery_stopped_message};
+    use super::StreamOutputState;
     use crate::use_cases::chat::tool_recovery::ToolRecoveryStatus;
-    use rig::{
-        completion::PromptError,
-        message::{Message, UserContent},
-    };
-
-    #[test]
-    fn max_turns_error_preserves_history_for_user_follow_up() {
-        let history = vec![
-            Message::user("original request"),
-            Message::user("tool error"),
-        ];
-        let error = PromptError::MaxTurnsError {
-            max_turns: 12,
-            chat_history: Box::new(history),
-            prompt: Box::new(Message::user("undispatched prompt")),
-        };
-
-        let (error, messages) = prompt_error_context(error);
-        let messages = messages.expect("max-turns errors should expose their history");
-
-        assert_eq!(error, "MaxTurnsError: reached max turns limit: 12");
-        assert_eq!(messages.len(), 2);
-        assert!(matches!(
-            &messages[0],
-            Message::User { content }
-                if matches!(content.first(), UserContent::Text(text) if text.text == "original request")
-        ));
-    }
-
-    #[test]
-    fn recovery_failure_tells_user_how_to_resume() {
-        let message = recovery_stopped_message("MaxTurnsError");
-
-        assert!(message.contains("automatic recovery stopped: MaxTurnsError"));
-        assert!(message.contains("enter a new message with instructions for the model"));
-        assert!(message.contains("/exit"));
-    }
 
     #[test]
     fn reasoning_without_answer_requires_recovery() {
