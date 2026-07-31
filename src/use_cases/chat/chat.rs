@@ -24,25 +24,34 @@ const EXIT: &str = "/exit";
 const MAX_RECOVERY_ATTEMPTS: usize = 3;
 const MAX_TOOL_RECOVERY_ATTEMPTS: usize = 2;
 
-pub(crate) struct Chat<CM>
+pub(crate) struct Chat<CM, F>
 where
     CM: CompletionModel,
+    F: Fn(&[&Message]) + 'static,
 {
     agent: Agent<CM>,
     terminal_io: Arc<TerminalIO>,
     messages: Arc<Mutex<Vec<Message>>>,
+    on_messages_change: F,
 }
 
-impl<CM> Chat<CM>
+impl<CM, F> Chat<CM, F>
 where
     CM: CompletionModel + 'static,
+    F: Fn(&[&Message]) + 'static,
 {
-    pub fn new(agent: Agent<CM>, terminal_io: Arc<TerminalIO>, messages: Vec<Message>) -> Self {
+    pub fn new(
+        agent: Agent<CM>,
+        terminal_io: Arc<TerminalIO>,
+        messages: Vec<Message>,
+        on_messages_change: F,
+    ) -> Self {
         let messages = Arc::new(Mutex::new(messages));
         Self {
             agent,
             terminal_io,
             messages,
+            on_messages_change,
         }
     }
 
@@ -240,6 +249,17 @@ where
         self.terminal_io.flush_stdout();
     }
 
+    fn notify_messages_changed(&self, messages: &[Message]) {
+        let messages = messages.iter().collect::<Vec<_>>();
+        (self.on_messages_change)(&messages);
+    }
+
+    async fn replace_messages(&self, new_messages: Vec<Message>) {
+        let mut messages = self.messages.lock().await;
+        *messages = new_messages;
+        self.notify_messages_changed(&messages);
+    }
+
     async fn recover_after_stream_error(
         &self,
         user_message: &str,
@@ -250,7 +270,7 @@ where
             .await?;
 
         self.handle_recovered_response(response.as_str());
-        *self.messages.lock().await = recovered_messages;
+        self.replace_messages(recovered_messages).await;
 
         Ok(())
     }
@@ -270,7 +290,7 @@ where
         let (response, recovered_messages) = self.recover_missing_answer(recovery_messages).await?;
 
         self.handle_recovered_response(response.as_str());
-        *self.messages.lock().await = recovered_messages;
+        self.replace_messages(recovered_messages).await;
 
         Ok(())
     }
@@ -291,13 +311,19 @@ where
             self.recover_unresolved_tool(recovery_messages).await?;
 
         self.handle_recovered_response(response.as_str());
-        *self.messages.lock().await = recovered_messages;
+        self.replace_messages(recovered_messages).await;
 
         Ok(())
     }
 
     async fn append_streamed_messages(&self, messages: Vec<Message>) {
-        self.messages.lock().await.extend(messages);
+        if messages.is_empty() {
+            return;
+        }
+
+        let mut current_messages = self.messages.lock().await;
+        current_messages.extend(messages);
+        self.notify_messages_changed(&current_messages);
     }
 
     pub async fn run(&self) -> anyhow::Result<()> {

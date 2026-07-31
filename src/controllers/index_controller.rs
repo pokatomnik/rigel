@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::{
     controllers::controller::Controller,
     prompts::system::system_prompt,
-    shared::terminal_io::TerminalIO,
+    shared::{history::History, terminal_io::TerminalIO},
     tools::{
         add::Adder, apply_patch::ApplyPatch, create_directory::CreateDirectory,
         create_file::CreateFile, delete_directory::DeleteDirectory, delete_file::DeleteFile,
@@ -20,7 +20,6 @@ use clap::Args;
 use reqwest::Client;
 use rig::{
     client::{AgentClientExt, ModelListingClient},
-    message::Message,
     providers::ollama,
 };
 
@@ -63,8 +62,8 @@ impl Controller<IndexControllerDeps> for IndexController {
 
         let model_id = models.select_model_sync(deps.terminal_io.clone())?;
 
-        // TODO restore from file
-        let chat_history = Vec::<Message>::new();
+        let (history, chat_history) = History::bootstrap().await?;
+        let history = Arc::new(history);
         let apply_patch = ApplyPatch::new().await?;
         let create_directory = CreateDirectory::new().await?;
         let create_file = CreateFile::new().await?;
@@ -101,9 +100,28 @@ impl Controller<IndexControllerDeps> for IndexController {
             .default_max_turns(MAX_AGENT_TURNS)
             .build();
 
-        let chat = Chat::new(agent, deps.terminal_io.clone(), chat_history);
+        let terminal_io = deps.terminal_io.clone();
+        let history_for_save = history.clone();
+        let chat = Chat::new(
+            agent,
+            deps.terminal_io.clone(),
+            chat_history,
+            move |messages| {
+                if let Err(error) = history_for_save.save(messages) {
+                    terminal_io
+                        .eprintln(format!("Failed to save chat history: {error:#}").as_str());
+                }
+            },
+        );
 
-        chat.run().await?;
+        let chat_result = chat.run().await;
+        drop(chat);
+        let history_result = history.shutdown().await;
+
+        // Сначала завершаем запись истории и только потом возвращаем ошибку чата
+        // или фоновой задачи сохранения, чтобы не потерять сообщения из очереди.
+        chat_result?;
+        history_result?;
 
         Ok(())
     }
