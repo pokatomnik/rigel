@@ -7,8 +7,9 @@ use crate::{
     tools::{
         add::Adder, apply_patch::ApplyPatch, create_directory::CreateDirectory,
         create_file::CreateFile, delete_directory::DeleteDirectory, delete_file::DeleteFile,
-        find_paths::FindPaths, list_directory::ListDirectory, move_path::MovePath,
-        read_file::ReadFile, search_text::SearchText, stat::Stat,
+        fetch_webpage::FetchWebpage, find_paths::FindPaths, list_directory::ListDirectory,
+        move_path::MovePath, read_file::ReadFile, run_in_terminal::RunInTerminal,
+        search_text::SearchText, stat::Stat,
     },
     use_cases::{
         chat::{chat::Chat, tool_recovery::ToolRecoveryHook},
@@ -16,6 +17,7 @@ use crate::{
     },
 };
 use clap::Args;
+use reqwest::Client;
 use rig::{
     client::{AgentClientExt, ModelListingClient},
     message::Message,
@@ -38,11 +40,15 @@ pub struct IndexController {
 #[derive(Clone)]
 pub(crate) struct IndexControllerDeps {
     terminal_io: Arc<TerminalIO>,
+    http_client: Arc<Client>,
 }
 
 impl IndexControllerDeps {
-    pub fn new(terminal_io: Arc<TerminalIO>) -> Self {
-        Self { terminal_io }
+    pub fn new(terminal_io: Arc<TerminalIO>, http_client: Arc<Client>) -> Self {
+        Self {
+            terminal_io,
+            http_client,
+        }
     }
 }
 
@@ -68,8 +74,10 @@ impl Controller<IndexControllerDeps> for IndexController {
         let list_directory = ListDirectory::new().await?;
         let move_path = MovePath::new(deps.terminal_io.clone()).await?;
         let read_file = ReadFile::new().await?;
+        let run_in_terminal = RunInTerminal::new().await?;
         let search_text = SearchText::new().await?;
         let stat = Stat::new().await?;
+        let fetch_webpage = FetchWebpage::new(deps.http_client.clone());
         let system_prompt = system_prompt().await;
 
         let agent = client
@@ -86,8 +94,10 @@ impl Controller<IndexControllerDeps> for IndexController {
             .tool(list_directory)
             .tool(move_path)
             .tool(read_file)
+            .tool(run_in_terminal)
             .tool(search_text)
             .tool(stat)
+            .tool(fetch_webpage)
             .default_max_turns(MAX_AGENT_TURNS)
             .build();
 
