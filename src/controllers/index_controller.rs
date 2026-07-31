@@ -73,7 +73,7 @@ impl Controller<IndexControllerDeps> for IndexController {
         let list_directory = ListDirectory::new().await?;
         let move_path = MovePath::new(deps.terminal_io.clone()).await?;
         let read_file = ReadFile::new().await?;
-        let run_in_terminal = RunInTerminal::new().await?;
+        let run_in_terminal = RunInTerminal::new(deps.terminal_io.clone()).await?;
         let search_text = SearchText::new().await?;
         let stat = Stat::new().await?;
         let fetch_webpage = FetchWebpage::new(deps.http_client.clone());

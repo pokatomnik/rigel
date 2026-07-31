@@ -1,15 +1,17 @@
 use std::{
-    convert::Infallible,
     env,
     ffi::{OsStr, OsString},
     io::{Read, pipe},
     path::PathBuf,
     process::Stdio,
+    sync::Arc,
 };
 
 use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use tokio::{fs, process::Command, task};
+
+use crate::{entities::tool_confirm_result::ToolConfirmResult, shared::terminal_io::TerminalIO};
 
 const INTERNAL_FAILURE_EXIT_CODE: i32 = -1;
 
@@ -43,10 +45,11 @@ struct UserShell {
 pub(crate) struct RunInTerminal {
     root: PathBuf,
     shell: UserShell,
+    terminal_io: Arc<TerminalIO>,
 }
 
 impl RunInTerminal {
-    pub(crate) async fn new() -> Result<Self, ToolExecutionError> {
+    pub(crate) async fn new(terminal_io: Arc<TerminalIO>) -> Result<Self, ToolExecutionError> {
         let current_dir = env::current_dir().map_err(|error| {
             ToolExecutionError::other(format!(
                 "Cannot determine the workspace root for run_in_terminal: {error}"
@@ -64,7 +67,15 @@ impl RunInTerminal {
         Ok(Self {
             root,
             shell: detect_user_shell(),
+            terminal_io,
         })
+    }
+
+    pub(crate) fn confirm(&self, command: &str) -> ToolConfirmResult {
+        self.terminal_io.confirm_toll_call(
+            format!("Are you sure about running this command in the terminal \"{command}\"?")
+                .as_str(),
+        )
     }
 
     async fn execute(&self, code: &str) -> RunInTerminalOutput {
@@ -157,7 +168,7 @@ impl Tool for RunInTerminal {
     const NAME: &'static str = "run_in_terminal";
     type Args = RunInTerminalArgs;
     type Output = RunInTerminalOutput;
-    type Error = Infallible;
+    type Error = ToolExecutionError;
 
     fn description(&self) -> String {
         "Run code in the user's shell from the workspace root. Returns combined stdout and stderr in their original order and the shell exit code. A non-zero exit code is a command result, not a tool error."
@@ -183,8 +194,19 @@ impl Tool for RunInTerminal {
         _context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
+        let confirmed = self.confirm(args.code.as_str());
+
+        if let ToolConfirmResult::No = confirmed {
+            return Err(user_forbid());
+        }
         Ok(self.execute(&args.code).await)
     }
+}
+
+fn user_forbid() -> ToolExecutionError {
+    ToolExecutionError::refused(format!(
+        "The user has prohibited deletion of this directory. Try another method or ask the user what to do instead."
+    )).with_code("USER_FORBID")
 }
 
 fn detect_user_shell() -> UserShell {
