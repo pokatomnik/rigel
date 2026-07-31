@@ -3,8 +3,8 @@ use std::sync::Arc;
 use futures::StreamExt;
 use rig::{
     Agent,
-    agent::{MultiTurnStreamItem, PromptResponse},
-    completion::{Chat as RigChat, CompletionModel},
+    agent::{MultiTurnStreamItem, PromptResponse, StreamingError},
+    completion::{Chat as RigChat, CompletionModel, PromptError},
     message::{Message, Reasoning, Text, ToolCall, ToolResult, ToolResultContent},
     streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
 };
@@ -23,6 +23,38 @@ use crate::{
 const EXIT: &str = "/exit";
 const MAX_RECOVERY_ATTEMPTS: usize = 3;
 const MAX_TOOL_RECOVERY_ATTEMPTS: usize = 2;
+
+struct RecoveryFailure {
+    error: String,
+    messages: Vec<Message>,
+}
+
+fn prompt_error_context(error: PromptError) -> (String, Option<Vec<Message>>) {
+    let error_message = error.to_string();
+    let messages = match error {
+        PromptError::MaxTurnsError { chat_history, .. }
+        | PromptError::UnknownToolCall { chat_history, .. } => Some(*chat_history),
+        PromptError::PromptCancelled { chat_history, .. } => Some(chat_history),
+        _ => None,
+    };
+
+    (error_message, messages)
+}
+
+fn streaming_error_context(error: StreamingError) -> (String, Option<Vec<Message>>) {
+    match error {
+        StreamingError::Prompt(error) => prompt_error_context(*error),
+        error => (error.to_string(), None),
+    }
+}
+
+fn recovery_stopped_message(error: &str) -> String {
+    format!(
+        "[automatic recovery stopped: {error}]\n\
+         Review the tool errors above, then enter a new message with instructions for the model, \
+         or /exit."
+    )
+}
 
 pub(crate) struct Chat<CM, F>
 where
@@ -57,11 +89,9 @@ where
 
     async fn recover_response(
         &self,
-        user_message: &str,
         mut messages: Vec<Message>,
         initial_error: String,
-    ) -> anyhow::Result<(String, Vec<Message>)> {
-        messages.push(Message::user(user_message));
+    ) -> Result<(String, Vec<Message>), RecoveryFailure> {
         let mut error = initial_error;
 
         for attempt in 1..=MAX_RECOVERY_ATTEMPTS {
@@ -69,17 +99,28 @@ where
 
             match self.agent.chat(recovery_prompt, &mut messages).await {
                 Ok(response) => return Ok((response, messages)),
-                Err(recovery_error) => error = recovery_error.to_string(),
+                Err(recovery_error) => {
+                    let (recovery_error, failure_messages) = prompt_error_context(recovery_error);
+                    error = recovery_error;
+                    if let Some(failure_messages) = failure_messages {
+                        messages = failure_messages;
+                    }
+                }
             }
         }
 
-        anyhow::bail!("model failed to recover after {MAX_RECOVERY_ATTEMPTS} attempts: {error}")
+        Err(RecoveryFailure {
+            error: format!(
+                "model failed to recover after {MAX_RECOVERY_ATTEMPTS} attempts: {error}"
+            ),
+            messages,
+        })
     }
 
     async fn recover_missing_answer(
         &self,
         mut messages: Vec<Message>,
-    ) -> anyhow::Result<(String, Vec<Message>)> {
+    ) -> Result<(String, Vec<Message>), RecoveryFailure> {
         let mut last_error = None;
 
         for attempt in 1..=MAX_RECOVERY_ATTEMPTS {
@@ -88,24 +129,32 @@ where
             match self.agent.chat(recovery_prompt, &mut messages).await {
                 Ok(response) if !response.trim().is_empty() => return Ok((response, messages)),
                 Ok(_) => last_error = None,
-                Err(error) => last_error = Some(error.to_string()),
+                Err(error) => {
+                    let (error, failure_messages) = prompt_error_context(error);
+                    last_error = Some(error);
+                    if let Some(failure_messages) = failure_messages {
+                        messages = failure_messages;
+                    }
+                }
             }
         }
 
-        if let Some(error) = last_error {
-            anyhow::bail!(
+        let error = if let Some(error) = last_error {
+            format!(
                 "model failed to produce an answer after {MAX_RECOVERY_ATTEMPTS} recovery \
                  attempts: {error}"
-            );
-        }
+            )
+        } else {
+            format!("model produced no answer after {MAX_RECOVERY_ATTEMPTS} recovery attempts")
+        };
 
-        anyhow::bail!("model produced no answer after {MAX_RECOVERY_ATTEMPTS} recovery attempts")
+        Err(RecoveryFailure { error, messages })
     }
 
     async fn recover_unresolved_tool(
         &self,
         mut messages: Vec<Message>,
-    ) -> anyhow::Result<(String, Vec<Message>)> {
+    ) -> Result<(String, Vec<Message>), RecoveryFailure> {
         let mut last_error = None;
 
         for attempt in 1..=MAX_TOOL_RECOVERY_ATTEMPTS {
@@ -115,21 +164,28 @@ where
             match self.agent.chat(recovery_prompt, &mut messages).await {
                 Ok(response) if !response.trim().is_empty() => return Ok((response, messages)),
                 Ok(_) => last_error = None,
-                Err(error) => last_error = Some(error.to_string()),
+                Err(error) => {
+                    let (error, failure_messages) = prompt_error_context(error);
+                    last_error = Some(error);
+                    if let Some(failure_messages) = failure_messages {
+                        messages = failure_messages;
+                    }
+                }
             }
         }
 
-        if let Some(error) = last_error {
-            anyhow::bail!(
+        let error = match last_error {
+            Some(error) => format!(
                 "model failed to correct a tool error after {MAX_TOOL_RECOVERY_ATTEMPTS} recovery \
                  attempts: {error}"
-            );
-        }
+            ),
+            None => format!(
+                "model produced no answer after correcting a tool error in \
+                 {MAX_TOOL_RECOVERY_ATTEMPTS} recovery attempts"
+            ),
+        };
 
-        anyhow::bail!(
-            "model produced no answer after correcting a tool error in \
-             {MAX_TOOL_RECOVERY_ATTEMPTS} recovery attempts"
-        )
+        Err(RecoveryFailure { error, messages })
     }
 
     fn handle_reasoning_text(&self, reasoning: &str, state: &mut StreamOutputState) {
@@ -260,19 +316,39 @@ where
         self.notify_messages_changed(&messages);
     }
 
+    async fn handle_recovery_result(
+        &self,
+        result: Result<(String, Vec<Message>), RecoveryFailure>,
+    ) -> anyhow::Result<()> {
+        match result {
+            Ok((response, messages)) => {
+                self.handle_recovered_response(response.as_str());
+                self.replace_messages(messages).await;
+                Ok(())
+            }
+            Err(failure) => {
+                self.replace_messages(failure.messages).await;
+                anyhow::bail!(failure.error)
+            }
+        }
+    }
+
     async fn recover_after_stream_error(
         &self,
         user_message: &str,
-        error: String,
+        error: StreamingError,
     ) -> anyhow::Result<()> {
-        let (response, recovered_messages) = self
-            .recover_response(user_message, self.messages.lock().await.clone(), error)
-            .await?;
+        let (error, failure_messages) = streaming_error_context(error);
+        let recovery_messages = if let Some(failure_messages) = failure_messages {
+            failure_messages
+        } else {
+            let mut messages = self.messages.lock().await.clone();
+            messages.push(Message::user(user_message));
+            messages
+        };
 
-        self.handle_recovered_response(response.as_str());
-        self.replace_messages(recovered_messages).await;
-
-        Ok(())
+        let result = self.recover_response(recovery_messages, error).await;
+        self.handle_recovery_result(result).await
     }
 
     async fn recover_after_missing_answer(
@@ -287,12 +363,8 @@ where
             recovery_messages.push(Message::user(user_message));
         }
 
-        let (response, recovered_messages) = self.recover_missing_answer(recovery_messages).await?;
-
-        self.handle_recovered_response(response.as_str());
-        self.replace_messages(recovered_messages).await;
-
-        Ok(())
+        let result = self.recover_missing_answer(recovery_messages).await;
+        self.handle_recovery_result(result).await
     }
 
     async fn recover_after_unresolved_tool(
@@ -307,13 +379,8 @@ where
             recovery_messages.push(Message::user(user_message));
         }
 
-        let (response, recovered_messages) =
-            self.recover_unresolved_tool(recovery_messages).await?;
-
-        self.handle_recovered_response(response.as_str());
-        self.replace_messages(recovered_messages).await;
-
-        Ok(())
+        let result = self.recover_unresolved_tool(recovery_messages).await;
+        self.handle_recovery_result(result).await
     }
 
     async fn append_streamed_messages(&self, messages: Vec<Message>) {
@@ -345,7 +412,7 @@ where
                 let item = match item {
                     Ok(item) => item,
                     Err(error) => {
-                        stream_error = Some(error.to_string());
+                        stream_error = Some(error);
                         break;
                     }
                 };
@@ -353,17 +420,26 @@ where
                 self.handle_stream_chunk(item, &mut output_state, &mut streamed_messages);
             }
 
-            if let Some(error) = stream_error {
+            let turn_result = if let Some(error) = stream_error {
                 self.recover_after_stream_error(user_message.as_str(), error)
-                    .await?;
+                    .await
             } else if output_state.requires_tool_recovery() {
                 self.recover_after_unresolved_tool(user_message, &mut streamed_messages)
-                    .await?;
+                    .await
             } else if output_state.requires_answer_recovery() {
                 self.recover_after_missing_answer(user_message, &mut streamed_messages)
-                    .await?;
+                    .await
             } else if let Some(messages) = streamed_messages {
                 self.append_streamed_messages(messages).await;
+                Ok(())
+            } else {
+                Ok(())
+            };
+
+            if let Err(error) = turn_result {
+                self.terminal_io.eprintln(
+                    format!("\n{}", recovery_stopped_message(&error.to_string())).as_str(),
+                );
             }
 
             // add newline
@@ -376,8 +452,45 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::StreamOutputState;
+    use super::{StreamOutputState, prompt_error_context, recovery_stopped_message};
     use crate::use_cases::chat::tool_recovery::ToolRecoveryStatus;
+    use rig::{
+        completion::PromptError,
+        message::{Message, UserContent},
+    };
+
+    #[test]
+    fn max_turns_error_preserves_history_for_user_follow_up() {
+        let history = vec![
+            Message::user("original request"),
+            Message::user("tool error"),
+        ];
+        let error = PromptError::MaxTurnsError {
+            max_turns: 12,
+            chat_history: Box::new(history),
+            prompt: Box::new(Message::user("undispatched prompt")),
+        };
+
+        let (error, messages) = prompt_error_context(error);
+        let messages = messages.expect("max-turns errors should expose their history");
+
+        assert_eq!(error, "MaxTurnsError: reached max turns limit: 12");
+        assert_eq!(messages.len(), 2);
+        assert!(matches!(
+            &messages[0],
+            Message::User { content }
+                if matches!(content.first(), UserContent::Text(text) if text.text == "original request")
+        ));
+    }
+
+    #[test]
+    fn recovery_failure_tells_user_how_to_resume() {
+        let message = recovery_stopped_message("MaxTurnsError");
+
+        assert!(message.contains("automatic recovery stopped: MaxTurnsError"));
+        assert!(message.contains("enter a new message with instructions for the model"));
+        assert!(message.contains("/exit"));
+    }
 
     #[test]
     fn reasoning_without_answer_requires_recovery() {
