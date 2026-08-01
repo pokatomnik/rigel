@@ -17,9 +17,16 @@ impl fmt::Display for SkillOption {
 }
 
 pub(crate) enum CommandParserResult {
+    /// Ask to exit the chat.
     CommandExit,
+
+    /// Continue requesting a command / prompt from the user.
     CommandContinue,
-    Prompt(String),
+
+    /// A prompt was parsed from the user.
+    Prompt(String, bool),
+
+    /// Forget everything and start from the beginning.
     New,
 }
 
@@ -36,6 +43,8 @@ impl CommandParser {
         self.terminal_io.eprintln("/help - Show this help message");
         self.terminal_io
             .eprintln("/new - forget everything and start from the beginning");
+        self.terminal_io
+            .eprintln("/editor - Open default editor to type your prompt");
 
         CommandParserResult::CommandContinue
     }
@@ -43,55 +52,31 @@ impl CommandParser {
     /// Discovers workspace skills, lets the user select one, and returns its instructions.
     ///
     /// Only direct subdirectories of `.agents/skills` containing a regular `SKILL.md` file are
-    /// offered. Any discovery, selection, or read error is printed to the terminal and leaves the
-    /// chat waiting for the next command.
+    /// offered. When no skills are found or anything fails, `No skills found` is printed and the
+    /// chat waits for the next command.
     pub async fn get_skill(&self) -> CommandParserResult {
-        let current_dir = match std::env::current_dir() {
-            Ok(current_dir) => current_dir,
-            Err(error) => {
-                self.terminal_io.eprintln(
-                    format!("Failed to locate the current workspace directory: {error}").as_str(),
-                );
-                return CommandParserResult::CommandContinue;
+        match self.select_skill().await {
+            Some(prompt) => CommandParserResult::Prompt(prompt, false),
+            None => {
+                self.terminal_io.eprintln("No skills found");
+                CommandParserResult::CommandContinue
             }
-        };
+        }
+    }
 
+    /// Returns the manifest contents of a user-selected skill, or `None` when no skill can be
+    /// discovered, selected, or read.
+    async fn select_skill(&self) -> Option<String> {
+        let current_dir = std::env::current_dir().ok()?;
         let skills_dir = current_dir.join(SKILLS_DIRECTORY);
-        let mut entries = match tokio::fs::read_dir(&skills_dir).await {
-            Ok(entries) => entries,
-            Err(error) => {
-                self.terminal_io.eprintln(
-                    format!("Failed to read skills directory `{SKILLS_DIRECTORY}`: {error}")
-                        .as_str(),
-                );
-                return CommandParserResult::CommandContinue;
-            }
-        };
+        let mut entries = tokio::fs::read_dir(&skills_dir).await.ok()?;
 
         let mut skills = Vec::new();
         loop {
-            let entry = match entries.next_entry().await {
-                Ok(Some(entry)) => entry,
-                Ok(None) => break,
-                Err(error) => {
-                    self.terminal_io.eprintln(
-                        format!("Failed to read an entry in `{SKILLS_DIRECTORY}`: {error}")
-                            .as_str(),
-                    );
-                    return CommandParserResult::CommandContinue;
-                }
+            let Some(entry) = entries.next_entry().await.ok()? else {
+                break;
             };
-
-            let file_type = match entry.file_type().await {
-                Ok(file_type) => file_type,
-                Err(error) => {
-                    self.terminal_io.eprintln(
-                        format!("Failed to inspect `{}`: {error}", entry.path().display()).as_str(),
-                    );
-                    return CommandParserResult::CommandContinue;
-                }
-            };
-            if !file_type.is_dir() {
+            if !entry.file_type().await.ok()?.is_dir() {
                 continue;
             }
 
@@ -101,57 +86,31 @@ impl CommandParser {
                     name: entry.file_name().to_string_lossy().into_owned(),
                     manifest_path,
                 }),
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    self.terminal_io.eprintln(
-                        format!("Failed to inspect `{}`: {error}", manifest_path.display())
-                            .as_str(),
-                    );
-                    return CommandParserResult::CommandContinue;
-                }
+                _ => {}
             }
         }
 
         skills.sort_by(|left, right| left.name.cmp(&right.name));
         if skills.is_empty() {
-            self.terminal_io.eprintln(
-                format!(
-                    "No skills containing `{SKILL_MANIFEST}` were found in \
-                     `{SKILLS_DIRECTORY}`."
-                )
-                .as_str(),
-            );
-            return CommandParserResult::CommandContinue;
+            return None;
         }
 
-        let selected = match self.terminal_io.fuzzy_select("Select skill", &skills) {
-            Ok(selected) => selected,
-            Err(error) => {
-                self.terminal_io
-                    .eprintln(format!("Failed to select a skill: {error}").as_str());
-                return CommandParserResult::CommandContinue;
-            }
-        };
-
-        match tokio::fs::read_to_string(&selected.manifest_path).await {
-            Ok(prompt) => CommandParserResult::Prompt(prompt),
-            Err(error) => {
-                self.terminal_io.eprintln(
-                    format!(
-                        "Failed to read `{}` for skill `{}`: {error}",
-                        selected.manifest_path.display(),
-                        selected.name
-                    )
-                    .as_str(),
-                );
-                CommandParserResult::CommandContinue
-            }
-        }
+        let selected = self
+            .terminal_io
+            .fuzzy_select("Select skill", &skills)
+            .ok()?;
+        tokio::fs::read_to_string(&selected.manifest_path)
+            .await
+            .ok()
     }
 
     pub fn new(terminal_io: Arc<TerminalIO>) -> Self {
         Self { terminal_io }
+    }
+
+    pub fn handle_editor(&self) -> CommandParserResult {
+        let result = self.terminal_io.editor().unwrap_or_default();
+        CommandParserResult::Prompt(result, true)
     }
 
     pub async fn parse(&self, raw_input: String) -> CommandParserResult {
@@ -159,8 +118,9 @@ impl CommandParser {
             "/exit" => CommandParserResult::CommandExit,
             "/skill" => self.get_skill().await,
             "/help" => self.handle_help(),
+            "/editor" => self.handle_editor(),
             "/new" => CommandParserResult::New,
-            _ => CommandParserResult::Prompt(raw_input),
+            _ => CommandParserResult::Prompt(raw_input, false),
         }
     }
 }

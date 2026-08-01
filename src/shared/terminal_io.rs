@@ -79,4 +79,16 @@ impl TerminalIO {
             dialoguer::Input::<String>::with_theme(&ColorfulTheme::default()).interact_text()?;
         Ok(result)
     }
+
+    pub fn editor(&self) -> anyhow::Result<String> {
+        let mut result = String::new();
+        while result.trim().is_empty() {
+            result = dialoguer::Editor::new()
+                .require_save(false)
+                .edit("")?
+                .unwrap_or_default();
+        }
+
+        Ok(result)
+    }
 }

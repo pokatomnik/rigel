@@ -467,7 +467,10 @@ where
             match command {
                 command_parser::CommandParserResult::CommandExit => break,
                 command_parser::CommandParserResult::CommandContinue => continue,
-                command_parser::CommandParserResult::Prompt(prompt) => {
+                command_parser::CommandParserResult::Prompt(prompt, echo) => {
+                    if echo {
+                        self.terminal_io.print(format!("{prompt}\n").as_str());
+                    }
                     user_message = prompt;
                 }
                 command_parser::CommandParserResult::New => {
