@@ -5,6 +5,7 @@ use std::{
     path::PathBuf,
     process::Stdio,
     sync::Arc,
+    time::Duration,
 };
 
 use rig::tool::{Tool, ToolContext, ToolExecutionError};
@@ -19,6 +20,7 @@ const INTERNAL_FAILURE_EXIT_CODE: i32 = -1;
 #[serde(deny_unknown_fields)]
 pub(crate) struct RunInTerminalArgs {
     code: String,
+    timeout_milliseconds: Option<u64>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
@@ -104,7 +106,8 @@ impl RunInTerminal {
             .current_dir(&self.root)
             .stdin(Stdio::null())
             .stdout(writer)
-            .stderr(stderr_writer);
+            .stderr(stderr_writer)
+            .kill_on_drop(true);
 
         let child = command.spawn();
         drop(command);
@@ -162,6 +165,27 @@ impl RunInTerminal {
             exit_code: exit_code(status),
         }
     }
+
+    /// Runs the command, aborting with a timeout error when the shell does not finish in time.
+    ///
+    /// A timed-out run kills the spawned shell process (`kill_on_drop`), so no command keeps
+    /// running in the background while the tool reports `TOOL_TIMED_OUT`.
+    async fn execute_with_timeout(
+        &self,
+        code: &str,
+        timeout_milliseconds: Option<u64>,
+    ) -> Result<RunInTerminalOutput, ToolExecutionError> {
+        let Some(timeout) = timeout_milliseconds else {
+            return Ok(self.execute(code).await);
+        };
+
+        tokio::select! {
+            biased;
+
+            result = self.execute(code) => Ok(result),
+            _ = tokio::time::sleep(Duration::from_millis(timeout)) => Err(ToolExecutionError::timeout("Tool timed out").with_code("TOOL_TIMED_OUT"))
+        }
+    }
 }
 
 impl Tool for RunInTerminal {
@@ -183,6 +207,11 @@ impl Tool for RunInTerminal {
                     "type": "string",
                     "minLength": 1,
                     "description": "Code to execute in the user's shell."
+                },
+                "timeout_milliseconds": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Optional operation timeout"
                 }
             },
             "required": ["code"]
@@ -199,7 +228,8 @@ impl Tool for RunInTerminal {
         if let ToolConfirmResult::No = confirmed {
             return Err(user_forbid());
         }
-        Ok(self.execute(&args.code).await)
+        self.execute_with_timeout(args.code.as_str(), args.timeout_milliseconds)
+            .await
     }
 }
 
@@ -373,5 +403,26 @@ mod tests {
             output,
             "stdout\nstderr\nrun_in_terminal: status unavailable\n"
         );
+    }
+
+    #[test]
+    fn timeout_is_optional_in_args() {
+        let args: RunInTerminalArgs = serde_json::from_value(serde_json::json!({
+            "code": "echo hello"
+        }))
+        .expect("arguments should deserialize");
+
+        assert_eq!(args.timeout_milliseconds, None);
+    }
+
+    #[test]
+    fn timeout_is_parsed_from_args() {
+        let args: RunInTerminalArgs = serde_json::from_value(serde_json::json!({
+            "code": "echo hello",
+            "timeout_milliseconds": 5000
+        }))
+        .expect("arguments should deserialize");
+
+        assert_eq!(args.timeout_milliseconds, Some(5000));
     }
 }
