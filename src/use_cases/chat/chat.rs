@@ -460,7 +460,7 @@ where
     /// the user can guide the model; it does not terminate the application.
     pub async fn run(&self) -> anyhow::Result<()> {
         loop {
-            let messages = self.messages.lock().await.clone();
+            let mut messages = self.messages.lock().await.clone();
 
             let mut user_message = self.terminal_io.readline()?;
             let command = self.command_parser.parse(user_message).await;
@@ -475,6 +475,20 @@ where
                 }
                 command_parser::CommandParserResult::New => {
                     self.replace_messages(Vec::new()).await;
+                    continue;
+                }
+                command_parser::CommandParserResult::Compact(summarization) => {
+                    self.terminal_io.eprintln_gray("Compacting started...");
+                    let Ok(summarized) = self.agent.chat(summarization, &mut messages).await else {
+                        self.terminal_io.eprintln_gray("Compacting failed.");
+                        continue;
+                    };
+
+                    self.replace_messages(vec![Message::assistant(summarized)])
+                        .await;
+
+                    self.terminal_io.eprintln_gray("Compacting done.");
+
                     continue;
                 }
             }

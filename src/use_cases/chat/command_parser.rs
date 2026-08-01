@@ -1,6 +1,6 @@
 use std::{fmt, path::PathBuf, sync::Arc};
 
-use crate::shared::terminal_io::TerminalIO;
+use crate::{prompts::summarization::summarization, shared::terminal_io::TerminalIO};
 
 const SKILLS_DIRECTORY: &str = ".agents/skills";
 const SKILL_MANIFEST: &str = "SKILL.md";
@@ -28,6 +28,9 @@ pub(crate) enum CommandParserResult {
 
     /// Forget everything and start from the beginning.
     New,
+
+    /// Context compact required
+    Compact(String),
 }
 
 pub(crate) struct CommandParser {
@@ -45,6 +48,8 @@ impl CommandParser {
             .eprintln("/new - forget everything and start from the beginning");
         self.terminal_io
             .eprintln("/editor - Open default editor to type your prompt");
+        self.terminal_io
+            .eprintln("/compact - compact dialog context");
 
         CommandParserResult::CommandContinue
     }
@@ -120,6 +125,7 @@ impl CommandParser {
             "/help" => self.handle_help(),
             "/editor" => self.handle_editor(),
             "/new" => CommandParserResult::New,
+            "/compact" => CommandParserResult::Compact(summarization().to_string()),
             _ => CommandParserResult::Prompt(raw_input, false),
         }
     }
