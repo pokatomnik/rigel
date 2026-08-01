@@ -5632,7 +5632,6 @@ dependencies = [
  "clap",
  "console 0.16.4",
  "dialoguer",
- "dirs",
  "dom_smoothie",
  "futures",
  "glob",

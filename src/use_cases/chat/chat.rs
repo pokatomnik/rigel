@@ -39,7 +39,7 @@ struct RecoveryFailure {
 pub(crate) struct Chat<CM, F>
 where
     CM: CompletionModel,
-    F: Fn(&[&Message]) + 'static,
+    F: AsyncFn(&[&Message]) + 'static,
 {
     agent: Agent<CM>,
     terminal_io: Arc<TerminalIO>,
@@ -51,7 +51,7 @@ where
 impl<CM, F> Chat<CM, F>
 where
     CM: CompletionModel + 'static,
-    F: Fn(&[&Message]) + 'static,
+    F: AsyncFn(&[&Message]) + 'static,
 {
     /// Creates a chat session from an agent, terminal adapter, existing history, and change hook.
     ///
@@ -335,11 +335,11 @@ where
 
     /// Notifies the configured history observer about the current committed messages.
     ///
-    /// Messages are borrowed rather than cloned; the observer is expected to serialize or enqueue
-    /// them during the callback.
-    fn notify_messages_changed(&self, messages: &[Message]) {
+    /// Messages are borrowed rather than cloned; the observer is expected to persist them during
+    /// the callback; the await point lets the observer finish its I/O before the session continues.
+    async fn notify_messages_changed(&self, messages: &[Message]) {
         let messages = messages.iter().collect::<Vec<_>>();
-        (self.on_messages_change)(&messages);
+        (self.on_messages_change)(&messages).await;
     }
 
     /// Atomically replaces the session history and notifies the history observer.
@@ -349,7 +349,7 @@ where
     async fn replace_messages(&self, new_messages: Vec<Message>) {
         let mut messages = self.messages.lock().await;
         *messages = new_messages;
-        self.notify_messages_changed(&messages);
+        self.notify_messages_changed(&messages).await;
     }
 
     /// Commits either outcome of an automatic recovery attempt.
@@ -449,7 +449,7 @@ where
 
         let mut current_messages = self.messages.lock().await;
         current_messages.extend(messages);
-        self.notify_messages_changed(&current_messages);
+        self.notify_messages_changed(&current_messages).await;
     }
 
     /// Runs the interactive prompt loop until the user enters `/exit` or terminal input fails.

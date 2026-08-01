@@ -117,6 +117,8 @@ constants. Prefer small modules aligned with the existing controller/use-case
 boundaries. Return `anyhow::Result` at application boundaries and use concrete
 error types where library-style APIs benefit from them.
 
+**CRITICAL RULE**: `.unwrap()` methods are strictly PROHIBITED. You MUST NEVER USE `.expect()`, `.unwrap()`, or similar panicking methods. All methods must return `Result<T, E>`.
+
 ## Testing Guidelines
 
 Tests currently use Rust's built-in test framework and sit beside the code in

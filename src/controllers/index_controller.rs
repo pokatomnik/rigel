@@ -106,8 +106,8 @@ impl Controller<IndexControllerDeps> for IndexController {
             agent,
             deps.terminal_io.clone(),
             chat_history,
-            move |messages| {
-                if let Err(error) = history_for_save.save(messages) {
+            async move |messages| {
+                if let Err(error) = history_for_save.save(messages).await {
                     terminal_io
                         .eprintln(format!("Failed to save chat history: {error:#}").as_str());
                 }
@@ -117,14 +117,8 @@ impl Controller<IndexControllerDeps> for IndexController {
         deps.terminal_io
             .clone()
             .eprintln("Let's chat. Type /help to get available commands");
-        let chat_result = chat.run().await;
-        drop(chat);
-        let history_result = history.shutdown().await;
 
-        // Сначала завершаем запись истории и только потом возвращаем ошибку чата
-        // или фоновой задачи сохранения, чтобы не потерять сообщения из очереди.
-        chat_result?;
-        history_result?;
+        chat.run().await?;
 
         Ok(())
     }
