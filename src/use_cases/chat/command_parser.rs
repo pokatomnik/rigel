@@ -130,3 +130,46 @@ impl CommandParser {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::{CommandParser, CommandParserResult};
+    use crate::{prompts::summarization::summarization, shared::terminal_io::TerminalIO};
+
+    fn parser() -> CommandParser {
+        CommandParser::new(Arc::new(TerminalIO))
+    }
+
+    #[tokio::test]
+    async fn compact_command_carries_the_summarization_prompt() {
+        let result = parser().parse("/compact".to_string()).await;
+
+        let CommandParserResult::Compact(prompt) = result else {
+            panic!("expected a compact command result");
+        };
+        assert_eq!(prompt, summarization());
+    }
+
+    #[tokio::test]
+    async fn unknown_input_stays_a_prompt_without_echo() {
+        let result = parser().parse("hello".to_string()).await;
+
+        assert!(matches!(result, CommandParserResult::Prompt(_, false)));
+    }
+
+    #[tokio::test]
+    async fn exit_command_stops_the_chat() {
+        let result = parser().parse("/exit".to_string()).await;
+
+        assert!(matches!(result, CommandParserResult::CommandExit));
+    }
+
+    #[tokio::test]
+    async fn new_command_clears_the_history() {
+        let result = parser().parse("/new".to_string()).await;
+
+        assert!(matches!(result, CommandParserResult::New));
+    }
+}

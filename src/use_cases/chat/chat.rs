@@ -452,6 +452,22 @@ where
         self.notify_messages_changed(&current_messages).await;
     }
 
+    /// Compresses the conversation with the summarization prompt and commits the summary as the
+    /// new history.
+    ///
+    /// The passed messages are a working copy of the history that the model may extend during the
+    /// run; only the returned summary is committed. On a failed model run the committed history is
+    /// left untouched and `false` is returned so the prompt loop keeps control with the user.
+    async fn compact_context(&self, summarization: String, messages: &mut Vec<Message>) -> bool {
+        let Ok(summarized) = self.agent.chat(summarization, messages).await else {
+            self.terminal_io.eprintln_gray("Compacting failed.");
+            return false;
+        };
+
+        self.replace_messages(compacted_history(summarized)).await;
+        true
+    }
+
     /// Runs the interactive prompt loop until the user enters `/exit` or terminal input fails.
     ///
     /// Each user message starts a streamed agent run. Stream items are displayed as they arrive,
@@ -479,15 +495,9 @@ where
                 }
                 command_parser::CommandParserResult::Compact(summarization) => {
                     self.terminal_io.eprintln_gray("Compacting started...");
-                    let Ok(summarized) = self.agent.chat(summarization, &mut messages).await else {
-                        self.terminal_io.eprintln_gray("Compacting failed.");
-                        continue;
-                    };
-
-                    self.replace_messages(vec![Message::assistant(summarized)])
-                        .await;
-
-                    self.terminal_io.eprintln_gray("Compacting done.");
+                    if self.compact_context(summarization, &mut messages).await {
+                        self.terminal_io.eprintln_gray("Compacting done.");
+                    }
 
                     continue;
                 }
@@ -540,10 +550,30 @@ where
     }
 }
 
+/// Builds the replacement history after a successful compaction run.
+///
+/// The summary becomes the only assistant message of the new history, so the next user turn
+/// continues from the compressed context instead of the full conversation. Kept outside `Chat`
+/// so tests can exercise it without a concrete model or observer type.
+fn compacted_history(summarized: String) -> Vec<Message> {
+    vec![Message::assistant(summarized)]
+}
+
 #[cfg(test)]
 mod tests {
-    use super::StreamOutputState;
-    use crate::use_cases::chat::tool_recovery::ToolRecoveryStatus;
+    use std::sync::Arc;
+
+    use rig::{
+        AgentBuilder,
+        message::Message,
+        test_utils::{MockCompletionModel, MockTurn},
+    };
+
+    use super::{Chat, StreamOutputState, compacted_history};
+    use crate::{
+        prompts::summarization::summarization, shared::terminal_io::TerminalIO,
+        use_cases::chat::tool_recovery::ToolRecoveryStatus,
+    };
 
     #[test]
     fn reasoning_without_answer_requires_recovery() {
@@ -603,5 +633,53 @@ mod tests {
         state.record_tool_result(ToolRecoveryStatus::None);
 
         assert!(state.requires_answer_recovery());
+    }
+
+    #[test]
+    fn compacted_history_keeps_summary_as_the_single_assistant_message() {
+        let history = compacted_history("compressed summary".to_string());
+
+        assert_eq!(history, vec![Message::assistant("compressed summary")]);
+    }
+
+    #[tokio::test]
+    async fn compact_context_replaces_history_with_the_model_summary() {
+        let agent = AgentBuilder::new(MockCompletionModel::text("compressed summary")).build();
+        let chat = Chat::new(
+            agent,
+            Arc::new(TerminalIO),
+            vec![Message::user("first turn")],
+            async |_| {},
+        );
+        let mut messages = vec![Message::user("first turn")];
+
+        assert!(
+            chat.compact_context(summarization().to_string(), &mut messages)
+                .await
+        );
+
+        let stored = chat.messages.lock().await;
+        assert_eq!(&*stored, &vec![Message::assistant("compressed summary")]);
+    }
+
+    #[tokio::test]
+    async fn compact_context_keeps_history_when_the_model_run_fails() {
+        let agent = AgentBuilder::new(MockCompletionModel::new([MockTurn::error("boom")])).build();
+        let chat = Chat::new(
+            agent,
+            Arc::new(TerminalIO),
+            vec![Message::user("keep me")],
+            async |_| {},
+        );
+        let mut messages = vec![Message::user("keep me")];
+
+        assert!(
+            !chat
+                .compact_context(summarization().to_string(), &mut messages)
+                .await
+        );
+
+        let stored = chat.messages.lock().await;
+        assert_eq!(&*stored, &vec![Message::user("keep me")]);
     }
 }
