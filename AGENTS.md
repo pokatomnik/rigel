@@ -119,6 +119,31 @@ error types where library-style APIs benefit from them.
 
 **CRITICAL RULE**: `.unwrap()` methods are strictly PROHIBITED. You MUST NEVER USE `.expect()`, `.unwrap()`, or similar panicking methods. All methods must return `Result<T, E>`.
 
+## Design and Complexity Constraints
+
+Treat the following limits as mandatory contribution rules:
+
+- Give every struct exactly one responsibility. A struct and its methods must not
+  accumulate substantial logic unrelated to the purpose for which the struct
+  was introduced.
+- Functions and methods may accept at most three arguments, excluding `self`.
+  Introduce additional domain operations or redesign the API instead of growing
+  long parameter lists.
+- Every new struct must be justified by the domain or by an explicit business
+  rule. Do not introduce structs merely as implementation conveniences, generic
+  parameter bags, or arbitrary groupings of otherwise unrelated data.
+- Keep control flow shallow. A function or method must not contain more than two
+  nested levels of `if` and/or `match`. Extract named operations when deeper
+  branching would be required.
+- Keep every function and method at no more than 30 lines of code. Do not satisfy
+  this limit by removing useful whitespace, combining statements, or otherwise
+  compressing formatting; decompose the logic into cohesive named operations.
+- Keep each file at no more than 500 lines of non-test code. Code inside test
+  modules is excluded from this limit and may be arbitrarily long, including
+  more than 1,000 lines, even when it makes the whole file exceed 500 lines.
+- Keep the combined descriptions of logic, structs, enums, and constants in a
+  file to no more than 300 characters. Test code is not subject to this limit.
+
 ## Testing Guidelines
 
 Tests currently use Rust's built-in test framework and sit beside the code in

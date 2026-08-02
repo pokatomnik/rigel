@@ -1,5 +1,9 @@
 pub(crate) mod chat;
 pub(crate) mod command_parser;
+pub(crate) mod history_sync;
 pub(crate) mod recovery_error;
 pub(crate) mod stream_output_state;
+pub(crate) mod streamed_turn;
 pub(crate) mod tool_recovery;
+pub(crate) mod turn_journal;
+pub(crate) mod turn_recovery;

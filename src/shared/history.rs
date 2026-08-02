@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::{
+    io::{self, ErrorKind},
+    path::{Path, PathBuf},
+};
 
 use anyhow::Context;
 use rig::message::Message;
@@ -50,15 +53,8 @@ impl History {
                 .acquire()
                 .await
                 .context("failed to acquire the chat history read permit")?;
-            match fs::read_to_string(history_path.as_path()).await {
-                Ok(json) => Self::deserialize(json.as_str()).with_context(|| {
-                    format!(
-                        "failed to parse chat history from '{}'",
-                        history_path.display()
-                    )
-                })?,
-                Err(_) => Vec::new(),
-            }
+            let read_result = fs::read_to_string(history_path.as_path()).await;
+            Self::messages_from_read_result(read_result, history_path.as_path())?
         };
 
         Ok((
@@ -78,18 +74,40 @@ impl History {
         serde_json::from_str(json)
     }
 
+    fn messages_from_read_result(
+        read_result: io::Result<String>,
+        history_path: &Path,
+    ) -> anyhow::Result<Vec<Message>> {
+        match read_result {
+            Ok(json) => Self::deserialize(json.as_str()).with_context(|| {
+                format!(
+                    "failed to parse chat history from '{}'",
+                    history_path.display()
+                )
+            }),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(error).with_context(|| {
+                format!(
+                    "failed to read chat history from '{}'",
+                    history_path.display()
+                )
+            }),
+        }
+    }
+
     pub async fn save(&self, messages: &[&Message]) -> anyhow::Result<()> {
+        let json = Self::serialize(messages).context("failed to serialize chat history")?;
         let _write_permit = self
             .io_semaphore
             .acquire()
             .await
             .context("failed to acquire the chat history write permit")?;
-        let json = Self::serialize(messages)?;
+
         fs::write(self.history_path.as_path(), json.as_str())
             .await
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "failed to write chat history to '{}': {error}",
+            .with_context(|| {
+                format!(
+                    "failed to write chat history to '{}'",
                     self.history_path.display()
                 )
             })
@@ -98,54 +116,66 @@ impl History {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        io::{self, ErrorKind},
+        path::Path,
+    };
 
+    use anyhow::ensure;
     use rig::message::Message;
-    use tokio::sync::Semaphore;
 
     use super::History;
 
     #[test]
-    fn messages_round_trip_through_json() {
+    fn messages_round_trip_through_json() -> anyhow::Result<()> {
         let messages = [Message::user("Hello"), Message::assistant("Hi")];
         let message_refs = messages.iter().collect::<Vec<_>>();
 
-        let json = History::serialize(&message_refs).expect("messages should serialize");
-        let restored = History::deserialize(json.as_str()).expect("messages should deserialize");
+        let json = History::serialize(&message_refs)?;
+        let restored = History::deserialize(json.as_str())?;
         let restored_refs = restored.iter().collect::<Vec<_>>();
+        let restored_json = History::serialize(&restored_refs)?;
 
-        assert_eq!(
-            History::serialize(&restored_refs).expect("restored messages should serialize"),
-            json
+        ensure!(restored_json == json, "round-trip JSON changed");
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_json_is_rejected() -> anyhow::Result<()> {
+        match History::deserialize("not json") {
+            Ok(_) => anyhow::bail!("invalid JSON was accepted"),
+            Err(error) => ensure!(error.is_syntax(), "unexpected JSON error: {error}"),
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn missing_history_returns_empty_messages() -> anyhow::Result<()> {
+        let messages = History::messages_from_read_result(
+            Err(io::Error::from(ErrorKind::NotFound)),
+            Path::new("history.json"),
+        )?;
+
+        ensure!(messages.is_empty(), "missing history was not empty");
+        Ok(())
+    }
+
+    #[test]
+    fn history_read_error_keeps_context() -> anyhow::Result<()> {
+        let result = History::messages_from_read_result(
+            Err(io::Error::new(ErrorKind::PermissionDenied, "denied")),
+            Path::new("history.json"),
         );
-    }
-
-    #[test]
-    fn invalid_json_is_rejected() {
-        let error = History::deserialize("not json").expect_err("invalid JSON should fail");
-
-        assert!(error.is_syntax());
-    }
-
-    #[test]
-    fn io_operations_are_serialized_by_a_single_permit() {
-        let history = History {
-            io_semaphore: Semaphore::new(1),
-            history_path: PathBuf::from("unused"),
+        let error = match result {
+            Ok(_) => anyhow::bail!("permission error was ignored"),
+            Err(error) => error,
         };
 
-        let first_permit = history
-            .io_semaphore
-            .try_acquire()
-            .expect("the first operation should acquire the only permit");
-        assert!(
-            history.io_semaphore.try_acquire().is_err(),
-            "a concurrent operation must not acquire a permit while one is held"
+        ensure!(
+            format!("{error:#}") == "failed to read chat history from 'history.json': denied",
+            "unexpected read error: {error:#}"
         );
-        drop(first_permit);
-        assert!(
-            history.io_semaphore.try_acquire().is_ok(),
-            "the permit must be reusable after the operation releases it"
-        );
+        Ok(())
     }
 }

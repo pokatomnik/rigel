@@ -12,7 +12,11 @@ use crate::{
         search_text::SearchText, stat::Stat,
     },
     use_cases::{
-        chat::{chat::Chat, tool_recovery::ToolRecoveryHook},
+        chat::{
+            chat::Chat,
+            history_sync::{ChatHistory, HistorySyncHook},
+            tool_recovery::ToolRecoveryHook,
+        },
         model_selector::model_selector::ModelSelector,
     },
 };
@@ -64,6 +68,7 @@ impl Controller<IndexControllerDeps> for IndexController {
 
         let (history, chat_history) = History::bootstrap().await?;
         let history = Arc::new(history);
+        let chat_history = Arc::new(ChatHistory::new(chat_history, history));
         let apply_patch = ApplyPatch::new().await?;
         let create_directory = CreateDirectory::new().await?;
         let create_file = CreateFile::new().await?;
@@ -82,6 +87,7 @@ impl Controller<IndexControllerDeps> for IndexController {
         let agent = client
             .agent(model_id)
             .preamble(system_prompt.as_str())
+            .add_hook(HistorySyncHook::new(chat_history.clone()))
             .add_hook(ToolRecoveryHook)
             .tool(Adder)
             .tool(apply_patch)
@@ -100,19 +106,7 @@ impl Controller<IndexControllerDeps> for IndexController {
             .default_max_turns(MAX_AGENT_TURNS)
             .build();
 
-        let terminal_io = deps.terminal_io.clone();
-        let history_for_save = history.clone();
-        let chat = Chat::new(
-            agent,
-            deps.terminal_io.clone(),
-            chat_history,
-            async move |messages| {
-                if let Err(error) = history_for_save.save(messages).await {
-                    terminal_io
-                        .eprintln(format!("Failed to save chat history: {error:#}").as_str());
-                }
-            },
-        );
+        let chat = Chat::from_history(agent, deps.terminal_io.clone(), chat_history);
 
         deps.terminal_io
             .clone()

@@ -11,7 +11,7 @@ use rig::{
 const MAX_EMPTY_RECOVERY_ATTEMPTS: usize = 2;
 const MAX_TOTAL_TOOL_FAILURES: usize = 6;
 const MAX_REPEATED_FAILURES: usize = 2;
-const MAX_INVALID_TOOL_CALL_ATTEMPTS: usize = 2;
+pub(crate) const MAX_INVALID_TOOL_CALL_ATTEMPTS: usize = 2;
 const TOOL_STATUS_FIELD: &str = "rigel_tool_status";
 const TOOL_STATUS_ERROR: &str = "error";
 const TOOL_STATUS_RECOVERED: &str = "recovered";
