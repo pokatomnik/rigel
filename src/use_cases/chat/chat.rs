@@ -208,6 +208,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compact_context_sends_complete_history_before_prompt() -> Result<()> {
+        let model = MockCompletionModel::text("compressed summary");
+        let source = vec![Message::user("first"), Message::assistant("second")];
+        let history = Arc::new(ChatHistory::new(source.clone(), NoopPersistence));
+        let agent = AgentBuilder::new(model.clone()).build();
+        let chat = Chat::from_history(agent, Arc::new(TerminalIO), history);
+
+        ensure!(chat.compact_context(summarization().to_string()).await?);
+        let requests = model.requests();
+        let [request] = requests.as_slice() else {
+            anyhow::bail!("compaction must make exactly one model request");
+        };
+        let sent = request.chat_history.iter().cloned().collect::<Vec<_>>();
+        let mut expected = source;
+        expected.push(Message::user(summarization()));
+        ensure!(sent == expected, "compaction request omitted chat history");
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn compact_context_keeps_history_when_model_run_fails() -> Result<()> {
         let model = MockCompletionModel::new([MockTurn::error("boom")]);
         let agent = AgentBuilder::new(model).build();
