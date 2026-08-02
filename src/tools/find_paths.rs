@@ -352,7 +352,7 @@ impl Tool for FindPaths {
     type Error = ToolExecutionError;
 
     fn description(&self) -> String {
-        "Find files and directories by glob patterns within the workspace. Set include_hidden to true when looking for project configuration, CI files, or environment templates.".to_string()
+        "Find paths by glob patterns relative to path. Search is not recursive by default. To search all nested directories, prefix every extension pattern with '**/' (for example, '**/*.rs', '**/*.py', and '**/*.ts'); '*.rs' matches only files directly in path. Set include_hidden for hidden files.".to_string()
     }
 
     fn parameters(&self) -> serde_json::Value {
