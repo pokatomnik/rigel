@@ -23,14 +23,15 @@ use crate::{
 use clap::Args;
 use reqwest::Client;
 use rig::{
+    Agent,
     client::{AgentClientExt, ModelListingClient},
-    providers::ollama,
+    providers::ollama::{self, CompletionModel},
 };
 
 const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 const MAX_AGENT_TURNS: usize = 12;
 
-#[derive(Args, Debug)]
+#[derive(Args, Clone, Debug)]
 #[clap(rename_all = "kebab-case")]
 pub struct IndexController {
     #[arg(long = "base-url", short = 'b', default_value_t = DEFAULT_OLLAMA_URL.to_owned(), help = "Ollama server base URL")]
@@ -40,35 +41,19 @@ pub struct IndexController {
     api_key: Option<String>,
 }
 
-#[derive(Clone)]
-pub(crate) struct IndexControllerDeps {
-    terminal_io: Arc<TerminalIO>,
-    http_client: Arc<Client>,
-}
-
-impl IndexControllerDeps {
-    pub fn new(terminal_io: Arc<TerminalIO>, http_client: Arc<Client>) -> Self {
-        Self {
-            terminal_io,
-            http_client,
-        }
-    }
-}
-
-impl Controller<IndexControllerDeps> for IndexController {
-    async fn handle(&self, deps: IndexControllerDeps) -> anyhow::Result<()> {
+impl IndexController {
+    async fn build_agent(
+        &self,
+        chat_history: Arc<ChatHistory<Arc<History>>>,
+        deps: Arc<IndexControllerDeps>,
+    ) -> anyhow::Result<Agent<CompletionModel>> {
         let client = ollama::Client::builder()
             .api_key(self.api_key.clone().unwrap_or_default())
             .base_url(self.base_url.clone())
             .build()?;
-
         let models = client.list_models().await?;
-
         let model_id = models.select_model_sync(deps.terminal_io.clone())?;
 
-        let (history, chat_history) = History::bootstrap().await?;
-        let history = Arc::new(history);
-        let chat_history = Arc::new(ChatHistory::new(chat_history, history));
         let apply_patch = ApplyPatch::new().await?;
         let create_directory = CreateDirectory::new().await?;
         let create_file = CreateFile::new().await?;
@@ -106,7 +91,47 @@ impl Controller<IndexControllerDeps> for IndexController {
             .default_max_turns(MAX_AGENT_TURNS)
             .build();
 
-        let chat = Chat::from_history(agent, deps.terminal_io.clone(), chat_history);
+        Ok(agent)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct IndexControllerDeps {
+    terminal_io: Arc<TerminalIO>,
+    http_client: Arc<Client>,
+}
+
+impl IndexControllerDeps {
+    pub fn new(terminal_io: Arc<TerminalIO>, http_client: Arc<Client>) -> Self {
+        Self {
+            terminal_io,
+            http_client,
+        }
+    }
+}
+
+impl Controller<IndexControllerDeps> for IndexController {
+    async fn handle(&self, deps: IndexControllerDeps) -> anyhow::Result<()> {
+        let deps = Arc::new(deps);
+        let (history, chat_history) = History::bootstrap().await?;
+        let chat_history = Arc::new(ChatHistory::new(chat_history, Arc::new(history)));
+        let agent = self.build_agent(chat_history.clone(), deps.clone()).await?;
+
+        let controller = self.clone();
+        let ch_clone = chat_history.clone();
+        let deps_clone = deps.clone();
+        let create_new_agent = async move || {
+            controller
+                .build_agent(ch_clone.clone(), deps_clone.clone())
+                .await
+        };
+
+        let chat = Chat::from_history(
+            agent,
+            deps.terminal_io.clone(),
+            chat_history,
+            create_new_agent,
+        );
 
         deps.terminal_io
             .clone()

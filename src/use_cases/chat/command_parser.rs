@@ -31,6 +31,9 @@ pub(crate) enum CommandParserResult {
 
     /// Context compact required
     Compact(String),
+
+    /// Model change request
+    ModelChange,
 }
 
 pub(crate) struct CommandParser {
@@ -50,6 +53,7 @@ impl CommandParser {
             .eprintln("/editor - Open default editor to type your prompt");
         self.terminal_io
             .eprintln("/compact - compact dialog context");
+        self.terminal_io.eprintln("/model - select another model");
 
         CommandParserResult::CommandContinue
     }
@@ -119,13 +123,16 @@ impl CommandParser {
     }
 
     pub async fn parse(&self, raw_input: String) -> CommandParserResult {
-        match raw_input.as_str() {
-            "/exit" => CommandParserResult::CommandExit,
-            "/skill" => self.get_skill().await,
-            "/help" => self.handle_help(),
-            "/editor" => self.handle_editor(),
-            "/new" => CommandParserResult::New,
-            "/compact" => CommandParserResult::Compact(summarization().to_string()),
+        match raw_input {
+            _ if raw_input.starts_with("/exit") => CommandParserResult::CommandExit,
+            _ if raw_input.starts_with("/skill") => self.get_skill().await,
+            _ if raw_input.starts_with("/help") => self.handle_help(),
+            _ if raw_input.starts_with("/editor") => self.handle_editor(),
+            _ if raw_input.starts_with("/new") => CommandParserResult::New,
+            _ if raw_input.starts_with("/compact") => {
+                CommandParserResult::Compact(summarization().to_string())
+            }
+            _ if raw_input.starts_with("/model") => CommandParserResult::ModelChange,
             _ => CommandParserResult::Prompt(raw_input, false),
         }
     }
@@ -171,5 +178,12 @@ mod tests {
         let result = parser().parse("/new".to_string()).await;
 
         assert!(matches!(result, CommandParserResult::New));
+    }
+
+    #[tokio::test]
+    async fn model_command_requests_model_change() {
+        let result = parser().parse("/model".to_string()).await;
+
+        assert!(matches!(result, CommandParserResult::ModelChange));
     }
 }

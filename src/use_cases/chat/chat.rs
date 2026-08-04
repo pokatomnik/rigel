@@ -5,6 +5,7 @@ use rig::{
     completion::{Chat as RigChat, CompletionModel},
     message::Message,
 };
+use tokio::sync::Mutex;
 
 use crate::{
     shared::terminal_io::TerminalIO,
@@ -18,39 +19,44 @@ use crate::{
 };
 
 /// Orchestrates commands and conversation turns between the user and the model.
-pub(crate) struct Chat<CM, P>
+pub(crate) struct Chat<CM, P, GM>
 where
     CM: CompletionModel,
     P: HistoryPersistence,
+    GM: AsyncFn() -> anyhow::Result<Agent<CM>> + 'static,
 {
-    agent: Agent<CM>,
+    agent: Arc<Mutex<Agent<CM>>>,
     terminal_io: Arc<TerminalIO>,
     history: Arc<ChatHistory<P>>,
     command_parser: CommandParser,
+    change_model: GM,
 }
 
-impl<CM, P> Chat<CM, P>
+impl<CM, P, GM> Chat<CM, P, GM>
 where
     CM: CompletionModel + 'static,
     P: HistoryPersistence,
+    GM: AsyncFn() -> anyhow::Result<Agent<CM>> + 'static,
 {
     pub(crate) fn from_history(
         agent: Agent<CM>,
         terminal_io: Arc<TerminalIO>,
         history: Arc<ChatHistory<P>>,
+        change_model: GM,
     ) -> Self {
         let command_parser = CommandParser::new(terminal_io.clone());
         Self {
-            agent,
+            agent: Arc::new(Mutex::new(agent)),
             terminal_io,
             history,
             command_parser,
+            change_model,
         }
     }
 
     fn streamed_turn(&self) -> StreamedTurn<'_, CM, P> {
         StreamedTurn::new(
-            &self.agent,
+            self.agent.clone(),
             self.terminal_io.as_ref(),
             self.history.as_ref(),
         )
@@ -105,7 +111,11 @@ where
 
     async fn compact_context(&self, summarization: String) -> anyhow::Result<bool> {
         let mut messages = self.history.snapshot().await;
-        let Ok(summarized) = self.agent.chat(summarization, &mut messages).await else {
+        let summarized = {
+            let agent = self.agent.lock().await;
+            agent.chat(summarization, &mut messages).await
+        };
+        let Ok(summarized) = summarized else {
             self.terminal_io.eprintln_gray("Compacting failed.");
             return Ok(false);
         };
@@ -128,6 +138,13 @@ where
         Ok(self.command_parser.parse(input).await)
     }
 
+    async fn handle_change_model(&self) -> anyhow::Result<()> {
+        let new_agent = (self.change_model)().await?;
+        let mut guard = self.agent.lock().await;
+        *guard = new_agent;
+        Ok(())
+    }
+
     /// Runs the interactive loop until `/exit` or terminal input failure.
     pub async fn run(&self) -> anyhow::Result<()> {
         loop {
@@ -144,6 +161,9 @@ where
                 CommandParserResult::Compact(summarization) => {
                     self.handle_compaction(summarization).await?;
                 }
+                CommandParserResult::ModelChange => {
+                    self.handle_change_model().await?;
+                }
             }
         }
         Ok(())
@@ -156,11 +176,14 @@ fn compacted_history(summarized: String) -> Vec<Message> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
 
     use anyhow::{Result, ensure};
     use rig::{
-        AgentBuilder,
+        Agent, AgentBuilder,
         message::Message,
         test_utils::{MockCompletionModel, MockTurn},
     };
@@ -197,7 +220,9 @@ mod tests {
             vec![Message::user("first turn")],
             NoopPersistence,
         ));
-        let chat = Chat::from_history(agent, Arc::new(TerminalIO), history.clone());
+        let chat = Chat::from_history(agent, Arc::new(TerminalIO), history.clone(), async || {
+            Ok(AgentBuilder::new(MockCompletionModel::text("replacement")).build())
+        });
 
         ensure!(chat.compact_context(summarization().to_string()).await?);
         ensure!(
@@ -213,7 +238,9 @@ mod tests {
         let source = vec![Message::user("first"), Message::assistant("second")];
         let history = Arc::new(ChatHistory::new(source.clone(), NoopPersistence));
         let agent = AgentBuilder::new(model.clone()).build();
-        let chat = Chat::from_history(agent, Arc::new(TerminalIO), history);
+        let chat = Chat::from_history(agent, Arc::new(TerminalIO), history, async || {
+            Ok(AgentBuilder::new(MockCompletionModel::text("replacement")).build())
+        });
 
         ensure!(chat.compact_context(summarization().to_string()).await?);
         let requests = model.requests();
@@ -235,12 +262,70 @@ mod tests {
             vec![Message::user("keep me")],
             NoopPersistence,
         ));
-        let chat = Chat::from_history(agent, Arc::new(TerminalIO), history.clone());
+        let chat = Chat::from_history(agent, Arc::new(TerminalIO), history.clone(), async || {
+            Ok(AgentBuilder::new(MockCompletionModel::text("replacement")).build())
+        });
 
         ensure!(!chat.compact_context(summarization().to_string()).await?);
         ensure!(
             history.snapshot().await == vec![Message::user("keep me")],
             "failed compaction changed history"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn changing_model_replaces_agent_used_for_compaction() -> Result<()> {
+        let initial = AgentBuilder::new(MockCompletionModel::text("old summary")).build();
+        let replacement = AgentBuilder::new(MockCompletionModel::text("new summary")).build();
+        let changed = Arc::new(AtomicBool::new(false));
+        let changed_by_callback = changed.clone();
+        let replacement_by_callback = replacement.clone();
+        let history = Arc::new(ChatHistory::new(
+            vec![Message::user("before model change")],
+            NoopPersistence,
+        ));
+        let chat = Chat::from_history(
+            initial,
+            Arc::new(TerminalIO),
+            history.clone(),
+            async move || {
+                changed_by_callback.store(true, Ordering::SeqCst);
+                Ok(replacement_by_callback.clone())
+            },
+        );
+
+        chat.handle_change_model().await?;
+        ensure!(changed.load(Ordering::SeqCst));
+        ensure!(chat.compact_context(summarization().to_string()).await?);
+        ensure!(
+            history.snapshot().await == vec![Message::assistant("new summary")],
+            "compaction used the old agent after model change"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_model_change_preserves_current_agent() -> Result<()> {
+        let initial = AgentBuilder::new(MockCompletionModel::text("current summary")).build();
+        let history = Arc::new(ChatHistory::new(
+            vec![Message::user("before failed model change")],
+            NoopPersistence,
+        ));
+        let chat = Chat::from_history(
+            initial,
+            Arc::new(TerminalIO),
+            history.clone(),
+            async || -> anyhow::Result<Agent<MockCompletionModel>> {
+                anyhow::bail!("model selection failed")
+            },
+        );
+
+        ensure!(chat.handle_change_model().await.is_err());
+        ensure!(chat.compact_context(summarization().to_string()).await?);
+        ensure!(
+            history.snapshot().await == vec![Message::assistant("current summary")],
+            "failed model change replaced the current agent"
         );
         Ok(())
     }

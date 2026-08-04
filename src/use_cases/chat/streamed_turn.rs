@@ -1,4 +1,6 @@
 use futures::StreamExt;
+use std::sync::Arc;
+
 use rig::{
     Agent, OneOrMany,
     agent::{MultiTurnStreamItem, PromptResponse, StreamingError},
@@ -6,6 +8,7 @@ use rig::{
     message::{Message, Reasoning, Text, ToolCall, ToolResult, ToolResultContent, UserContent},
     streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
 };
+use tokio::sync::Mutex;
 
 use crate::{
     shared::terminal_io::TerminalIO,
@@ -48,7 +51,7 @@ where
     CM: CompletionModel,
     P: HistoryPersistence,
 {
-    agent: &'a Agent<CM>,
+    agent: Arc<Mutex<Agent<CM>>>,
     terminal_io: &'a TerminalIO,
     history: &'a ChatHistory<P>,
 }
@@ -59,7 +62,7 @@ where
     P: HistoryPersistence,
 {
     pub(crate) fn new(
-        agent: &'a Agent<CM>,
+        agent: Arc<Mutex<Agent<CM>>>,
         terminal_io: &'a TerminalIO,
         history: &'a ChatHistory<P>,
     ) -> Self {
@@ -84,11 +87,13 @@ where
             .update(HistoryUpdate::Append(Message::user(prompt.clone())))
             .await?;
         let mut progress = StreamProgress::new(base.clone(), prompt.clone());
-        let mut stream = self
-            .agent
-            .stream_chat(prompt, base.clone())
-            .max_invalid_tool_call_retries(MAX_INVALID_TOOL_CALL_ATTEMPTS)
-            .await;
+        let request = {
+            let agent = self.agent.lock().await;
+            agent
+                .stream_chat(prompt, base.clone())
+                .max_invalid_tool_call_retries(MAX_INVALID_TOOL_CALL_ATTEMPTS)
+        };
+        let mut stream = request.await;
 
         while let Some(item) = stream.next().await {
             if !progress
@@ -428,7 +433,7 @@ mod tests {
         let agent = AgentBuilder::new(model)
             .add_hook(HistorySyncHook::new(history.clone()))
             .build();
-        let turn = StreamedTurn::new(&agent, &TerminalIO, &history);
+        let turn = StreamedTurn::new(Arc::new(Mutex::new(agent)), &TerminalIO, &history);
 
         let outcome = turn.run("prompt".to_string(), Vec::new()).await?;
         ensure!(matches!(outcome, StreamRunOutcome::Completed(_)));
@@ -459,7 +464,11 @@ mod tests {
             .default_max_turns(3)
             .build();
 
-        assert_failed(StreamedTurn::new(&agent, &TerminalIO, &history), &history).await?;
+        assert_failed(
+            StreamedTurn::new(Arc::new(Mutex::new(agent)), &TerminalIO, &history),
+            &history,
+        )
+        .await?;
         let stored = history.snapshot().await;
         ensure!(has_rejected_assistant_metadata(&stored));
         ensure!(has_user_text(&stored, "correct the response"));
@@ -478,7 +487,11 @@ mod tests {
             .default_max_turns(3)
             .build();
 
-        assert_failed(StreamedTurn::new(&agent, &TerminalIO, &history), &history).await?;
+        assert_failed(
+            StreamedTurn::new(Arc::new(Mutex::new(agent)), &TerminalIO, &history),
+            &history,
+        )
+        .await?;
         let stored = history.snapshot().await;
         ensure!(has_tool_call(&stored, "default_api"));
         ensure!(has_tool_result(&stored, "invalid-call"));
