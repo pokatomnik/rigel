@@ -63,40 +63,26 @@ impl IndexController {
         let model_id = client.select_model(deps.terminal_io.clone()).await?;
         let client = client.completions_api();
 
-        let apply_patch = ApplyPatch::new().await?;
-        let create_directory = CreateDirectory::new().await?;
-        let create_file = CreateFile::new().await?;
-        let delete_directory = DeleteDirectory::new(deps.terminal_io.clone()).await?;
-        let delete_file = DeleteFile::new(deps.terminal_io.clone()).await?;
-        let find_paths = FindPaths::new().await?;
-        let list_directory = ListDirectory::new().await?;
-        let move_path = MovePath::new(deps.terminal_io.clone()).await?;
-        let read_file = ReadFile::new().await?;
-        let run_in_terminal = RunInTerminal::new(deps.terminal_io.clone()).await?;
-        let search_text = SearchText::new().await?;
-        let stat = Stat::new().await?;
-        let fetch_webpage = FetchWebpage::new(deps.http_client.clone());
         let system_prompt = system_prompt().await;
-
         let agent = client
             .agent(model_id)
             .preamble(system_prompt.as_str())
             .add_hook(HistorySyncHook::new(chat_history.clone()))
             .add_hook(ToolRecoveryHook)
             .tool(Adder)
-            .tool(apply_patch)
-            .tool(create_directory)
-            .tool(create_file)
-            .tool(delete_directory)
-            .tool(delete_file)
-            .tool(find_paths)
-            .tool(list_directory)
-            .tool(move_path)
-            .tool(read_file)
-            .tool(run_in_terminal)
-            .tool(search_text)
-            .tool(stat)
-            .tool(fetch_webpage)
+            .tool(ApplyPatch::new().await?)
+            .tool(CreateDirectory::new().await?)
+            .tool(CreateFile::new().await?)
+            .tool(DeleteDirectory::new(deps.terminal_io.clone()).await?)
+            .tool(DeleteFile::new(deps.terminal_io.clone()).await?)
+            .tool(FindPaths::new().await?)
+            .tool(ListDirectory::new().await?)
+            .tool(MovePath::new(deps.terminal_io.clone()).await?)
+            .tool(ReadFile::new().await?)
+            .tool(RunInTerminal::new(deps.terminal_io.clone()).await?)
+            .tool(SearchText::new().await?)
+            .tool(Stat::new().await?)
+            .tool(FetchWebpage::new(deps.http_client.clone()))
             .default_max_turns(MAX_AGENT_TURNS)
             .build();
 
