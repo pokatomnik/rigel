@@ -24,17 +24,21 @@ use clap::Args;
 use reqwest::Client;
 use rig::{
     Agent,
-    client::{AgentClientExt, ModelListingClient},
-    providers::ollama::{self, CompletionModel},
+    client::AgentClientExt,
+    providers::openai::{self, CompletionModel},
 };
 
-const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 const MAX_AGENT_TURNS: usize = 12;
 
 #[derive(Args, Clone, Debug)]
 #[clap(rename_all = "kebab-case")]
 pub struct IndexController {
-    #[arg(long = "base-url", short = 'b', default_value_t = DEFAULT_OLLAMA_URL.to_owned(), help = "Ollama server base URL")]
+    #[arg(
+        long = "base-url",
+        short = 'b',
+        required = true,
+        help = "OpenAI-compatible API base URL"
+    )]
     base_url: String,
 
     #[arg(long = "api-key", short = 'k', help = "API key for authentication")]
@@ -47,12 +51,17 @@ impl IndexController {
         chat_history: Arc<ChatHistory<Arc<History>>>,
         deps: Arc<IndexControllerDeps>,
     ) -> anyhow::Result<Agent<CompletionModel>> {
-        let client = ollama::Client::builder()
-            .api_key(self.api_key.clone().unwrap_or_default())
+        let api_key = match &self.api_key {
+            Some(key) => key.clone(),
+            None => String::new(),
+        };
+        let client = openai::Client::builder()
+            .api_key(api_key)
             .base_url(self.base_url.clone())
+            .http_client(deps.http_client.as_ref().clone())
             .build()?;
-        let models = client.list_models().await?;
-        let model_id = models.select_model_sync(deps.terminal_io.clone())?;
+        let model_id = client.select_model(deps.terminal_io.clone()).await?;
+        let client = client.completions_api();
 
         let apply_patch = ApplyPatch::new().await?;
         let create_directory = CreateDirectory::new().await?;

@@ -1,10 +1,10 @@
 # Rigel
 
-A Rust 2024 CLI agent for interacting with LLM models served by Ollama.
+A Rust 2024 CLI agent for interacting with OpenAI-compatible LLM APIs.
 
 ## Project Overview
 
-Rigel is a conversational LLM agent that integrates filesystem tools into an interactive CLI session. It connects to Ollama servers and provides atomic, deterministic filesystem operations within the workspace context. All tools work only within the workspace where Rigel started - absolute paths and parent references are rejected for security reasons.
+Rigel is a conversational LLM agent that integrates filesystem tools into an interactive CLI session. It connects to OpenAI-compatible servers and provides atomic, deterministic filesystem operations within the workspace context. All tools work only within the workspace where Rigel started - absolute paths and parent references are rejected for security reasons.
 
 ## Quick Start
 
@@ -25,14 +25,14 @@ cargo run -- --help
 ### Configuration Options
 
 ```bash
-# Connect to Ollama server with base URL
-cargo run -- -b <ollama-url>
+# Connect to an OpenAI-compatible API (base URL is required)
+cargo run -- -b <api-base-url>
 
 # Optionally provide API key for authenticated endpoints
-cargo run -- -b <ollama-url> -k <api-key>
+cargo run -- -b <api-base-url> -k <api-key>
 
-# Start Rigel with local Ollama server (default: http://localhost:11434)
-cargo run -- -b http://localhost:11434
+# Start Rigel with a local OpenAI-compatible server
+cargo run -- -b http://localhost:8000/v1
 
 # Run tests
 cargo test --all-targets
@@ -56,8 +56,8 @@ cd rigel
 # Run help command
 cargo run -- --help
 
-# Start Rigel with local Ollama server
-cargo run -- --base-url http://localhost:11434
+# Start Rigel with a local OpenAI-compatible server
+cargo run -- --base-url http://localhost:8000/v1
 
 # Build the project
 cargo build
@@ -95,18 +95,18 @@ rigel/
 
 The CLI entry point is defined in `src/cmd/cli.rs`. It provides:
 
-- **Base URL**: Connect to Ollama server at a configurable endpoint (default: http://localhost:11434)
-- **API Key**: Optional authentication for Ollama endpoints
+- **Base URL**: Required OpenAI-compatible API base URL; Rigel calls `/models` and `/chat/completions` below it
+- **API Key**: Optional bearer authentication for API endpoints
 
 ```bash
-cargo run -- -b <ollama-url> -k <api-key>
+cargo run -- -b <api-base-url> -k <api-key>
 ```
 
 ### Agent Controller
 
 Located in `src/controllers/index_controller.rs`, the IndexController orchestrates agent operations:
 
-- Establishes connection to Ollama server
+- Establishes connection to an OpenAI-compatible server
 - Selects available models deterministically
 - Initializes chat with system prompt
 - Manages conversation turns (default: 12)

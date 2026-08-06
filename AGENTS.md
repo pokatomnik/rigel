@@ -2,8 +2,8 @@
 
 ## Project Structure & Module Organization
 
-Rigel is a Rust 2024 CLI for chatting with models served by Ollama. The entry
-point is `src/main.rs`. Command-line parsing lives in `src/cmd/`, request
+Rigel is a Rust 2024 CLI for chatting with OpenAI-compatible model APIs. The
+entry point is `src/main.rs`. Command-line parsing lives in `src/cmd/`, request
 orchestration in `src/controllers/`, and application workflows in
 `src/use_cases/` (currently chat and model selection). Shared terminal behavior
 belongs in `src/shared/`; LLM prompts and prompt text are under `src/prompts/`;
@@ -100,8 +100,8 @@ necessarily another tool call.
 ## Build, Test, and Development Commands
 
 - `cargo run -- --help` displays the available CLI options.
-- `cargo run -- --base-url http://localhost:11434` starts Rigel against a local
-  Ollama server; use `--api-key` only when the endpoint requires it.
+- `cargo run -- --base-url http://localhost:8000/v1` starts Rigel against a
+  local OpenAI-compatible server; use `--api-key` only when required.
 - `cargo build` compiles the debug binary to `target/debug/rigel`.
 - `cargo test --all-targets` runs the complete test suite.
 - `cargo fmt --all -- --check` verifies standard Rust formatting.
@@ -161,5 +161,5 @@ Recent commits use short, imperative, title-cased subjects such as
 `Refactor chat loop`. Keep commits focused and avoid mixing unrelated cleanup
 with feature changes. Pull requests should explain the behavior change, list
 verification commands, and link relevant issues. Include terminal output or
-screenshots when CLI interaction changes, and call out any Ollama model or
-server assumptions needed for manual testing.
+screenshots when CLI interaction changes, and call out any API model or server
+assumptions needed for manual testing.
