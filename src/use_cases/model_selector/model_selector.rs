@@ -48,7 +48,9 @@ struct ModelEntry {
 }
 
 fn parse_model_ids(body: &[u8]) -> anyhow::Result<Vec<String>> {
-    let response = serde_json::from_slice::<ModelsResponse>(body)?;
+    // Try to parse the models response
+    let response = serde_json::from_slice::<ModelsResponse>(body)
+        .map_err(|_| anyhow::anyhow!("Incorrect API url"))?;
     Ok(response.data.into_iter().map(|model| model.id).collect())
 }
 
@@ -76,5 +78,13 @@ mod tests {
     #[test]
     fn missing_model_id_is_rejected() {
         assert!(parse_model_ids(br#"{"data":[{"object":"model"}]}"#).is_err());
+    }
+
+    #[test]
+    fn incorrect_api_url_returns_error() {
+        // Test with invalid JSON or wrong API response format
+        let result = parse_model_ids(b"not json at all");
+        assert!(result.is_err());
+        assert_eq!(format!("{}", result.unwrap_err()), "Incorrect API url");
     }
 }
