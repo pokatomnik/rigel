@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::{
     controllers::controller::Controller,
     prompts::system::system_prompt,
-    shared::{history::History, terminal_io::TerminalIO},
+    shared::{history::History, mcp_registry::McpRegistry, terminal_io::TerminalIO},
     tools::{
         add::Adder, apply_patch::ApplyPatch, create_directory::CreateDirectory,
         create_file::CreateFile, delete_directory::DeleteDirectory, delete_file::DeleteFile,
@@ -23,7 +23,8 @@ use crate::{
 use clap::Args;
 use reqwest::Client;
 use rig::{
-    Agent,
+    Agent, AgentBuilder,
+    agent::WithBuilderTools,
     client::AgentClientExt,
     providers::openai::{self, CompletionModel},
 };
@@ -35,7 +36,7 @@ const MAX_AGENT_TURNS: usize = 12;
 pub struct IndexController {
     #[arg(
         long = "base-url",
-        short = 'b',
+        short = 'u',
         required = true,
         help = "OpenAI-compatible API base URL"
     )]
@@ -43,9 +44,19 @@ pub struct IndexController {
 
     #[arg(long = "api-key", short = 'k', help = "API key for authentication")]
     api_key: Option<String>,
+
+    #[arg(long = "mcp-config", help = "Path to MCP servers configuration")]
+    mcp_config: Option<String>,
 }
 
 impl IndexController {
+    pub(crate) async fn mcp_registry(&self) -> anyhow::Result<McpRegistry> {
+        match self.mcp_config.as_deref() {
+            Some(path) => McpRegistry::from_config_file(path).await,
+            None => Ok(McpRegistry::empty()),
+        }
+    }
+
     async fn build_agent(
         &self,
         chat_history: Arc<ChatHistory<Arc<History>>>,
@@ -64,7 +75,7 @@ impl IndexController {
         let client = client.completions_api();
 
         let system_prompt = system_prompt().await;
-        let agent = client
+        let mut agent_builder = client
             .agent(model_id)
             .preamble(system_prompt.as_str())
             .add_hook(HistorySyncHook::new(chat_history.clone()))
@@ -82,25 +93,41 @@ impl IndexController {
             .tool(RunInTerminal::new(deps.terminal_io.clone()).await?)
             .tool(SearchText::new().await?)
             .tool(Stat::new().await?)
-            .tool(FetchWebpage::new(deps.http_client.clone()))
-            .default_max_turns(MAX_AGENT_TURNS)
-            .build();
+            .tool(FetchWebpage::new(deps.http_client.clone()));
+        agent_builder = add_mcp_tools(agent_builder, &deps.mcp_registry);
+        let agent = agent_builder.default_max_turns(MAX_AGENT_TURNS).build();
 
         Ok(agent)
     }
+}
+
+fn add_mcp_tools(
+    mut builder: AgentBuilder<CompletionModel, WithBuilderTools>,
+    registry: &McpRegistry,
+) -> AgentBuilder<CompletionModel, WithBuilderTools> {
+    for (tools, peer) in registry.tools() {
+        builder = builder.rmcp_tools(tools, peer);
+    }
+    builder
 }
 
 #[derive(Clone)]
 pub(crate) struct IndexControllerDeps {
     terminal_io: Arc<TerminalIO>,
     http_client: Arc<Client>,
+    mcp_registry: Arc<McpRegistry>,
 }
 
 impl IndexControllerDeps {
-    pub fn new(terminal_io: Arc<TerminalIO>, http_client: Arc<Client>) -> Self {
+    pub fn new(
+        terminal_io: Arc<TerminalIO>,
+        http_client: Arc<Client>,
+        mcp_registry: Arc<McpRegistry>,
+    ) -> Self {
         Self {
             terminal_io,
             http_client,
+            mcp_registry,
         }
     }
 }

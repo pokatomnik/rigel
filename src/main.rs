@@ -31,7 +31,8 @@ async fn main() -> anyhow::Result<()> {
             .connect_timeout(GLOBAL_TOOL_TIMEOUT)
             .build()?,
     );
-    let index_deps = IndexControllerDeps::new(terminal_io.clone(), http_client);
+    let mcp_registry = Arc::new(cli.index.mcp_registry().await?);
+    let index_deps = IndexControllerDeps::new(terminal_io.clone(), http_client, mcp_registry);
 
     if let Err(e) = cli.index.handle(index_deps).await {
         terminal_io.eprintln(e.to_string().as_str());
