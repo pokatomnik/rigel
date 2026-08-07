@@ -391,7 +391,8 @@ impl Tool for FindPaths {
                         "symlink",
                         "any"
                     ],
-                    "default": "file"
+                    "default": "file",
+                    "description": "Type of paths to return: files, directories, symlinks, or any type"
                 },
                 "include_hidden": {
                     "type": "boolean",
@@ -407,7 +408,8 @@ impl Tool for FindPaths {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 1000,
-                    "default": 100
+                    "default": 100,
+                    "description": "Maximum number of matching paths to return"
                 }
             },
             "required": [

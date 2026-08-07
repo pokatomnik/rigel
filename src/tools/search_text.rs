@@ -368,37 +368,43 @@ impl Tool for SearchText {
                         "literal",
                         "regex"
                     ],
-                    "default": "literal"
+                    "default": "literal",
+                    "description": "How to read query: exact text (literal) or a regular expression (regex)"
                 },
                 "case_sensitive": {
                     "type": "boolean",
-                    "default": true
+                    "default": true,
+                    "description": "Whether uppercase and lowercase letters must match exactly"
                 },
                 "include": {
                     "type": "array",
                     "items": {
                         "type": "string",
                         "minLength": 1
-                    }
+                    },
+                    "description": "OR glob patterns relative to path. '*' does not cross '/'; '**' does. For files at every directory depth, prefix each pattern with '**/' (for example, '**/*.txt'). Without '**/', '*.txt' matches only files directly inside path."
                 },
                 "exclude": {
                     "type": "array",
                     "items": {
                         "type": "string",
                         "minLength": 1
-                    }
+                    },
+                    "description": "OR glob patterns relative to path. '*' does not cross '/'; '**' does. To exclude a name at every directory depth, prefix the pattern with '**/' (for example, '**/generated/**')."
                 },
                 "context_lines": {
                     "type": "integer",
                     "minimum": 0,
                     "maximum": 10,
-                    "default": 2
+                    "default": 2,
+                    "description": "Number of lines to return before and after each matching line"
                 },
                 "max_results": {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 200,
-                    "default": 50
+                    "default": 50,
+                    "description": "Maximum total number of matching occurrences to return across all files"
                 }
             },
             "required": [

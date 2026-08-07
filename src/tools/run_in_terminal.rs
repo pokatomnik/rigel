@@ -211,7 +211,7 @@ impl Tool for RunInTerminal {
                 "timeout_milliseconds": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Optional operation timeout"
+                    "description": "Maximum command runtime, in milliseconds. Omit to run without a tool timeout."
                 }
             },
             "required": ["code"]

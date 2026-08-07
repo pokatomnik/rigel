@@ -12,6 +12,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     shared::terminal_io::TerminalIO,
+    shared::string_ext::StringShort,
     use_cases::chat::{
         history_sync::{ChatHistory, HISTORY_SYNC_ERROR_PREFIX, HistoryPersistence, HistoryUpdate},
         recovery_error::recovery_context_from_streaming_error,
@@ -333,12 +334,10 @@ fn print_text(terminal_io: &TerminalIO, state: &mut StreamOutputState, text: &Te
 }
 
 fn print_tool_call(terminal_io: &TerminalIO, tool_call: &ToolCall) {
+    let args_str = tool_call.function.arguments.to_string().short(30);
     terminal_io.eprintln(
-        format!(
-            "\n[tool call: {}({})]",
-            tool_call.function.name, tool_call.function.arguments
-        )
-        .as_str(),
+        format!("\n[tool call: {}({})]", tool_call.function.name, args_str)
+            .as_str(),
     );
 }
 
@@ -354,7 +353,7 @@ fn print_tool_result(
         .map(format_tool_result_content)
         .collect::<Vec<_>>()
         .join("\n");
-    terminal_io.eprintln(format!("[tool result: {output}]").as_str());
+    terminal_io.eprintln(format!("[tool result: {}]", output.short(30)).as_str());
 }
 
 fn format_tool_result_content(content: &ToolResultContent) -> String {

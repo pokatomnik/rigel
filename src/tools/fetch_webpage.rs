@@ -117,7 +117,7 @@ impl Tool for FetchWebpage {
                 "timeout_milliseconds": {
                     "type": "integer",
                     "minimum": 0,
-                    "description": "Optional operation timeout"
+                    "description": "Maximum time to wait, in milliseconds. Omit to wait without a tool timeout."
                 }
             },
             "required": ["url"]
