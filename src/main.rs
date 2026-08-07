@@ -33,6 +33,7 @@ async fn main() -> anyhow::Result<()> {
             .gzip(true)
             .brotli(true)
             .connect_timeout(GLOBAL_TOOL_TIMEOUT)
+            .user_agent(include_str!("./user_agents.txt"))
             .build()?,
     );
     let mcp_registry = Arc::new(McpRegistry::from_config(&config).await?);
