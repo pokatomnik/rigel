@@ -152,6 +152,7 @@ impl Tool for ApplyPatch {
                 "edits": {
                     "type": "array",
                     "minItems": 1,
+                    "description": "Text replacements to apply. Every old_text is matched against the same original file, and edits must not overlap.",
                     "items": {
                         "type": "object",
                         "properties": {
