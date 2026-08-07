@@ -3,13 +3,16 @@ use std::sync::Arc;
 use crate::{
     controllers::controller::Controller,
     prompts::system::system_prompt,
-    shared::{history::History, terminal_io::TerminalIO},
+    shared::{
+        history::History,
+        mcp_registry::registry::{McpRegistry, McpToolsExt},
+        terminal_io::TerminalIO,
+    },
     tools::{
-        add::Adder, apply_patch::ApplyPatch, create_directory::CreateDirectory,
-        create_file::CreateFile, delete_directory::DeleteDirectory, delete_file::DeleteFile,
-        fetch_webpage::FetchWebpage, find_paths::FindPaths, list_directory::ListDirectory,
-        move_path::MovePath, read_file::ReadFile, run_in_terminal::RunInTerminal,
-        search_text::SearchText, stat::Stat,
+        apply_patch::ApplyPatch, create_directory::CreateDirectory, create_file::CreateFile,
+        delete_directory::DeleteDirectory, delete_file::DeleteFile, fetch_webpage::FetchWebpage,
+        find_paths::FindPaths, list_directory::ListDirectory, move_path::MovePath,
+        read_file::ReadFile, run_in_terminal::RunInTerminal, search_text::SearchText, stat::Stat,
     },
     use_cases::{
         chat::{
@@ -35,7 +38,7 @@ const MAX_AGENT_TURNS: usize = 12;
 pub struct IndexController {
     #[arg(
         long = "base-url",
-        short = 'b',
+        short = 'u',
         required = true,
         help = "OpenAI-compatible API base URL"
     )]
@@ -64,12 +67,12 @@ impl IndexController {
         let client = client.completions_api();
 
         let system_prompt = system_prompt().await;
+        println!("MCP tools loaded: {}", &deps.mcp_registry.tools().len());
         let agent = client
             .agent(model_id)
             .preamble(system_prompt.as_str())
             .add_hook(HistorySyncHook::new(chat_history.clone()))
             .add_hook(ToolRecoveryHook)
-            .tool(Adder)
             .tool(ApplyPatch::new().await?)
             .tool(CreateDirectory::new().await?)
             .tool(CreateFile::new().await?)
@@ -83,6 +86,7 @@ impl IndexController {
             .tool(SearchText::new().await?)
             .tool(Stat::new().await?)
             .tool(FetchWebpage::new(deps.http_client.clone()))
+            .mcp_tools(&deps.mcp_registry.tools())
             .default_max_turns(MAX_AGENT_TURNS)
             .build();
 
@@ -94,13 +98,19 @@ impl IndexController {
 pub(crate) struct IndexControllerDeps {
     terminal_io: Arc<TerminalIO>,
     http_client: Arc<Client>,
+    mcp_registry: Arc<McpRegistry>,
 }
 
 impl IndexControllerDeps {
-    pub fn new(terminal_io: Arc<TerminalIO>, http_client: Arc<Client>) -> Self {
+    pub fn new(
+        terminal_io: Arc<TerminalIO>,
+        http_client: Arc<Client>,
+        mcp_registry: Arc<McpRegistry>,
+    ) -> Self {
         Self {
             terminal_io,
             http_client,
+            mcp_registry,
         }
     }
 }
