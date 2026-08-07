@@ -3,13 +3,16 @@ use std::sync::Arc;
 use crate::{
     controllers::controller::Controller,
     prompts::system::system_prompt,
-    shared::{history::History, mcp_registry::McpRegistry, terminal_io::TerminalIO},
+    shared::{
+        history::History,
+        mcp_registry::registry::{McpRegistry, McpToolsExt},
+        terminal_io::TerminalIO,
+    },
     tools::{
-        add::Adder, apply_patch::ApplyPatch, create_directory::CreateDirectory,
-        create_file::CreateFile, delete_directory::DeleteDirectory, delete_file::DeleteFile,
-        fetch_webpage::FetchWebpage, find_paths::FindPaths, list_directory::ListDirectory,
-        move_path::MovePath, read_file::ReadFile, run_in_terminal::RunInTerminal,
-        search_text::SearchText, stat::Stat,
+        apply_patch::ApplyPatch, create_directory::CreateDirectory, create_file::CreateFile,
+        delete_directory::DeleteDirectory, delete_file::DeleteFile, fetch_webpage::FetchWebpage,
+        find_paths::FindPaths, list_directory::ListDirectory, move_path::MovePath,
+        read_file::ReadFile, run_in_terminal::RunInTerminal, search_text::SearchText, stat::Stat,
     },
     use_cases::{
         chat::{
@@ -23,8 +26,7 @@ use crate::{
 use clap::Args;
 use reqwest::Client;
 use rig::{
-    Agent, AgentBuilder,
-    agent::WithBuilderTools,
+    Agent,
     client::AgentClientExt,
     providers::openai::{self, CompletionModel},
 };
@@ -44,19 +46,9 @@ pub struct IndexController {
 
     #[arg(long = "api-key", short = 'k', help = "API key for authentication")]
     api_key: Option<String>,
-
-    #[arg(long = "mcp-config", help = "Path to MCP servers configuration")]
-    mcp_config: Option<String>,
 }
 
 impl IndexController {
-    pub(crate) async fn mcp_registry(&self) -> anyhow::Result<McpRegistry> {
-        match self.mcp_config.as_deref() {
-            Some(path) => McpRegistry::from_config_file(path).await,
-            None => Ok(McpRegistry::empty()),
-        }
-    }
-
     async fn build_agent(
         &self,
         chat_history: Arc<ChatHistory<Arc<History>>>,
@@ -75,12 +67,12 @@ impl IndexController {
         let client = client.completions_api();
 
         let system_prompt = system_prompt().await;
-        let mut agent_builder = client
+        println!("MCP tools loaded: {}", &deps.mcp_registry.tools().len());
+        let agent = client
             .agent(model_id)
             .preamble(system_prompt.as_str())
             .add_hook(HistorySyncHook::new(chat_history.clone()))
             .add_hook(ToolRecoveryHook)
-            .tool(Adder)
             .tool(ApplyPatch::new().await?)
             .tool(CreateDirectory::new().await?)
             .tool(CreateFile::new().await?)
@@ -93,22 +85,13 @@ impl IndexController {
             .tool(RunInTerminal::new(deps.terminal_io.clone()).await?)
             .tool(SearchText::new().await?)
             .tool(Stat::new().await?)
-            .tool(FetchWebpage::new(deps.http_client.clone()));
-        agent_builder = add_mcp_tools(agent_builder, &deps.mcp_registry);
-        let agent = agent_builder.default_max_turns(MAX_AGENT_TURNS).build();
+            .tool(FetchWebpage::new(deps.http_client.clone()))
+            .mcp_tools(&deps.mcp_registry.tools())
+            .default_max_turns(MAX_AGENT_TURNS)
+            .build();
 
         Ok(agent)
     }
-}
-
-fn add_mcp_tools(
-    mut builder: AgentBuilder<CompletionModel, WithBuilderTools>,
-    registry: &McpRegistry,
-) -> AgentBuilder<CompletionModel, WithBuilderTools> {
-    for (tools, peer) in registry.tools() {
-        builder = builder.rmcp_tools(tools, peer);
-    }
-    builder
 }
 
 #[derive(Clone)]

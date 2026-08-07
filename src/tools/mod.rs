@@ -1,4 +1,3 @@
-pub(crate) mod add;
 pub(crate) mod apply_patch;
 pub(crate) mod create_directory;
 pub(crate) mod create_file;

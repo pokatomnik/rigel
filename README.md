@@ -6,6 +6,31 @@ A Rust 2024 CLI agent for interacting with OpenAI-compatible LLM APIs.
 
 Rigel is a conversational LLM agent that integrates filesystem tools into an interactive CLI session. It connects to OpenAI-compatible servers and provides atomic, deterministic filesystem operations within the workspace context. All tools work only within the workspace where Rigel started - absolute paths and parent references are rejected for security reasons.
 
+## Configuration
+
+Rigel reads a TOML configuration file from `~/.rigel/config.toml` that declares the MCP servers whose tools are exposed to the agent:
+
+```toml
+[mcpServers.local]
+type = "stdio"
+command = "node"
+args = ["server.js"]
+
+[mcpServers.local.env]
+RUST_LOG = "debug"
+
+[mcpServers.remote]
+type = "http"
+url = "https://example.com/mcp"
+```
+
+Each server entry declares its transport with the `type` key:
+
+- `"stdio"` — launch a local process: `command` (required), `args` and `env` (optional)
+- `"http"` — connect to a remote endpoint: `url` (required)
+
+If the file is missing or cannot be parsed, Rigel starts with no MCP servers.
+
 ## Quick Start
 
 ### Installation
@@ -116,19 +141,19 @@ Located in `src/controllers/index_controller.rs`, the IndexController orchestrat
 
 Rigel provides a suite of atomic filesystem operations, each with narrow responsibilities:
 
-| Tool | Description |
-|------|-------------|
-| `create_file` | Create new files in workspace |
-| `read_file` | Read file content (returns SHA-256 revision) |
-| `apply_patch` | Atomic UTF-8 text edits with revision checking |
-| `create_directory` | Create directories recursively |
-| `delete_directory` | Remove directory and contents |
-| `delete_file` | Delete existing file (requires existence check) |
-| `find_paths` | Recursive glob pattern matching |
-| `list_directory` | Inspect directory contents |
-| `move_path` | Rename or move files/directories |
-| `search_text` | Search file contents (supports regex) |
-| `stat` | Return file/directory metadata |
+| Tool               | Description                                     |
+| ------------------ | ----------------------------------------------- |
+| `create_file`      | Create new files in workspace                   |
+| `read_file`        | Read file content (returns SHA-256 revision)    |
+| `apply_patch`      | Atomic UTF-8 text edits with revision checking  |
+| `create_directory` | Create directories recursively                  |
+| `delete_directory` | Remove directory and contents                   |
+| `delete_file`      | Delete existing file (requires existence check) |
+| `find_paths`       | Recursive glob pattern matching                 |
+| `list_directory`   | Inspect directory contents                      |
+| `move_path`        | Rename or move files/directories                |
+| `search_text`      | Search file contents (supports regex)           |
+| `stat`             | Return file/directory metadata                  |
 
 **Security Constraints**: All tools work only within the workspace where Rigel started. Workspace-relative paths are validated; absolute paths and parent references (`..`) are rejected. The workspace root is protected from delete/move operations.
 

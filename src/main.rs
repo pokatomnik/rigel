@@ -5,7 +5,9 @@ use clap::Parser;
 use crate::{
     cmd::cli::Cli,
     controllers::{controller::Controller, index_controller::IndexControllerDeps},
-    shared::terminal_io::TerminalIO,
+    shared::{
+        mcp_registry::registry::McpRegistry, rigel_config::RigelConfig, terminal_io::TerminalIO,
+    },
 };
 
 mod cmd;
@@ -22,6 +24,8 @@ const GLOBAL_TOOL_TIMEOUT: Duration = Duration::from_secs(5);
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
+    let config = RigelConfig::from_default_path().await;
+
     let terminal_io = Arc::new(TerminalIO::default());
     let http_client = Arc::new(
         reqwest::ClientBuilder::new()
@@ -31,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
             .connect_timeout(GLOBAL_TOOL_TIMEOUT)
             .build()?,
     );
-    let mcp_registry = Arc::new(cli.index.mcp_registry().await?);
+    let mcp_registry = Arc::new(McpRegistry::from_config(&config).await?);
     let index_deps = IndexControllerDeps::new(terminal_io.clone(), http_client, mcp_registry);
 
     if let Err(e) = cli.index.handle(index_deps).await {

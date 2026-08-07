@@ -7,14 +7,16 @@ use anyhow::Context;
 use rig::message::Message;
 use tokio::{fs, sync::Semaphore};
 
-use crate::tools::revision::sha256;
-
-const RIGEL_DIRECTORY: &str = ".rigel";
+use crate::{
+    shared::consts::{HISTORY_FILE_NAME, RIGEL_DIRECTORY},
+    tools::revision::sha256,
+};
 
 /// Persists chat history to a single JSON file per working directory.
 ///
-/// All file reads and writes are serialized through a one-permit semaphore, so at most one
-/// history I/O operation runs at a time.
+/// Each working directory owns a hash-named subdirectory of `.rigel` that holds its
+/// `history.json`. All file reads and writes are serialized through a one-permit semaphore, so at
+/// most one history I/O operation runs at a time.
 pub(crate) struct History {
     io_semaphore: Semaphore,
     history_path: PathBuf,
@@ -28,16 +30,19 @@ impl History {
         let home_dir_path = std::env::home_dir()
             .ok_or_else(|| anyhow::anyhow!("failed to determine the user home directory"))?;
         let rigel_directory_path = home_dir_path.join(RIGEL_DIRECTORY);
-        let history_file_path = rigel_directory_path.join(format!("{current_dir_hash}.json"));
+        let history_file_path = rigel_directory_path
+            .join(current_dir_hash)
+            .join(HISTORY_FILE_NAME);
 
         Ok(history_file_path)
     }
 
     pub async fn bootstrap() -> anyhow::Result<(Self, Vec<Message>)> {
-        let history_directory = std::env::home_dir()
-            .context("failed to determine the user home directory")?
-            .join(RIGEL_DIRECTORY);
-        fs::create_dir_all(history_directory.as_path())
+        let history_path = Self::history_file_path()?;
+        let history_directory = history_path
+            .parent()
+            .context("history file path has no parent directory")?;
+        fs::create_dir_all(history_directory)
             .await
             .with_context(|| {
                 format!(
@@ -46,7 +51,6 @@ impl History {
                 )
             })?;
 
-        let history_path = Self::history_file_path()?;
         let io_semaphore = Semaphore::new(1);
         let messages = {
             let _read_permit = io_semaphore
