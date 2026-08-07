@@ -295,13 +295,15 @@ impl StreamProgress {
 }
 
 fn print_reasoning(terminal_io: &TerminalIO, state: &mut StreamOutputState, reasoning: &str) {
-    if reasoning.trim().is_empty() {
+    if reasoning.is_empty() {
         return;
     }
-    state.set_received_reasoning(true);
-    if !state.showing_reasoning() {
-        terminal_io.eprintln_gray("[thinking]");
-        state.set_showing_reasoning(true);
+    if !reasoning.trim().is_empty() {
+        state.set_received_reasoning(true);
+        if !state.showing_reasoning() {
+            terminal_io.eprintln_gray("[thinking]");
+            state.set_showing_reasoning(true);
+        }
     }
     terminal_io.eprint_gray(reasoning);
     terminal_io.flush_stderr();
@@ -316,13 +318,15 @@ fn print_reasoning_block(
 }
 
 fn print_text(terminal_io: &TerminalIO, state: &mut StreamOutputState, text: &Text) {
-    if text.text().trim().is_empty() {
+    if text.text().is_empty() {
         return;
     }
-    state.set_received_answer(true);
-    if state.showing_reasoning() {
-        terminal_io.eprintln("\n[answer]");
-        state.set_showing_reasoning(false);
+    if !text.text().trim().is_empty() {
+        state.set_received_answer(true);
+        if state.showing_reasoning() {
+            terminal_io.eprintln("\n[answer]");
+            state.set_showing_reasoning(false);
+        }
     }
     terminal_io.print(text.text());
     terminal_io.flush_stdout();
