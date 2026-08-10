@@ -42,12 +42,16 @@ mod tests {
     #[test]
     fn parses_unlimited_mixed_servers() -> anyhow::Result<()> {
         let config = RigelConfig::parse_config(
-            r#"{
-                "mcpServers": {
-                    "local": { "command": "node", "args": ["server.js"] },
-                    "remote": { "url": "https://example.com/mcp" }
-                }
-            }"#,
+            r#"
+            [mcpServers.local]
+            type = "stdio"
+            command = "node"
+            args = ["server.js"]
+
+            [mcpServers.remote]
+            type = "http"
+            url = "https://example.com/mcp"
+            "#,
         );
 
         assert_eq!(config.servers.len(), 2);

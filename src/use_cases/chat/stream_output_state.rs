@@ -44,6 +44,11 @@ impl StreamOutputState {
         }
     }
 
+    pub fn retry_answer(&mut self) {
+        self.showing_reasoning = false;
+        self.received_answer = false;
+    }
+
     pub fn record_tool_result(&mut self, status: ToolRecoveryStatus) {
         self.received_tool_result = true;
 

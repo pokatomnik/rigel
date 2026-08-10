@@ -11,8 +11,8 @@ use rig::{
 use tokio::sync::Mutex;
 
 use crate::{
-    shared::terminal_io::TerminalIO,
     shared::string_ext::StringShort,
+    shared::terminal_io::TerminalIO,
     use_cases::chat::{
         history_sync::{ChatHistory, HISTORY_SYNC_ERROR_PREFIX, HistoryPersistence, HistoryUpdate},
         recovery_error::recovery_context_from_streaming_error,
@@ -220,6 +220,7 @@ impl StreamProgress {
             MultiTurnStreamItem::CompletionCall(_) => {
                 self.journal.rebase(history.snapshot().await);
             }
+            MultiTurnStreamItem::ModelTurnRetried { .. } => self.output_state.retry_answer(),
             MultiTurnStreamItem::FinalResponse(response) => self.final_response = Some(response),
             _ => {}
         }
@@ -335,10 +336,8 @@ fn print_text(terminal_io: &TerminalIO, state: &mut StreamOutputState, text: &Te
 
 fn print_tool_call(terminal_io: &TerminalIO, tool_call: &ToolCall) {
     let args_str = tool_call.function.arguments.to_string().short(30);
-    terminal_io.eprintln(
-        format!("\n[tool call: {}({})]", tool_call.function.name, args_str)
-            .as_str(),
-    );
+    terminal_io
+        .eprintln(format!("\n[tool call: {}({})]", tool_call.function.name, args_str).as_str());
 }
 
 fn print_tool_result(
@@ -385,6 +384,7 @@ mod tests {
         shared::terminal_io::TerminalIO,
         use_cases::chat::{
             history_sync::{ChatHistory, HistoryPersistence, HistorySyncHook},
+            invalid_response::InvalidResponseHook,
             tool_recovery::ToolRecoveryHook,
         },
     };
@@ -441,6 +441,44 @@ mod tests {
         let outcome = turn.run("prompt".to_string(), Vec::new()).await?;
         ensure!(matches!(outcome, StreamRunOutcome::Completed(_)));
         ensure!(snapshots.lock().await.len() == 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_response_is_retried_without_entering_history() -> Result<()> {
+        let model = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::text("bad <|tool_call|> response"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                MockStreamEvent::text("accepted"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+        ]);
+        let probe = model.clone();
+        let snapshots = recorded_snapshots();
+        let history = recording_history(snapshots.clone());
+        let agent = AgentBuilder::new(model)
+            .add_hook(InvalidResponseHook::new(Arc::new(TerminalIO)))
+            .add_hook(HistorySyncHook::new(history.clone()))
+            .default_max_turns(3)
+            .build();
+
+        let turn = StreamedTurn::new(Arc::new(Mutex::new(agent)), &TerminalIO, &history);
+        ensure!(matches!(
+            turn.run("prompt".to_string(), Vec::new()).await?,
+            StreamRunOutcome::Completed(_)
+        ));
+        ensure!(probe.request_count() == 2);
+        ensure!(
+            !snapshots
+                .lock()
+                .await
+                .iter()
+                .any(|messages| has_assistant_text(messages, "bad <|tool_call|> response"))
+        );
+        ensure!(has_assistant_text(&history.snapshot().await, "accepted"));
         Ok(())
     }
 
@@ -502,6 +540,19 @@ mod tests {
         ensure!(observed.len() == 3);
         ensure!(tool_boundaries_are_separate(observed.as_slice()));
         Ok(())
+    }
+
+    fn has_assistant_text(messages: &[Message], expected: &str) -> bool {
+        messages.iter().any(|message| {
+            matches!(
+                message,
+                Message::Assistant { content, .. }
+                    if content.iter().any(|item| matches!(
+                        item,
+                        AssistantContent::Text(text) if text.text == expected
+                    ))
+            )
+        })
     }
 
     fn invalid_tool_model() -> MockCompletionModel {

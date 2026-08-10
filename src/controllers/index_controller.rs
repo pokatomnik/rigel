@@ -18,6 +18,7 @@ use crate::{
         chat::{
             chat::Chat,
             history_sync::{ChatHistory, HistorySyncHook},
+            invalid_response::InvalidResponseHook,
             tool_recovery::ToolRecoveryHook,
         },
         model_selector::model_selector::ModelSelector,
@@ -71,6 +72,7 @@ impl IndexController {
         let agent = client
             .agent(model_id)
             .preamble(system_prompt.as_str())
+            .add_hook(InvalidResponseHook::new(deps.terminal_io.clone()))
             .add_hook(HistorySyncHook::new(chat_history.clone()))
             .add_hook(ToolRecoveryHook)
             .tool(ApplyPatch::new().await?)
