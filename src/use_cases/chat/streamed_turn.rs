@@ -353,7 +353,7 @@ fn print_tool_result(
         .map(format_tool_result_content)
         .collect::<Vec<_>>()
         .join("\n");
-    terminal_io.eprint_blue(format!("[tool result: {}]", output.short(30)).as_str());
+    terminal_io.eprintln_blue(format!("[tool result: {}]", output.short(30)).as_str());
 }
 
 fn format_tool_result_content(content: &ToolResultContent) -> String {

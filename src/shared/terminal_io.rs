@@ -32,19 +32,9 @@ impl TerminalIO {
         eprintln!("{}", style.apply_to(msg));
     }
 
-    pub fn eprint_blue(&self, msg: &str) {
+    pub fn eprintln_blue(&self, msg: &str) {
         let style = console::Style::new().cyan().for_stderr();
-        eprint!("{}", style.apply_to(msg));
-    }
-
-    pub fn println_orange(&self, msg: &str) {
-        let style = console::Style::new().yellow().bright().for_stderr();
-        println!("{}", style.apply_to(msg));
-    }
-
-    pub fn print_blue(&self, msg: &str) {
-        let style = console::Style::new().cyan().for_stderr();
-        print!("{}", style.apply_to(msg));
+        eprintln!("{}", style.apply_to(msg));
     }
 
     pub fn flush_stderr(&self) {
