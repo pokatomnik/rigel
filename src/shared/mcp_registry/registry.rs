@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::error::Error;
+use std::process::Stdio;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -126,7 +127,10 @@ impl McpConnector for StdioConfig {
     ) -> anyhow::Result<McpConnection> {
         let mut command = Command::new(&self.command);
         command.args(&self.args).envs(&self.env);
-        let transport = TokioChildProcess::new(command)
+        let (transport, _stderr) = TokioChildProcess::builder(command)
+            // TODO redirect to mcp.log file
+            .stderr(Stdio::null())
+            .spawn()
             .with_context(|| format!("failed to start MCP server `{name}`"))?;
         Self::connect_transport(name, transport, tool_server).await
     }
