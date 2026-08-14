@@ -24,7 +24,7 @@ const GLOBAL_TOOL_TIMEOUT: Duration = Duration::from_secs(5);
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let config = RigelConfig::from_default_path().await;
+    let config = Arc::new(RigelConfig::from_default_path().await);
 
     let terminal_io = Arc::new(TerminalIO::default());
     let http_client = Arc::new(
@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
             .user_agent(include_str!("./user_agents.txt"))
             .build()?,
     );
-    let mcp_registry = Arc::new(McpRegistry::from_config(&config).await?);
+    let mcp_registry = Arc::new(McpRegistry::from_config(config).await?);
     let index_deps = IndexControllerDeps::new(terminal_io.clone(), http_client, mcp_registry);
 
     if let Err(e) = cli.index.handle(index_deps).await {

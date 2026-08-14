@@ -1,4 +1,6 @@
+use std::collections::HashSet;
 use std::error::Error;
+use std::sync::Arc;
 
 use anyhow::Context;
 use rig::AgentBuilder;
@@ -25,12 +27,13 @@ pub(crate) struct McpRegistry {
 }
 
 struct McpConnection {
+    name: String,
     service: RunningService<RoleClient, McpClientHandler>,
     tools: Vec<Tool>,
 }
 
 impl McpRegistry {
-    pub async fn from_config(config: &RigelConfig) -> anyhow::Result<Self> {
+    pub async fn from_config(config: Arc<RigelConfig>) -> anyhow::Result<Self> {
         let tool_server = ToolServer::new().run();
         let mut connections = Vec::with_capacity(config.servers.len());
 
@@ -48,9 +51,36 @@ impl McpRegistry {
             .collect()
     }
 
-    pub async fn select_mcp_tools(&self) -> anyhow::Result<Vec<(Vec<Tool>, ServerSink)>> {
-        let tools = self.tools();
-        Ok(tools)
+    pub fn select_tools(&self) -> Vec<(Vec<Tool>, ServerSink)> {
+        let connection_names = self
+            .connections
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect::<Vec<&str>>();
+        let selected_names = connection_names
+            .clone()
+            .iter()
+            .map(|v| (v.to_string(), true))
+            .collect::<Vec<(String, bool)>>();
+        let selected = dialoguer::MultiSelect::new()
+            .with_prompt("Select MCP servers")
+            .report(false)
+            .clear(true)
+            .items_checked(selected_names)
+            .interact()
+            .unwrap_or_default()
+            .iter()
+            .map(ToOwned::to_owned)
+            .collect::<HashSet<usize>>();
+        self.connections
+            .iter()
+            .enumerate()
+            .filter_map(|(index, conn)| match selected.contains(&index) {
+                true => Some(conn.to_owned()),
+                false => None,
+            })
+            .map(|connection| (connection.tools.clone(), connection.service.peer().clone()))
+            .collect()
     }
 }
 
@@ -80,7 +110,11 @@ trait McpConnector: Send + Sync {
             .await
             .with_context(|| format!("failed to list tools from MCP server `{name}`"))?
             .tools;
-        Ok(McpConnection { service, tools })
+        Ok(McpConnection {
+            service,
+            tools,
+            name: name.to_string(),
+        })
     }
 }
 
