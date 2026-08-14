@@ -73,6 +73,7 @@ impl TerminalIO {
     }
 
     pub fn readline(&self) -> anyhow::Result<String> {
+        self.eprint_gray("> ");
         let mut line = String::new();
         io::stdin().read_line(&mut line)?;
         Ok(line.trim().to_string())
