@@ -161,7 +161,7 @@ where
                 CommandParserResult::Compact(summarization) => {
                     self.handle_compaction(summarization).await?;
                 }
-                CommandParserResult::ModelChange => {
+                CommandParserResult::AgentConfig => {
                     self.handle_change_model().await?;
                 }
             }

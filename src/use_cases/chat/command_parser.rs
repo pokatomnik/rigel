@@ -33,7 +33,7 @@ pub(crate) enum CommandParserResult {
     Compact(String),
 
     /// Model change request
-    ModelChange,
+    AgentConfig,
 }
 
 pub(crate) struct CommandParser {
@@ -53,7 +53,8 @@ impl CommandParser {
             .eprintln("/editor - Open default editor to type your prompt");
         self.terminal_io
             .eprintln("/compact - compact dialog context");
-        self.terminal_io.eprintln("/model - select another model");
+        self.terminal_io
+            .eprintln("/agent - change agent preferences");
 
         CommandParserResult::CommandContinue
     }
@@ -132,7 +133,7 @@ impl CommandParser {
             _ if raw_input.starts_with("/compact") => {
                 CommandParserResult::Compact(summarization().to_string())
             }
-            _ if raw_input.starts_with("/model") => CommandParserResult::ModelChange,
+            _ if raw_input.starts_with("/agent") => CommandParserResult::AgentConfig,
             _ => CommandParserResult::Prompt(raw_input, false),
         }
     }
@@ -184,6 +185,6 @@ mod tests {
     async fn model_command_requests_model_change() {
         let result = parser().parse("/model".to_string()).await;
 
-        assert!(matches!(result, CommandParserResult::ModelChange));
+        assert!(matches!(result, CommandParserResult::AgentConfig));
     }
 }
