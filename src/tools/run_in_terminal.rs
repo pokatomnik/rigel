@@ -54,13 +54,13 @@ impl RunInTerminal {
     pub(crate) async fn new(terminal_io: Arc<TerminalIO>) -> Result<Self, ToolExecutionError> {
         let current_dir = env::current_dir().map_err(|error| {
             ToolExecutionError::other(format!(
-                "Cannot determine the workspace root for run_in_terminal: {error}"
+                "Cannot determine the current directory for run_in_terminal: {error}"
             ))
             .with_source(error)
         })?;
         let root = fs::canonicalize(&current_dir).await.map_err(|error| {
             ToolExecutionError::other(format!(
-                "Cannot access the workspace root \"{}\" for run_in_terminal: {error}",
+                "Cannot access the current directory \"{}\" for run_in_terminal: {error}",
                 current_dir.display()
             ))
             .with_source(error)
@@ -195,7 +195,7 @@ impl Tool for RunInTerminal {
     type Error = ToolExecutionError;
 
     fn description(&self) -> String {
-        "Run code in the user's shell from the workspace root. Returns combined stdout and stderr in their original order and the shell exit code. A non-zero exit code is a command result, not a tool error."
+        "Run code in the user's shell from the current directory. Returns combined stdout and stderr in their original order and the shell exit code. A non-zero exit code is a command result, not a tool error."
             .to_string()
     }
 

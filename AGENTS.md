@@ -34,11 +34,11 @@ contribution rule, not a style preference.
 
 ## Filesystem Tool Architecture
 
-- A tool may access only the workspace in which Rigel started. Capture and
-  canonicalize that root when constructing the tool. Accept workspace-relative
+- A tool may access only the directory in which Rigel started. Capture and
+  canonicalize that root when constructing the tool. Accept current directory-relative
   paths only; reject absolute paths and `..`. Resolve existing ancestors and
   symlinks before I/O so neither source nor destination can escape the root.
-  Explicitly protect the workspace root from delete or move operations.
+  Explicitly protect the current directory from delete or move operations.
 - Use `tokio::fs` for every filesystem operation. Keep path validation,
   matching, formatting, hashing, and edit planning as pure functions where
   practical.
@@ -47,11 +47,11 @@ contribution rule, not a style preference.
   file contents, `stat` returns metadata, and `read_file` returns content.
   Search tools must not grow into general filesystem APIs.
 - Tool descriptions and successful results must be short, deterministic, and
-  explicit about what changed. Return normalized workspace-relative paths,
+  explicit about what changed. Return normalized current directory-relative paths,
   never canonical absolute paths. Sort collections deterministically.
 - Errors are model-facing recovery data. State what failed, why, which path or
   argument caused it, and the next corrective action. Prefer stable structured
-  codes such as `PATH_NOT_FOUND`, `PATH_OUTSIDE_WORKSPACE`, or `INVALID_GLOB`
+  codes such as `PATH_NOT_FOUND`, `PATH_OUTSIDE_CURRENT_DIRECTORY`, or `INVALID_GLOB`
   where the tool has structured output. Never hide an I/O error behind a generic
   failure message.
 - Preserve idempotent outcomes as explicit non-errors when the contract calls

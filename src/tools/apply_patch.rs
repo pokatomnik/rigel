@@ -143,7 +143,7 @@ impl Tool for ApplyPatch {
                 "path": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Workspace-relative path to an existing UTF-8 text file"
+                    "description": "Current directory-relative path to an existing UTF-8 text file"
                 },
                 "expected_revision": {
                     "type": "string",

@@ -82,7 +82,7 @@ struct GlobPatterns {
 struct SearchDirectory {
     path: PathBuf,
     search_relative: PathBuf,
-    workspace_relative: PathBuf,
+    current_directory_relative: PathBuf,
 }
 
 struct ContentMatches {
@@ -105,7 +105,7 @@ impl SearchText {
             coded_error(
                 ToolErrorKind::Other,
                 "IO_ERROR",
-                format!("Cannot determine the workspace root: {error}"),
+                format!("Cannot determine the current directory: {error}"),
             )
             .with_source(error)
         })?;
@@ -114,7 +114,7 @@ impl SearchText {
                 ToolErrorKind::Other,
                 "IO_ERROR",
                 format!(
-                    "Cannot access the workspace root \"{}\": {error}",
+                    "Cannot access the current directory \"{}\": {error}",
                     current_dir.display()
                 ),
             )
@@ -139,11 +139,11 @@ impl SearchText {
             match component {
                 Component::Normal(component) => normalized.push(component),
                 Component::ParentDir if !normalized.pop() => {
-                    return Err(outside_workspace_error(path));
+                    return Err(outside_current_directory_error(path));
                 }
                 Component::ParentDir | Component::CurDir => {}
                 Component::RootDir | Component::Prefix(_) => {
-                    return Err(outside_workspace_error(path));
+                    return Err(outside_current_directory_error(path));
                 }
             }
         }
@@ -158,7 +158,7 @@ impl SearchText {
             .map_err(|error| resolve_path_error(path, error))?;
 
         if !resolved.starts_with(&self.root) {
-            return Err(outside_workspace_error(path));
+            return Err(outside_current_directory_error(path));
         }
 
         Ok((resolved, relative_path))
@@ -167,7 +167,7 @@ impl SearchText {
     async fn search_directory(
         &self,
         directory: PathBuf,
-        workspace_relative: PathBuf,
+        current_directory_relative: PathBuf,
         regex: &Regex,
         filters: &SearchFilters,
         context_lines: usize,
@@ -177,7 +177,7 @@ impl SearchText {
 
         if filters
             .default_exclude
-            .matches_directory(&path_for_glob(&workspace_relative))
+            .matches_directory(&path_for_glob(&current_directory_relative))
         {
             return Ok(output);
         }
@@ -185,11 +185,11 @@ impl SearchText {
         let mut directories = VecDeque::from([SearchDirectory {
             path: directory,
             search_relative: PathBuf::new(),
-            workspace_relative,
+            current_directory_relative,
         }]);
 
         'search: while let Some(directory) = directories.pop_front() {
-            let directory_display = path_for_output(&directory.workspace_relative);
+            let directory_display = path_for_output(&directory.current_directory_relative);
             let mut read_dir = fs::read_dir(&directory.path).await.map_err(|error| {
                 search_io_error(&directory_display, "reading a directory", error)
             })?;
@@ -206,16 +206,19 @@ impl SearchText {
             for entry in entries {
                 let file_name = entry.file_name();
                 let search_relative = directory.search_relative.join(&file_name);
-                let workspace_relative = directory.workspace_relative.join(&file_name);
+                let current_directory_relative =
+                    directory.current_directory_relative.join(&file_name);
                 let search_glob_path = path_for_glob(&search_relative);
-                let workspace_glob_path = path_for_glob(&workspace_relative);
-                let display_path = path_for_output(&workspace_relative);
+                let current_directory_glob_path = path_for_glob(&current_directory_relative);
+                let display_path = path_for_output(&current_directory_relative);
                 let file_type = entry.file_type().await.map_err(|error| {
                     search_io_error(&display_path, "inspecting a directory entry", error)
                 })?;
 
                 if file_type.is_dir() {
-                    if filters.should_exclude_directory(&search_glob_path, &workspace_glob_path) {
+                    if filters
+                        .should_exclude_directory(&search_glob_path, &current_directory_glob_path)
+                    {
                         continue;
                     }
 
@@ -230,17 +233,18 @@ impl SearchText {
                     directories.push_back(SearchDirectory {
                         path: resolved,
                         search_relative,
-                        workspace_relative,
+                        current_directory_relative,
                     });
                 } else if file_type.is_file() {
-                    if !filters.should_search_file(&search_glob_path, &workspace_glob_path) {
+                    if !filters.should_search_file(&search_glob_path, &current_directory_glob_path)
+                    {
                         continue;
                     }
 
                     if self
                         .search_one_file(
                             &entry.path(),
-                            &workspace_relative,
+                            &current_directory_relative,
                             regex,
                             context_lines,
                             max_results,
@@ -269,11 +273,12 @@ impl SearchText {
                     })?;
 
                     if metadata.is_file()
-                        && filters.should_search_file(&search_glob_path, &workspace_glob_path)
+                        && filters
+                            .should_search_file(&search_glob_path, &current_directory_glob_path)
                         && self
                             .search_one_file(
                                 &resolved,
-                                &workspace_relative,
+                                &current_directory_relative,
                                 regex,
                                 context_lines,
                                 max_results,
@@ -297,14 +302,14 @@ impl SearchText {
     async fn search_one_file(
         &self,
         file: &Path,
-        workspace_relative: &Path,
+        current_directory_relative: &Path,
         regex: &Regex,
         context_lines: usize,
         max_results: usize,
         output: &mut SearchTextOutput,
         binary_is_error: bool,
     ) -> Result<bool, ToolExecutionError> {
-        let display_path = path_for_output(workspace_relative);
+        let display_path = path_for_output(current_directory_relative);
         let content = read_text_content(file, &display_path).await?;
         let TextContent::Text(content) = content else {
             if binary_is_error {
@@ -360,7 +365,7 @@ impl Tool for SearchText {
                 "path": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Workspace-relative file or directory path"
+                    "description": "current directory-relative file or directory path"
                 },
                 "mode": {
                     "type": "string",
@@ -424,24 +429,24 @@ impl Tool for SearchText {
 
         let regex = compile_query(&args.query, args.mode, args.case_sensitive)?;
         let filters = SearchFilters::new(args.include.as_deref(), args.exclude.as_deref())?;
-        let (resolved, workspace_relative) = self.resolve_path(&args.path).await?;
+        let (resolved, current_directory_relative) = self.resolve_path(&args.path).await?;
         let metadata = fs::metadata(&resolved)
             .await
             .map_err(|error| search_io_error(&args.path, "inspecting the search path", error))?;
 
         if metadata.is_file() {
-            let search_relative = workspace_relative
+            let search_relative = current_directory_relative
                 .file_name()
                 .map(PathBuf::from)
-                .unwrap_or_else(|| workspace_relative.clone());
+                .unwrap_or_else(|| current_directory_relative.clone());
             let search_glob_path = path_for_glob(&search_relative);
-            let workspace_glob_path = path_for_glob(&workspace_relative);
+            let current_directory_glob_path = path_for_glob(&current_directory_relative);
             let mut output = SearchTextOutput::default();
 
-            if filters.should_search_file(&search_glob_path, &workspace_glob_path) {
+            if filters.should_search_file(&search_glob_path, &current_directory_glob_path) {
                 self.search_one_file(
                     &resolved,
-                    &workspace_relative,
+                    &current_directory_relative,
                     &regex,
                     args.context_lines,
                     args.max_results,
@@ -457,7 +462,7 @@ impl Tool for SearchText {
         } else if metadata.is_dir() {
             self.search_directory(
                 resolved,
-                workspace_relative,
+                current_directory_relative,
                 &regex,
                 &filters,
                 args.context_lines,
@@ -495,7 +500,7 @@ impl SearchFilters {
         })
     }
 
-    fn should_search_file(&self, search_relative: &str, workspace_relative: &str) -> bool {
+    fn should_search_file(&self, search_relative: &str, current_directory_relative: &str) -> bool {
         let included = self
             .include
             .as_ref()
@@ -503,12 +508,18 @@ impl SearchFilters {
 
         included
             && !self.exclude.matches(search_relative)
-            && !self.default_exclude.matches(workspace_relative)
+            && !self.default_exclude.matches(current_directory_relative)
     }
 
-    fn should_exclude_directory(&self, search_relative: &str, workspace_relative: &str) -> bool {
+    fn should_exclude_directory(
+        &self,
+        search_relative: &str,
+        current_directory_relative: &str,
+    ) -> bool {
         self.exclude.matches_directory(search_relative)
-            || self.default_exclude.matches_directory(workspace_relative)
+            || self
+                .default_exclude
+                .matches_directory(current_directory_relative)
     }
 }
 
@@ -732,11 +743,11 @@ fn resolve_path_error(path: &str, error: std::io::Error) -> ToolExecutionError {
     search_io_error(path, "resolving the search path", error)
 }
 
-fn outside_workspace_error(path: &str) -> ToolExecutionError {
-    let message = format!("Search path \"{path}\" resolves outside the workspace.");
+fn outside_current_directory_error(path: &str) -> ToolExecutionError {
+    let message = format!("Search path \"{path}\" resolves outside the current directory.");
     with_coded_output(
         ToolExecutionError::refused(message.clone()),
-        "PATH_OUTSIDE_WORKSPACE",
+        "PATH_OUTSIDE_CURRENT_DIRECTORY",
         message,
     )
 }
@@ -923,7 +934,7 @@ mod tests {
         let error =
             SearchText::normalize_relative_path("../outside").expect_err("path should fail");
 
-        assert_eq!(error.code(), Some("PATH_OUTSIDE_WORKSPACE"));
+        assert_eq!(error.code(), Some("PATH_OUTSIDE_CURRENT_DIRECTORY"));
         assert!(error.is_refusal());
     }
 }

@@ -49,7 +49,7 @@ Use each tool for its purpose:
 
 Use `run_in_terminal` for commands, builds, tests. Do not edit files through it; use dedicated file tools.
 
-Pass workspace-relative paths only. No absolute paths, no `..`. Never delete or move the project root.
+Pass current directory-relative paths only. No absolute paths, no `..`. Never delete or move the project root.
 
 # Editing an existing file
 

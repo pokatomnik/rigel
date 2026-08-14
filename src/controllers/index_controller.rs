@@ -68,7 +68,10 @@ impl IndexController {
         let client = client.completions_api();
 
         let system_prompt = system_prompt().await;
-        println!("MCP tools loaded: {}", &deps.mcp_registry.tools().len());
+        println!(
+            "MCP tools loaded: {}",
+            &deps.mcp_registry.select_mcp_tools().await?.len()
+        );
         let agent = client
             .agent(model_id)
             .preamble(system_prompt.as_str())
@@ -88,7 +91,7 @@ impl IndexController {
             .tool(SearchText::new().await?)
             .tool(Stat::new().await?)
             .tool(FetchWebpage::new(deps.http_client.clone()))
-            .mcp_tools(&deps.mcp_registry.tools())
+            .mcp_tools(&deps.mcp_registry.select_mcp_tools().await?)
             .default_max_turns(MAX_AGENT_TURNS)
             .build();
 

@@ -4,7 +4,7 @@ A Rust 2024 CLI agent for interacting with OpenAI-compatible LLM APIs.
 
 ## Project Overview
 
-Rigel is a conversational LLM agent that integrates filesystem tools into an interactive CLI session. It connects to OpenAI-compatible servers and provides atomic, deterministic filesystem operations within the workspace context. All tools work only within the workspace where Rigel started - absolute paths and parent references are rejected for security reasons.
+Rigel is a conversational LLM agent that integrates filesystem tools into an interactive CLI session. It connects to OpenAI-compatible servers and provides atomic, deterministic filesystem operations within the current directory context. All tools work only within the current directory where Rigel started - absolute paths and parent references are rejected for security reasons.
 
 ## Configuration
 
@@ -143,7 +143,7 @@ Rigel provides a suite of atomic filesystem operations, each with narrow respons
 
 | Tool               | Description                                     |
 | ------------------ | ----------------------------------------------- |
-| `create_file`      | Create new files in workspace                   |
+| `create_file`      | Create new files in current directory           |
 | `read_file`        | Read file content (returns SHA-256 revision)    |
 | `apply_patch`      | Atomic UTF-8 text edits with revision checking  |
 | `create_directory` | Create directories recursively                  |
@@ -155,7 +155,7 @@ Rigel provides a suite of atomic filesystem operations, each with narrow respons
 | `search_text`      | Search file contents (supports regex)           |
 | `stat`             | Return file/directory metadata                  |
 
-**Security Constraints**: All tools work only within the workspace where Rigel started. Workspace-relative paths are validated; absolute paths and parent references (`..`) are rejected. The workspace root is protected from delete/move operations.
+**Security Constraints**: All tools work only within the current directory where Rigel started. Current directory-relative paths are validated; absolute paths and parent references (`..`) are rejected. The current directory is protected from delete/move operations.
 
 ### Use Cases
 

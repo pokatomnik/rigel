@@ -3,8 +3,6 @@ use std::{
     io::{self, Write},
 };
 
-use dialoguer::theme::ColorfulTheme;
-
 use crate::entities::tool_confirm_result::ToolConfirmResult;
 
 #[derive(Default)]
@@ -75,9 +73,9 @@ impl TerminalIO {
     }
 
     pub fn readline(&self) -> anyhow::Result<String> {
-        let result =
-            dialoguer::Input::<String>::with_theme(&ColorfulTheme::default()).interact_text()?;
-        Ok(result)
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        Ok(line.trim().to_string())
     }
 
     pub fn editor(&self) -> anyhow::Result<String> {

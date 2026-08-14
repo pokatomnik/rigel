@@ -58,7 +58,7 @@ impl CommandParser {
         CommandParserResult::CommandContinue
     }
 
-    /// Discovers workspace skills, lets the user select one, and returns its instructions.
+    /// Discovers current directory skills, lets the user select one, and returns its instructions.
     ///
     /// Only direct subdirectories of `.agents/skills` containing a regular `SKILL.md` file are
     /// offered. When no skills are found or anything fails, `No skills found` is printed and the

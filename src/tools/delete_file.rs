@@ -186,7 +186,7 @@ fn outside_project_error(path: &str) -> ToolExecutionError {
     ToolExecutionError::refused(format!(
         "Cannot delete file \"{path}\": path resolves outside the project root. Use a project-relative path without '..'."
     ))
-    .with_code("PATH_OUTSIDE_WORKSPACE")
+    .with_code("PATH_OUTSIDE_CURRENT_DIRECTORY")
 }
 
 fn project_root_error(path: &str) -> ToolExecutionError {
@@ -276,7 +276,7 @@ mod tests {
             .expect_err("outside path should fail");
 
         assert!(error.is_refusal());
-        assert_eq!(error.code(), Some("PATH_OUTSIDE_WORKSPACE"));
+        assert_eq!(error.code(), Some("PATH_OUTSIDE_CURRENT_DIRECTORY"));
     }
 
     #[test]
@@ -285,7 +285,7 @@ mod tests {
             .expect_err("parent components should fail");
 
         assert!(error.is_refusal());
-        assert_eq!(error.code(), Some("PATH_OUTSIDE_WORKSPACE"));
+        assert_eq!(error.code(), Some("PATH_OUTSIDE_CURRENT_DIRECTORY"));
     }
 
     #[test]

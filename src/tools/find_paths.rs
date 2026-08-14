@@ -82,7 +82,7 @@ struct SearchDirectory {
     physical_path: PathBuf,
     logical_path: PathBuf,
     search_relative: PathBuf,
-    workspace_relative: PathBuf,
+    current_directory_relative: PathBuf,
     ignore_stack: IgnoreStack,
 }
 
@@ -107,7 +107,7 @@ impl FindPaths {
             coded_error(
                 ToolErrorKind::Other,
                 "IO_ERROR",
-                format!("Cannot determine the workspace root: {error}"),
+                format!("Cannot determine the current directory: {error}"),
                 None,
             )
             .with_source(error)
@@ -117,7 +117,7 @@ impl FindPaths {
                 ToolErrorKind::Other,
                 "IO_ERROR",
                 format!(
-                    "Cannot access the workspace root \"{}\": {error}",
+                    "Cannot access the current directory root \"{}\": {error}",
                     current_dir.display()
                 ),
                 None,
@@ -146,7 +146,7 @@ impl FindPaths {
                 .map_err(|error| resolve_path_error(path, error))?;
 
             if !physical.starts_with(&self.root) {
-                return Err(outside_workspace_error(path));
+                return Err(outside_current_directory_error(path));
             }
         }
 
@@ -169,13 +169,13 @@ impl FindPaths {
     async fn search(
         &self,
         physical_root: PathBuf,
-        workspace_relative_root: PathBuf,
+        current_directory_relative: PathBuf,
         filters: &SearchFilters,
         respect_ignore_files: bool,
         max_results: usize,
     ) -> Result<FindPathsOutput, ToolExecutionError> {
-        if is_system_git_path(&workspace_relative_root)
-            || (!filters.include_hidden && has_hidden_component(&workspace_relative_root))
+        if is_system_git_path(&current_directory_relative)
+            || (!filters.include_hidden && has_hidden_component(&current_directory_relative))
         {
             return Ok(FindPathsOutput::default());
         }
@@ -184,11 +184,12 @@ impl FindPaths {
 
         if respect_ignore_files {
             initial_ignore_stack = self
-                .load_ancestor_ignore_files(&workspace_relative_root)
+                .load_ancestor_ignore_files(&current_directory_relative)
                 .await?;
 
-            if !workspace_relative_root.as_os_str().is_empty()
-                && initial_ignore_stack.is_ignored(&self.root.join(&workspace_relative_root), true)
+            if !current_directory_relative.as_os_str().is_empty()
+                && initial_ignore_stack
+                    .is_ignored(&self.root.join(&current_directory_relative), true)
             {
                 return Ok(FindPathsOutput::default());
             }
@@ -196,9 +197,9 @@ impl FindPaths {
 
         let mut directories = VecDeque::from([SearchDirectory {
             physical_path: physical_root,
-            logical_path: self.root.join(&workspace_relative_root),
+            logical_path: self.root.join(&current_directory_relative),
             search_relative: PathBuf::new(),
-            workspace_relative: workspace_relative_root,
+            current_directory_relative,
             ignore_stack: initial_ignore_stack,
         }]);
         let mut paths = Vec::new();
@@ -215,7 +216,7 @@ impl FindPaths {
             } else {
                 directory.ignore_stack
             };
-            let directory_display = path_for_output(&directory.workspace_relative);
+            let directory_display = path_for_output(&directory.current_directory_relative);
             let mut read_dir = fs::read_dir(&directory.physical_path)
                 .await
                 .map_err(|error| find_io_error(&directory_display, "reading a directory", error))?;
@@ -232,10 +233,11 @@ impl FindPaths {
             for entry in entries {
                 let file_name = entry.file_name();
                 let search_relative = directory.search_relative.join(&file_name);
-                let workspace_relative = directory.workspace_relative.join(&file_name);
+                let current_directory_relative =
+                    directory.current_directory_relative.join(&file_name);
                 let logical_path = directory.logical_path.join(&file_name);
                 let search_glob_path = path_for_glob(&search_relative);
-                let display_path = path_for_output(&workspace_relative);
+                let display_path = path_for_output(&current_directory_relative);
                 let file_type = entry.file_type().await.map_err(|error| {
                     find_io_error(&display_path, "inspecting a directory entry", error)
                 })?;
@@ -249,8 +251,9 @@ impl FindPaths {
                     None
                 };
 
-                if is_system_git_path(&workspace_relative)
-                    || (!filters.include_hidden && has_hidden_component(&workspace_relative))
+                if is_system_git_path(&current_directory_relative)
+                    || (!filters.include_hidden
+                        && has_hidden_component(&current_directory_relative))
                 {
                     continue;
                 }
@@ -271,7 +274,7 @@ impl FindPaths {
                     })?;
 
                     if !physical_path.starts_with(&self.root) {
-                        return Err(outside_workspace_error(&display_path));
+                        return Err(outside_current_directory_error(&display_path));
                     }
 
                     Some(physical_path)
@@ -299,7 +302,7 @@ impl FindPaths {
                             .expect("directory path must be resolved before traversal"),
                         logical_path,
                         search_relative,
-                        workspace_relative,
+                        current_directory_relative,
                         ignore_stack: ignore_stack.clone(),
                     });
                 }
@@ -334,7 +337,9 @@ impl FindPaths {
                 .map_err(|error| resolve_path_error(&path_for_output(&parent_relative), error))?;
 
             if !physical_path.starts_with(&self.root) {
-                return Err(outside_workspace_error(&path_for_output(&parent_relative)));
+                return Err(outside_current_directory_error(&path_for_output(
+                    &parent_relative,
+                )));
             }
 
             stack = load_directory_ignore_files(&self.root, &physical_path, &logical_path, stack)
@@ -362,7 +367,7 @@ impl Tool for FindPaths {
                 "path": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Workspace-relative directory in which to search; '.' means the workspace root"
+                    "description": "Current directory-relative directory in which to search; '.' means the workspace root"
                 },
                 "patterns": {
                     "type": "array",
@@ -432,11 +437,12 @@ impl Tool for FindPaths {
             args.r#type,
             args.include_hidden,
         )?;
-        let (physical_root, workspace_relative_root) = self.resolve_directory(&args.path).await?;
+        let (physical_root, current_directory_relative) =
+            self.resolve_directory(&args.path).await?;
 
         self.search(
             physical_root,
-            workspace_relative_root,
+            current_directory_relative,
             &filters,
             args.respect_ignore_files,
             args.max_results,
@@ -567,20 +573,20 @@ impl IgnoreStack {
 }
 
 async fn load_directory_ignore_files(
-    workspace_root: &Path,
+    current_directory: &Path,
     physical_directory: &Path,
     logical_directory: &Path,
     stack: IgnoreStack,
 ) -> Result<IgnoreStack, ToolExecutionError> {
     let gitignore = load_ignore_file(
-        workspace_root,
+        current_directory,
         physical_directory,
         logical_directory,
         IGNORE_FILE_NAMES[0],
     )
     .await?;
     let ignore = load_ignore_file(
-        workspace_root,
+        current_directory,
         physical_directory,
         logical_directory,
         IGNORE_FILE_NAMES[1],
@@ -591,7 +597,7 @@ async fn load_directory_ignore_files(
 }
 
 async fn load_ignore_file(
-    workspace_root: &Path,
+    current_directory_root: &Path,
     physical_directory: &Path,
     logical_directory: &Path,
     file_name: &str,
@@ -611,8 +617,10 @@ async fn load_ignore_file(
             ));
         }
     };
-    if !resolved_path.starts_with(workspace_root) {
-        return Err(outside_workspace_error(&path_for_output(&logical_path)));
+    if !resolved_path.starts_with(current_directory_root) {
+        return Err(outside_current_directory_error(&path_for_output(
+            &logical_path,
+        )));
     }
     let bytes = fs::read(&resolved_path).await.map_err(|error| {
         find_io_error(
@@ -689,7 +697,7 @@ fn normalize_relative_path(path: &str) -> Result<PathBuf, ToolExecutionError> {
             Component::Normal(component) => normalized.push(component),
             Component::CurDir => {}
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(outside_workspace_error(path));
+                return Err(outside_current_directory_error(path));
             }
         }
     }
@@ -872,13 +880,13 @@ fn find_io_error(path: &str, operation: &str, error: std::io::Error) -> ToolExec
     .with_source(error)
 }
 
-fn outside_workspace_error(path: &str) -> ToolExecutionError {
+fn outside_current_directory_error(path: &str) -> ToolExecutionError {
     let message = format!(
-        "Search root \"{path}\" is outside the workspace. Use a workspace-relative directory path without '..'."
+        "Search root \"{path}\" is outside the current directory. Use a current directory-relative directory path without '..'."
     );
     with_coded_output(
         ToolExecutionError::refused(message.clone()),
-        "PATH_OUTSIDE_WORKSPACE",
+        "PATH_OUTSIDE_CURRENT_DIRECTORY",
         message,
         Some(serde_json::json!({ "path": path })),
     )
@@ -944,7 +952,7 @@ mod tests {
     fn parent_components_are_rejected() {
         let error = normalize_relative_path("src/../secrets").expect_err("path must be rejected");
 
-        assert_eq!(error.code(), Some("PATH_OUTSIDE_WORKSPACE"));
+        assert_eq!(error.code(), Some("PATH_OUTSIDE_CURRENT_DIRECTORY"));
     }
 
     #[test]

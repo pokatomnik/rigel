@@ -47,6 +47,11 @@ impl McpRegistry {
             .map(|connection| (connection.tools.clone(), connection.service.peer().clone()))
             .collect()
     }
+
+    pub async fn select_mcp_tools(&self) -> anyhow::Result<Vec<(Vec<Tool>, ServerSink)>> {
+        let tools = self.tools();
+        Ok(tools)
+    }
 }
 
 trait McpConnector: Send + Sync {
