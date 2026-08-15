@@ -9,7 +9,7 @@ use tokio::fs;
 
 use crate::tools::contracts::error_codes;
 
-use super::find_paths::{
+use super::tool_find_paths::{
     coded_error, find_io_error, outside_current_directory_error, path_for_output,
 };
 

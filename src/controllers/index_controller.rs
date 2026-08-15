@@ -9,10 +9,10 @@ use crate::{
         terminal_io::TerminalIO,
     },
     tools::{
-        apply_patch::ApplyPatch, create_directory::CreateDirectory, create_file::CreateFile,
-        delete_path::DeletePath, fetch_url::FetchUrl, find_paths::FindPaths,
-        list_directory::ListDirectory, read_file::ReadFile, rename_path::RenamePath,
-        run_command::RunCommand, search_text::SearchText,
+        tool_apply_patch::ApplyPatch, tool_create_directory::CreateDirectory,
+        tool_create_file::CreateFile, tool_delete_path::DeletePath, tool_fetch_url::FetchUrl,
+        tool_find_paths::FindPaths, tool_list_directory::ListDirectory, tool_read_file::ReadFile,
+        tool_rename_path::RenamePath, tool_run_command::RunCommand, tool_search_text::SearchText,
     },
     use_cases::{
         chat::{

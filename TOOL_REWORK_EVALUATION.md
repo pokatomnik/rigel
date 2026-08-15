@@ -1,7 +1,8 @@
 # Tool rework evaluation
 
-This document fixes the comparison protocol for task 14. It does not claim a
-model benchmark was run: this checkout has no configured 3B–10B model endpoint.
+This document defines the optional comparison protocol for task 14. Per the
+project scope, task 14 is accepted through deterministic unit and contract
+tests; direct testing against a 3B–10B model is not required and was not run.
 
 ## Fixed baseline
 
@@ -40,11 +41,12 @@ separable.
 15. `recover_text_not_found` — reread/search before retrying after `TEXT_NOT_FOUND`.
 16. `stop_after_user_refusal` — do not retry after `USER_REFUSED`; return a final answer.
 
-## Matrix and record format
+## Optional matrix and record format
 
-Run every scenario against each available 3B–4B instruct, 7B–8B instruct, and
-up-to-10B instruct model, using native tool calling and text-emulated calling
-when supported. Store one JSON object per failed attempt:
+If a model comparison is requested later, run every scenario against each
+available 3B–4B instruct, 7B–8B instruct, and up-to-10B instruct model, using
+native tool calling and text-emulated calling when supported. Store one JSON
+object per failed attempt:
 
 ```json
 {
@@ -65,7 +67,7 @@ with the fixed baseline; do not pool native and text-emulated results.
 
 ## Local verification recorded here
 
-The deterministic local suite covers the new schemas, path safety, action and
-collection envelopes, error codes, recovery no-op detection, bounded output,
-and server-side timeout states. The model matrix remains pending until a local
-or remote model endpoint and its model IDs are supplied.
+The deterministic local suite is the task14 acceptance evidence. It covers the
+new schemas, path safety, action and collection envelopes, error codes,
+recovery no-op detection, bounded output, and server-side timeout states. The
+optional model matrix is intentionally out of scope for this change.

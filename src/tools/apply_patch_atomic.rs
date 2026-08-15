@@ -11,7 +11,7 @@ use tokio::{
 
 use crate::tools::{contracts::error_codes, revision::sha256};
 
-use super::apply_patch::{coded_error, revision_changed_error, update_io_error};
+use super::tool_apply_patch::{coded_error, revision_changed_error, update_io_error};
 
 const TEMP_FILE_ATTEMPTS: usize = 8;
 static NEXT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
