@@ -164,6 +164,11 @@ where
                 CommandParserResult::AgentConfig => {
                     self.handle_change_model().await?;
                 }
+                CommandParserResult::Unknown => {
+                    self.terminal_io.eprintln_orange(
+                        "Unknown command. Type /help to get a list of available commands.",
+                    );
+                }
             }
         }
         Ok(())

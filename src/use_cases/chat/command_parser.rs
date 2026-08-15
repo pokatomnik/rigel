@@ -16,6 +16,7 @@ impl fmt::Display for SkillOption {
     }
 }
 
+#[derive(Debug)]
 pub(crate) enum CommandParserResult {
     /// Ask to exit the chat.
     CommandExit,
@@ -34,6 +35,9 @@ pub(crate) enum CommandParserResult {
 
     /// Model change request
     AgentConfig,
+
+    /// Unknown command — user typed `/something` but no matching command exists.
+    Unknown,
 }
 
 pub(crate) struct CommandParser {
@@ -134,6 +138,7 @@ impl CommandParser {
                 CommandParserResult::Compact(summarization().to_string())
             }
             _ if raw_input.starts_with("/agent") => CommandParserResult::AgentConfig,
+            _ if raw_input.starts_with("/") => CommandParserResult::Unknown,
             _ => CommandParserResult::Prompt(raw_input, false),
         }
     }
@@ -186,5 +191,39 @@ mod tests {
         let result = parser().parse("/agent".to_string()).await;
 
         assert!(matches!(result, CommandParserResult::AgentConfig));
+    }
+
+    #[tokio::test]
+    async fn unknown_command_returns_unknown_instead_of_leaking_as_prompt() {
+        let result = parser().parse("/nonexistent".to_string()).await;
+
+        assert!(matches!(result, CommandParserResult::Unknown));
+    }
+
+    #[tokio::test]
+    async fn unknown_command_multiple_patterns_returns_unknown() {
+        let result = parser().parse("/nonexistent foo".to_string()).await;
+
+        assert!(matches!(result, CommandParserResult::Unknown));
+    }
+
+    #[tokio::test]
+    async fn bare_slash_returns_unknown() {
+        let result = parser().parse("/".to_string()).await;
+
+        assert!(matches!(result, CommandParserResult::Unknown));
+    }
+
+    #[tokio::test]
+    async fn plain_non_slash_input_returns_prompt() {
+        let result = parser().parse("write hello.rs".to_string()).await;
+
+        match result {
+            CommandParserResult::Prompt(text, echo) => {
+                assert_eq!(text, "write hello.rs");
+                assert!(!echo);
+            }
+            other => panic!("expected a Prompt variant, got: {other:#?}"),
+        }
     }
 }
