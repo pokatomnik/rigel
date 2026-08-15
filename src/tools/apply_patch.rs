@@ -132,7 +132,7 @@ impl Tool for ApplyPatch {
     type Error = ToolExecutionError;
 
     fn description(&self) -> String {
-        "Atomically update an existing UTF-8 file with revision-checked exact text edits."
+        "Atomically update an existing UTF-8 file with revision-checked text edits that tolerate whitespace differences."
             .to_string()
     }
 
@@ -152,14 +152,14 @@ impl Tool for ApplyPatch {
                 "edits": {
                     "type": "array",
                     "minItems": 1,
-                    "description": "Text replacements to apply. Every old_text is matched against the same original file, and edits must not overlap.",
+                    "description": "Text replacements to apply. Every old_text is matched against the same original file, and edits must not overlap. Matching tolerates whitespace differences.",
                     "items": {
                         "type": "object",
                         "properties": {
                             "old_text": {
                                 "type": "string",
                                 "minLength": 1,
-                                "description": "Exact text that must occur exactly once"
+                                "description": "Text that must occur exactly once; matched exactly first, then runs of whitespace are treated as a single space"
                             },
                             "new_text": {
                                 "type": "string",
@@ -270,28 +270,24 @@ fn prepare_update(
             )));
         }
 
-        let occurrences = occurrence_positions(original, &edit.old_text);
-
-        match occurrences.as_slice() {
-            [] => {
-                return Err(ToolExecutionError::invalid_args(format!(
-                    "Cannot apply edit {} to \"{path}\": old_text was not found in the original file. No changes were made. Call read_file again and provide more surrounding context.",
-                    index + 1
-                )));
+        let (start, end) = match classify_occurrence(original, &edit.old_text) {
+            OccurrenceMatch::Single { start, end } => (start, end),
+            OccurrenceMatch::AmbiguousExact { count } => {
+                return Err(ambiguous_exact_occurrence_error(path, index + 1, count));
             }
-            [start] => planned_edits.push(PlannedEdit {
-                index,
-                start: *start,
-                end: *start + edit.old_text.len(),
-            }),
-            _ => {
-                return Err(ToolExecutionError::invalid_args(format!(
-                    "Cannot apply edit {} to \"{path}\": old_text occurs {} times in the original file and must occur exactly once. No changes were made. Call read_file again and provide more surrounding context.",
+            OccurrenceMatch::AmbiguousWhitespace { count } => {
+                return Err(ambiguous_whitespace_occurrence_error(
+                    path,
                     index + 1,
-                    occurrences.len()
-                )));
+                    count,
+                ));
             }
-        }
+            OccurrenceMatch::NotFound => {
+                return Err(occurrence_not_found_error(path, index + 1));
+            }
+        };
+
+        planned_edits.push(PlannedEdit { index, start, end });
 
         bytes_added = bytes_added
             .checked_add(edit.new_text.len() as u64)
@@ -354,6 +350,106 @@ fn occurrence_positions(text: &str, needle: &str) -> Vec<usize> {
     }
 
     positions
+}
+
+/// Outcome of locating one edit's `old_text` in the original file.
+enum OccurrenceMatch {
+    Single { start: usize, end: usize },
+    AmbiguousExact { count: usize },
+    AmbiguousWhitespace { count: usize },
+    NotFound,
+}
+
+/// Locates an edit's `old_text` exactly first, then tolerating whitespace
+/// differences, and reports whether the occurrence is unique.
+fn classify_occurrence(original: &str, old_text: &str) -> OccurrenceMatch {
+    let exact = occurrence_positions(original, old_text);
+
+    match exact.len() {
+        0 => match fuzzy_occurrence_ranges(original, old_text).as_slice() {
+            [] => OccurrenceMatch::NotFound,
+            [(start, end)] => OccurrenceMatch::Single {
+                start: *start,
+                end: *end,
+            },
+            ranges => OccurrenceMatch::AmbiguousWhitespace {
+                count: ranges.len(),
+            },
+        },
+        1 => {
+            let start = exact[0];
+            OccurrenceMatch::Single {
+                start,
+                end: start + old_text.len(),
+            }
+        }
+        count => OccurrenceMatch::AmbiguousExact { count },
+    }
+}
+
+/// Collapses every run of whitespace in `text` into a single space and
+/// records, for each normalized character, the byte range it occupies in the
+/// original text so fuzzy matches can be mapped back onto the file.
+fn normalize_whitespace(text: &str) -> (String, Vec<(usize, usize)>) {
+    let mut normalized = String::with_capacity(text.len());
+    let mut spans = Vec::with_capacity(text.len());
+    let mut characters = text.char_indices().peekable();
+
+    while let Some((start, character)) = characters.next() {
+        if character.is_whitespace() {
+            let mut end = start + character.len_utf8();
+            while let Some(&(next_start, next)) = characters.peek() {
+                if !next.is_whitespace() {
+                    break;
+                }
+                end = next_start + next.len_utf8();
+                characters.next();
+            }
+            normalized.push(' ');
+            spans.push((start, end));
+        } else {
+            let end = start + character.len_utf8();
+            normalized.push(character);
+            spans.push((start, end));
+        }
+    }
+
+    (normalized, spans)
+}
+
+/// Finds every byte range in `text` where `needle` occurs with runs of
+/// whitespace treated as a single space. Overlapping occurrences are reported
+/// separately, mirroring the exact matcher's scan.
+fn fuzzy_occurrence_ranges(text: &str, needle: &str) -> Vec<(usize, usize)> {
+    let (normalized, spans) = normalize_whitespace(text);
+    let normalized_needle = normalize_whitespace(needle).0;
+
+    if normalized_needle.is_empty() {
+        return Vec::new();
+    }
+
+    let char_starts = normalized
+        .char_indices()
+        .map(|(offset, _)| offset)
+        .collect::<Vec<usize>>();
+    let mut ranges = Vec::new();
+    let mut search_from = 0_usize;
+
+    while let Some(relative) = normalized[search_from..].find(&normalized_needle) {
+        let start_byte = search_from + relative;
+        let end_byte = start_byte + normalized_needle.len();
+        let start_index = char_starts.partition_point(|&offset| offset <= start_byte) - 1;
+        let end_index = char_starts.partition_point(|&offset| offset < end_byte);
+        ranges.push((spans[start_index].0, spans[end_index - 1].1));
+
+        let character_length = normalized[start_byte..]
+            .chars()
+            .next()
+            .map_or(1, char::len_utf8);
+        search_from = start_byte + character_length;
+    }
+
+    ranges
 }
 
 async fn replace_file_atomically(
@@ -488,6 +584,28 @@ async fn cleanup_temporary_file(path: &Path) -> Option<std::io::Error> {
 fn update_size_error(path: &str) -> ToolExecutionError {
     ToolExecutionError::other(format!(
         "Cannot update file \"{path}\": edit byte counts exceed the supported size. No changes were made."
+    ))
+}
+
+fn occurrence_not_found_error(path: &str, index: usize) -> ToolExecutionError {
+    ToolExecutionError::invalid_args(format!(
+        "Cannot apply edit {index} to \"{path}\": old_text was not found in the original file, even when whitespace differences are ignored. No changes were made. Call read_file again and provide more surrounding context."
+    ))
+}
+
+fn ambiguous_exact_occurrence_error(path: &str, index: usize, count: usize) -> ToolExecutionError {
+    ToolExecutionError::invalid_args(format!(
+        "Cannot apply edit {index} to \"{path}\": old_text occurs {count} times in the original file and must occur exactly once. No changes were made. Call read_file again and provide more surrounding context."
+    ))
+}
+
+fn ambiguous_whitespace_occurrence_error(
+    path: &str,
+    index: usize,
+    count: usize,
+) -> ToolExecutionError {
+    ToolExecutionError::invalid_args(format!(
+        "Cannot apply edit {index} to \"{path}\": old_text occurs {count} times in the original file when whitespace differences are ignored, and must occur exactly once. No changes were made. Call read_file again and provide more surrounding context."
     ))
 }
 
@@ -697,5 +815,227 @@ mod tests {
             error.model_feedback(),
             Some("Cannot update file \"../outside\": path resolves outside the project root.")
         );
+    }
+
+    #[test]
+    fn whitespace_differences_are_tolerated() {
+        let original = "alpha  beta gamma";
+        let revision = sha256(original.as_bytes());
+        let prepared = prepare_update(
+            original,
+            &revision,
+            &[edit("beta gamma", "beta")],
+            "file.txt",
+        )
+        .expect("fuzzy edit should apply");
+
+        assert_eq!(prepared.content, "alpha  beta");
+    }
+
+    #[test]
+    fn exact_match_is_preferred_over_fuzzy() {
+        let original = "a b  c";
+        let revision = sha256(original.as_bytes());
+        let prepared = prepare_update(original, &revision, &[edit("a b", "x")], "file.txt")
+            .expect("exact edit should apply");
+
+        assert_eq!(prepared.content, "x  c");
+    }
+
+    #[test]
+    fn line_endings_are_ignored() {
+        let original = "foo\r\nbar\r\n";
+        let revision = sha256(original.as_bytes());
+        let prepared = prepare_update(
+            original,
+            &revision,
+            &[edit("foo\nbar\n", "baz")],
+            "file.txt",
+        )
+        .expect("fuzzy edit should apply");
+
+        assert_eq!(prepared.content, "baz");
+    }
+
+    #[test]
+    fn tabs_and_indentation_are_ignored() {
+        let original = "fn main() {\n    call();\n}\n";
+        let revision = sha256(original.as_bytes());
+        let prepared = prepare_update(
+            original,
+            &revision,
+            &[edit("fn main() {\n\tcall();\n}", "fn main() {}")],
+            "file.txt",
+        )
+        .expect("fuzzy edit should apply");
+
+        assert_eq!(prepared.content, "fn main() {}\n");
+    }
+
+    #[test]
+    fn unicode_whitespace_is_tolerated() {
+        let original = "привет\u{00A0}мир";
+        let revision = sha256(original.as_bytes());
+        let prepared = prepare_update(
+            original,
+            &revision,
+            &[edit("привет мир", "hello world")],
+            "file.txt",
+        )
+        .expect("fuzzy edit should apply");
+
+        assert_eq!(prepared.content, "hello world");
+    }
+
+    #[test]
+    fn fuzzy_match_spans_the_whole_whitespace_run() {
+        let original = "foo    bar";
+        let revision = sha256(original.as_bytes());
+        let prepared = prepare_update(
+            original,
+            &revision,
+            &[edit("foo bar", "foobar")],
+            "file.txt",
+        )
+        .expect("fuzzy edit should apply");
+
+        assert_eq!(prepared.content, "foobar");
+    }
+
+    #[test]
+    fn fuzzy_match_covering_the_whole_file_is_mapped_correctly() {
+        let original = "foo bar";
+        let revision = sha256(original.as_bytes());
+        let prepared = prepare_update(original, &revision, &[edit("foo\nbar", "baz")], "file.txt")
+            .expect("fuzzy edit should apply");
+
+        assert_eq!(prepared.content, "baz");
+    }
+
+    #[test]
+    fn fuzzy_ambiguity_is_a_clear_error() {
+        let original = "a b a b";
+        let revision = sha256(original.as_bytes());
+        let error = prepare_update(original, &revision, &[edit("a  b", "x")], "file.txt")
+            .expect_err("ambiguous fuzzy edit should fail");
+
+        assert_eq!(error.kind(), ToolErrorKind::InvalidArgs);
+        assert_eq!(
+            error.model_feedback(),
+            Some(
+                "Cannot apply edit 1 to \"file.txt\": old_text occurs 2 times in the original file when whitespace differences are ignored, and must occur exactly once. No changes were made. Call read_file again and provide more surrounding context."
+            )
+        );
+    }
+
+    #[test]
+    fn exact_ambiguity_keeps_the_exact_error_message() {
+        let original = "a b a b";
+        let revision = sha256(original.as_bytes());
+        let error = prepare_update(original, &revision, &[edit("a b", "x")], "file.txt")
+            .expect_err("ambiguous edit should fail");
+
+        assert_eq!(error.kind(), ToolErrorKind::InvalidArgs);
+        assert_eq!(
+            error.model_feedback(),
+            Some(
+                "Cannot apply edit 1 to \"file.txt\": old_text occurs 2 times in the original file and must occur exactly once. No changes were made. Call read_file again and provide more surrounding context."
+            )
+        );
+    }
+
+    #[test]
+    fn overlapping_fuzzy_occurrences_are_counted() {
+        let original = "a  a  a";
+        let revision = sha256(original.as_bytes());
+        let error = prepare_update(original, &revision, &[edit("a a", "x")], "file.txt")
+            .expect_err("overlapping fuzzy matches should fail");
+
+        assert_eq!(error.kind(), ToolErrorKind::InvalidArgs);
+        assert!(error.model_feedback().is_some_and(|message| {
+            message.contains(
+                "old_text occurs 2 times in the original file when whitespace differences are ignored"
+            )
+        }));
+    }
+
+    #[test]
+    fn fuzzy_not_found_reports_whitespace_insensitive_search() {
+        let original = "alpha beta";
+        let revision = sha256(original.as_bytes());
+        let error = prepare_update(original, &revision, &[edit("gamma delta", "x")], "file.txt")
+            .expect_err("missing text should fail");
+
+        assert_eq!(error.kind(), ToolErrorKind::InvalidArgs);
+        assert_eq!(
+            error.model_feedback(),
+            Some(
+                "Cannot apply edit 1 to \"file.txt\": old_text was not found in the original file, even when whitespace differences are ignored. No changes were made. Call read_file again and provide more surrounding context."
+            )
+        );
+    }
+
+    #[test]
+    fn fuzzy_edits_cannot_overlap_in_the_original_text() {
+        let original = "x a  b c";
+        let revision = sha256(original.as_bytes());
+        let error = prepare_update(
+            original,
+            &revision,
+            &[edit("a b", "d"), edit("b c", "e")],
+            "file.txt",
+        )
+        .expect_err("overlapping edits should fail");
+
+        assert_eq!(error.kind(), ToolErrorKind::InvalidArgs);
+        assert!(
+            error
+                .model_feedback()
+                .is_some_and(|message| message.contains("edits 1 and 2 overlap"))
+        );
+    }
+
+    #[test]
+    fn edits_are_isolated_against_original_text_with_fuzzy_matching() {
+        let original = "a  b";
+        let revision = sha256(original.as_bytes());
+        let error = prepare_update(
+            original,
+            &revision,
+            &[edit("a b", "x y"), edit("y", "z")],
+            "file.txt",
+        )
+        .expect_err("edit 2 must be matched against the original file");
+
+        assert_eq!(error.kind(), ToolErrorKind::InvalidArgs);
+        assert!(
+            error
+                .model_feedback()
+                .is_some_and(|message| message.contains("Cannot apply edit 2 to \"file.txt\""))
+        );
+    }
+
+    #[test]
+    fn whitespace_only_old_text_matches_a_single_whitespace_run() {
+        let original = "a b";
+        let revision = sha256(original.as_bytes());
+        let prepared = prepare_update(original, &revision, &[edit("  ", ",")], "file.txt")
+            .expect("whitespace-only edit should apply");
+
+        assert_eq!(prepared.content, "a,b");
+    }
+
+    #[test]
+    fn fuzzy_edit_reports_byte_counts_of_the_edit_texts() {
+        let original = "foo    bar";
+        let revision = sha256(original.as_bytes());
+        let prepared = prepare_update(original, &revision, &[edit("foo bar", "baz")], "file.txt")
+            .expect("fuzzy edit should apply");
+
+        assert_eq!(prepared.previous_revision, revision);
+        assert_eq!(prepared.revision, sha256(b"baz"));
+        assert_eq!(prepared.applied_edits, 1);
+        assert_eq!(prepared.bytes_added, 3);
+        assert_eq!(prepared.bytes_removed, 7);
     }
 }

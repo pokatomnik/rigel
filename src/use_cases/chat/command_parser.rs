@@ -183,7 +183,7 @@ mod tests {
 
     #[tokio::test]
     async fn model_command_requests_model_change() {
-        let result = parser().parse("/model".to_string()).await;
+        let result = parser().parse("/agent".to_string()).await;
 
         assert!(matches!(result, CommandParserResult::AgentConfig));
     }
