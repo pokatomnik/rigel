@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 
 use crate::tools::{
-    apply_patch_atomic,
     contracts::{Action, error_codes},
     revision::sha256,
 };
@@ -172,8 +171,7 @@ impl Tool for ApplyPatch {
             .with_source(error)
         })?;
         let prepared = prepare_update(&original, &args)?;
-        apply_patch_atomic::replace_file(&resolved, &prepared.content, &args.revision, &args.path)
-            .await?;
+        write_updated_file(&resolved, &prepared.content, &args.revision, &args.path).await?;
         Ok(ApplyPatchOutput {
             action: Action::Updated,
             path,
@@ -251,6 +249,28 @@ fn classify_occurrence(original: &str, find: &str) -> OccurrenceMatch {
         },
         count => OccurrenceMatch::Ambiguous { count },
     }
+}
+
+async fn write_updated_file(
+    target: &Path,
+    content: &str,
+    expected_revision: &str,
+    display_path: &str,
+) -> Result<(), ToolExecutionError> {
+    let bytes = fs::read(target).await.map_err(|error| {
+        update_io_error(display_path, "checking the file before writing", error)
+    })?;
+    let current_revision = sha256(&bytes);
+    if current_revision != expected_revision {
+        return Err(revision_changed_error(
+            display_path,
+            expected_revision,
+            &current_revision,
+        ));
+    }
+    fs::write(target, content.as_bytes())
+        .await
+        .map_err(|error| update_io_error(display_path, "writing the file", error))
 }
 
 fn occurrence_positions(text: &str, needle: &str) -> Vec<usize> {

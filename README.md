@@ -4,7 +4,7 @@ A Rust 2024 CLI agent for interacting with OpenAI-compatible LLM APIs.
 
 ## Project Overview
 
-Rigel is a conversational LLM agent that integrates filesystem tools into an interactive CLI session. It connects to OpenAI-compatible servers and provides atomic, deterministic filesystem operations within the current directory context. All tools work only within the current directory where Rigel started - absolute paths and parent references are rejected for security reasons.
+Rigel is a conversational LLM agent that integrates filesystem tools into an interactive CLI session. It connects to OpenAI-compatible servers and provides deterministic filesystem operations within the current directory context. All tools work only within the current directory where Rigel started - absolute paths and parent references are rejected for security reasons.
 
 ## Configuration
 
@@ -139,13 +139,13 @@ Located in `src/controllers/index_controller.rs`, the IndexController orchestrat
 
 ### Filesystem Tools
 
-Rigel provides a suite of atomic filesystem operations, each with narrow responsibilities:
+Rigel provides a suite of filesystem operations, each with narrow responsibilities:
 
 | Tool               | Description                                     |
 | ------------------ | ----------------------------------------------- |
 | `create_file`      | Create new files and missing parent directories |
 | `read_file`        | Read file content (returns SHA-256 revision)    |
-| `apply_patch`      | Atomic UTF-8 text edits with revision checking  |
+| `apply_patch`      | UTF-8 text edits with revision checking          |
 | `create_directory` | Create directories recursively                  |
 | `delete_path`      | Delete a file or directory recursively          |
 | `find_paths`       | Find files and directories by name              |

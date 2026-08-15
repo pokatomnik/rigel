@@ -1,4 +1,3 @@
-pub(crate) mod apply_patch_atomic;
 pub(crate) mod contracts;
 pub(crate) mod find_paths_ignore;
 pub(crate) mod revision;
