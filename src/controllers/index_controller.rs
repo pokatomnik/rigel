@@ -9,10 +9,10 @@ use crate::{
         terminal_io::TerminalIO,
     },
     tools::{
-        apply_patch::ApplyPatch, create_directory::CreateDirectory, create_file::CreateFile,
-        delete_directory::DeleteDirectory, delete_file::DeleteFile, fetch_webpage::FetchWebpage,
-        find_paths::FindPaths, list_directory::ListDirectory, move_path::MovePath,
-        read_file::ReadFile, run_in_terminal::RunInTerminal, search_text::SearchText, stat::Stat,
+        tool_apply_patch::ApplyPatch, tool_create_directory::CreateDirectory,
+        tool_create_file::CreateFile, tool_delete_path::DeletePath, tool_fetch_url::FetchUrl,
+        tool_find_paths::FindPaths, tool_list_directory::ListDirectory, tool_read_file::ReadFile,
+        tool_rename_path::RenamePath, tool_run_command::RunCommand, tool_search_text::SearchText,
     },
     use_cases::{
         chat::{
@@ -78,16 +78,14 @@ impl IndexController {
             .tool(ApplyPatch::new().await?)
             .tool(CreateDirectory::new().await?)
             .tool(CreateFile::new().await?)
-            .tool(DeleteDirectory::new(deps.terminal_io.clone()).await?)
-            .tool(DeleteFile::new(deps.terminal_io.clone()).await?)
+            .tool(DeletePath::new(deps.terminal_io.clone()).await?)
             .tool(FindPaths::new().await?)
             .tool(ListDirectory::new().await?)
-            .tool(MovePath::new(deps.terminal_io.clone()).await?)
+            .tool(RenamePath::new(deps.terminal_io.clone()).await?)
             .tool(ReadFile::new().await?)
-            .tool(RunInTerminal::new(deps.terminal_io.clone()).await?)
+            .tool(RunCommand::new(deps.terminal_io.clone()).await?)
             .tool(SearchText::new().await?)
-            .tool(Stat::new().await?)
-            .tool(FetchWebpage::new(deps.http_client.clone()))
+            .tool(FetchUrl::new(deps.http_client.clone()))
             .mcp_tools(&deps.mcp_registry.select_tools())
             .default_max_turns(MAX_AGENT_TURNS)
             .build();

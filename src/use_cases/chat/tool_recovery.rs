@@ -381,7 +381,7 @@ fn is_no_op_result(output: &ToolOutput) -> bool {
         .as_content()
         .iter()
         .filter_map(ToolResultContent::as_json)
-        .any(|value| value.get("status").and_then(serde_json::Value::as_str) == Some("not_found"))
+        .any(|value| value.get("action").and_then(serde_json::Value::as_str) == Some("not_found"))
 }
 
 fn append_status_marker(output: &ToolOutput, marker: serde_json::Value) -> ToolOutput {
@@ -485,7 +485,7 @@ mod tests {
         let mut state = failure(2);
 
         assert_eq!(
-            state.observe_tool_result("stat", "{}", 3, false, true, false, "ok"),
+            state.observe_tool_result("run_command", "{}", 3, false, true, false, "ok"),
             ToolResultDecision::Keep
         );
         assert!(state.pending.is_some());
@@ -513,17 +513,17 @@ mod tests {
     #[test]
     fn not_found_no_op_does_not_resolve_failure() {
         let mut state = ToolRecoveryState::default();
-        record_failure(&mut state, "delete_directory", r#"{"path":"."}"#, 1);
+        record_failure(&mut state, "delete_path", r#"{"path":"."}"#, 1);
 
         assert_eq!(
             state.observe_tool_result(
-                "delete_directory",
+                "delete_path",
                 r#"{"path":"asd"}"#,
                 2,
                 false,
                 true,
                 true,
-                r#"{"status":"not_found"}"#,
+                r#"{"action":"not_found","path":"asd","kind":"unknown"}"#,
             ),
             ToolResultDecision::Keep
         );
@@ -535,7 +535,7 @@ mod tests {
         let mut state = ToolRecoveryState::default();
 
         for turn in 1..=3 {
-            record_failure(&mut state, "delete_directory", r#"{"path":"."}"#, turn);
+            record_failure(&mut state, "delete_path", r#"{"path":"."}"#, turn);
         }
 
         assert!(state.force_final_answer.is_some());
@@ -544,10 +544,10 @@ mod tests {
     #[test]
     fn alternating_failure_cycle_forces_final_answer() {
         let mut state = ToolRecoveryState::default();
-        record_failure(&mut state, "delete_directory", r#"{"path":"."}"#, 1);
-        record_failure(&mut state, "delete_directory", r#"{"path":"asd"}"#, 2);
-        record_failure(&mut state, "delete_directory", r#"{"path":"."}"#, 3);
-        record_failure(&mut state, "delete_directory", r#"{"path":"asd"}"#, 4);
+        record_failure(&mut state, "delete_path", r#"{"path":"."}"#, 1);
+        record_failure(&mut state, "delete_path", r#"{"path":"asd"}"#, 2);
+        record_failure(&mut state, "delete_path", r#"{"path":"."}"#, 3);
+        record_failure(&mut state, "delete_path", r#"{"path":"asd"}"#, 4);
 
         assert_eq!(
             state.force_final_answer.as_deref(),
@@ -558,26 +558,26 @@ mod tests {
     #[test]
     fn error_and_no_op_cycle_from_regression_forces_final_answer() {
         let mut state = ToolRecoveryState::default();
-        record_failure(&mut state, "delete_directory", r#"{"path":"."}"#, 1);
+        record_failure(&mut state, "delete_path", r#"{"path":"."}"#, 1);
         state.observe_tool_result(
-            "delete_directory",
+            "delete_path",
             r#"{"path":"asd"}"#,
             2,
             false,
             true,
             true,
-            r#"{"status":"not_found"}"#,
+            r#"{"action":"not_found","path":"asd","kind":"unknown"}"#,
         );
-        record_failure(&mut state, "delete_directory", r#"{"path":"."}"#, 3);
+        record_failure(&mut state, "delete_path", r#"{"path":"."}"#, 3);
 
         let decision = state.observe_tool_result(
-            "delete_directory",
+            "delete_path",
             r#"{"path":"asd"}"#,
             4,
             false,
             true,
             true,
-            r#"{"status":"not_found"}"#,
+            r#"{"action":"not_found","path":"asd","kind":"unknown"}"#,
         );
 
         assert_eq!(
