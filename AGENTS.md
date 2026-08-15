@@ -72,6 +72,42 @@ Treat the following as mandatory contribution rules:
 - At most 500 lines of non-test code per file. Test modules excluded (may exceed 1,000 lines even if total exceeds 500).
 - At most 300 characters combined for logic/structs/enums/constants in a file. Test code excluded.
 
+## Agent workflow
+
+Act primarily as an orchestrator.
+
+Preserve the main context window for:
+
+- user requirements
+- planning
+- architectural decisions
+- summaries from subagents
+- integration
+- final verification
+
+Delegate context-heavy and self-contained work to subagents.
+
+### Codebase research
+
+When understanding unfamiliar code requires searching the project,
+reading multiple files, tracing call chains, or inspecting architecture:
+
+1. Spawn a research subagent.
+2. Do not perform the investigation yourself first.
+3. Give the subagent a narrow research question.
+4. Ask it to return only:
+   - relevant files and symbols
+   - how the code works
+   - constraints and invariants
+   - important findings
+   - recommended files to inspect or modify
+
+Do not ask the research agent to dump source code into its response.
+
+Use its summary as the primary context.
+Only read source files yourself afterward when exact code is required
+for the next operation.
+
 ## Testing Guidelines
 
 Tests use Rust's built-in test framework, placed in `#[cfg(test)] mod tests`. Name after observable behavior (`reasoning_without_answer_requires_recovery`). Cover success, failure, and edge cases. No coverage threshold; prioritize meaningful behavioral assertions. Unit tests must not perform any I/O — no temp files, directories, or external services. Extract pure logic; inject and mock I/O boundaries.
