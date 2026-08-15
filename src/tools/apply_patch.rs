@@ -1,19 +1,13 @@
 use std::{
     env,
     path::{Component, Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
 };
 
 use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
-use tokio::{
-    fs::{self, File, OpenOptions},
-    io::AsyncWriteExt,
-};
+use tokio::fs;
 
 use crate::tools::revision::sha256;
-
-static NEXT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,8 +30,6 @@ pub(crate) struct ApplyPatchOutput {
     previous_revision: String,
     revision: String,
     applied_edits: usize,
-    bytes_added: u64,
-    bytes_removed: u64,
     message: String,
 }
 
@@ -53,8 +45,6 @@ struct PreparedUpdate {
     previous_revision: String,
     revision: String,
     applied_edits: usize,
-    bytes_added: u64,
-    bytes_removed: u64,
 }
 
 pub(crate) struct ApplyPatch {
@@ -132,7 +122,7 @@ impl Tool for ApplyPatch {
     type Error = ToolExecutionError;
 
     fn description(&self) -> String {
-        "Atomically update an existing UTF-8 file with revision-checked text edits that tolerate whitespace differences."
+        "Update an existing UTF-8 file with revision-checked text edits that tolerate whitespace differences. The returned revision must be used as expected_revision for the next patch to this file."
             .to_string()
     }
 
@@ -147,7 +137,7 @@ impl Tool for ApplyPatch {
                 },
                 "expected_revision": {
                     "type": "string",
-                    "description": "Revision returned by read_file"
+                    "description": "Revision returned by read_file or by the previous successful apply_patch call. After a successful patch, use the returned revision for the next patch to this file; never reuse an older revision."
                 },
                 "edits": {
                     "type": "array",
@@ -212,10 +202,9 @@ impl Tool for ApplyPatch {
         })?;
         let prepared = prepare_update(&original, &args.expected_revision, &args.edits, &args.path)?;
 
-        replace_file_atomically(
+        replace_file(
             &resolved,
             &prepared.content,
-            metadata.permissions(),
             &prepared.previous_revision,
             &args.path,
         )
@@ -226,11 +215,7 @@ impl Tool for ApplyPatch {
             previous_revision: prepared.previous_revision,
             revision: prepared.revision,
             applied_edits: prepared.applied_edits,
-            bytes_added: prepared.bytes_added,
-            bytes_removed: prepared.bytes_removed,
-            message:
-                "File was updated atomically. Call read_file again before making further edits."
-                    .to_string(),
+            message: "File was updated. Use this returned revision as expected_revision for the next patch to this file; call read_file again only when you need the current content.".to_string(),
         })
     }
 }
@@ -248,7 +233,6 @@ fn prepare_update(
             path,
             expected_revision,
             &current_revision,
-            None,
         ));
     }
 
@@ -259,8 +243,6 @@ fn prepare_update(
     }
 
     let mut planned_edits = Vec::with_capacity(edits.len());
-    let mut bytes_added = 0_u64;
-    let mut bytes_removed = 0_u64;
 
     for (index, edit) in edits.iter().enumerate() {
         if edit.old_text.is_empty() {
@@ -288,13 +270,6 @@ fn prepare_update(
         };
 
         planned_edits.push(PlannedEdit { index, start, end });
-
-        bytes_added = bytes_added
-            .checked_add(edit.new_text.len() as u64)
-            .ok_or_else(|| update_size_error(path))?;
-        bytes_removed = bytes_removed
-            .checked_add(edit.old_text.len() as u64)
-            .ok_or_else(|| update_size_error(path))?;
     }
 
     planned_edits.sort_by_key(|edit| edit.start);
@@ -329,8 +304,6 @@ fn prepare_update(
         previous_revision: current_revision,
         revision,
         applied_edits: edits.len(),
-        bytes_added,
-        bytes_removed,
     })
 }
 
@@ -452,139 +425,28 @@ fn fuzzy_occurrence_ranges(text: &str, needle: &str) -> Vec<(usize, usize)> {
     ranges
 }
 
-async fn replace_file_atomically(
+async fn replace_file(
     target: &Path,
     content: &str,
-    permissions: std::fs::Permissions,
     expected_revision: &str,
     display_path: &str,
 ) -> Result<(), ToolExecutionError> {
-    let parent = target.parent().ok_or_else(|| {
-        ToolExecutionError::other(format!(
-            "Cannot update file \"{display_path}\": parent directory could not be determined."
-        ))
+    let current_bytes = fs::read(target).await.map_err(|error| {
+        update_io_error(display_path, "checking the revision before writing", error)
     })?;
-    let (mut temporary_file, temporary_path) = create_temporary_file(parent, display_path).await?;
-
-    if let Err(error) = write_temporary_file(&mut temporary_file, content).await {
-        drop(temporary_file);
-        return Err(temporary_file_error(
-            display_path,
-            "writing the new content",
-            error,
-            cleanup_temporary_file(&temporary_path).await,
-        ));
-    }
-
-    if let Err(error) = fs::set_permissions(&temporary_path, permissions).await {
-        drop(temporary_file);
-        return Err(temporary_file_error(
-            display_path,
-            "preserving file permissions",
-            error,
-            cleanup_temporary_file(&temporary_path).await,
-        ));
-    }
-
-    if let Err(error) = temporary_file.sync_all().await {
-        drop(temporary_file);
-        return Err(temporary_file_error(
-            display_path,
-            "synchronizing the new content",
-            error,
-            cleanup_temporary_file(&temporary_path).await,
-        ));
-    }
-
-    drop(temporary_file);
-
-    let current_bytes = match fs::read(target).await {
-        Ok(content) => content,
-        Err(error) => {
-            let cleanup_error = cleanup_temporary_file(&temporary_path).await;
-            return Err(update_io_error_with_cleanup(
-                display_path,
-                "checking the revision before commit",
-                error,
-                cleanup_error,
-            ));
-        }
-    };
     let current_revision = sha256(&current_bytes);
 
     if current_revision != expected_revision {
-        let cleanup_error = cleanup_temporary_file(&temporary_path).await;
         return Err(revision_mismatch_error(
             display_path,
             expected_revision,
             &current_revision,
-            cleanup_error,
         ));
     }
 
-    if let Err(error) = fs::rename(&temporary_path, target).await {
-        return Err(temporary_file_error(
-            display_path,
-            "atomically replacing the original file",
-            error,
-            cleanup_temporary_file(&temporary_path).await,
-        ));
-    }
-
-    Ok(())
-}
-
-async fn create_temporary_file(
-    parent: &Path,
-    display_path: &str,
-) -> Result<(File, PathBuf), ToolExecutionError> {
-    for _ in 0..32 {
-        let id = NEXT_TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
-        let temporary_path = parent.join(format!(
-            ".rigel-apply-patch-{}-{id}.tmp",
-            std::process::id()
-        ));
-
-        match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary_path)
-            .await
-        {
-            Ok(file) => return Ok((file, temporary_path)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(update_io_error(
-                    display_path,
-                    "creating a temporary file",
-                    error,
-                ));
-            }
-        }
-    }
-
-    Err(ToolExecutionError::other(format!(
-        "Cannot update file \"{display_path}\": could not allocate a unique temporary file after 32 attempts. No changes were made."
-    )))
-}
-
-async fn write_temporary_file(file: &mut File, content: &str) -> std::io::Result<()> {
-    file.write_all(content.as_bytes()).await?;
-    file.flush().await
-}
-
-async fn cleanup_temporary_file(path: &Path) -> Option<std::io::Error> {
-    match fs::remove_file(path).await {
-        Ok(()) => None,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => Some(error),
-    }
-}
-
-fn update_size_error(path: &str) -> ToolExecutionError {
-    ToolExecutionError::other(format!(
-        "Cannot update file \"{path}\": edit byte counts exceed the supported size. No changes were made."
-    ))
+    fs::write(target, content)
+        .await
+        .map_err(|error| update_io_error(display_path, "writing the updated file", error))
 }
 
 fn occurrence_not_found_error(path: &str, index: usize) -> ToolExecutionError {
@@ -613,19 +475,10 @@ fn revision_mismatch_error(
     path: &str,
     expected_revision: &str,
     current_revision: &str,
-    cleanup_error: Option<std::io::Error>,
 ) -> ToolExecutionError {
-    let mut message = format!(
-        "Cannot update file \"{path}\": expected_revision \"{expected_revision}\" does not match the current revision \"{current_revision}\". No edits were committed. Call read_file again before retrying."
-    );
-
-    if let Some(error) = cleanup_error {
-        message.push_str(&format!(
-            " The temporary file could not be removed: {error}."
-        ));
-    }
-
-    ToolExecutionError::invalid_args(message)
+    ToolExecutionError::invalid_args(format!(
+        "Cannot update file \"{path}\": expected_revision \"{expected_revision}\" does not match the current revision \"{current_revision}\". No edits were committed. Use the current revision from this error or call read_file, then retry."
+    ))
 }
 
 fn outside_project_error(path: &str) -> ToolExecutionError {
@@ -657,46 +510,6 @@ fn update_io_error(path: &str, operation: &str, error: std::io::Error) -> ToolEx
         _ => ToolExecutionError::other(message),
     }
     .with_source(error)
-}
-
-fn update_io_error_with_cleanup(
-    path: &str,
-    operation: &str,
-    error: std::io::Error,
-    cleanup_error: Option<std::io::Error>,
-) -> ToolExecutionError {
-    if let Some(cleanup_error) = cleanup_error {
-        return ToolExecutionError::other(format!(
-            "Cannot update file \"{path}\" while {operation}: {error}. The temporary file could not be removed: {cleanup_error}."
-        ))
-        .with_source(error);
-    }
-
-    update_io_error(path, operation, error)
-}
-
-fn temporary_file_error(
-    path: &str,
-    operation: &str,
-    error: std::io::Error,
-    cleanup_error: Option<std::io::Error>,
-) -> ToolExecutionError {
-    let mut message = format!(
-        "Cannot update file \"{path}\" while {operation}: {error}. The original file was not replaced."
-    );
-
-    if let Some(cleanup_error) = cleanup_error {
-        message.push_str(&format!(
-            " The temporary file could not be removed: {cleanup_error}."
-        ));
-    }
-
-    match error.kind() {
-        std::io::ErrorKind::PermissionDenied => {
-            ToolExecutionError::permission_denied(message).with_source(error)
-        }
-        _ => ToolExecutionError::other(message).with_source(error),
-    }
 }
 
 #[cfg(test)]
@@ -750,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn revision_mismatch_requests_read_file() {
+    fn revision_mismatch_reports_current_revision() {
         let error = prepare_update(
             "current",
             "stale",
@@ -763,7 +576,7 @@ mod tests {
         assert!(
             error
                 .model_feedback()
-                .is_some_and(|message| message.contains("Call read_file again before retrying"))
+                .is_some_and(|message| message.contains("Use the current revision from this error"))
         );
     }
 
@@ -788,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_update_reports_revisions_and_byte_counts() {
+    fn successful_update_reports_revisions() {
         let original = "hello world";
         let previous_revision = sha256(original.as_bytes());
         let prepared = prepare_update(
@@ -801,8 +614,6 @@ mod tests {
 
         assert_eq!(prepared.previous_revision, previous_revision);
         assert_eq!(prepared.revision, sha256(b"hello Rust!"));
-        assert_eq!(prepared.bytes_added, 5);
-        assert_eq!(prepared.bytes_removed, 5);
     }
 
     #[test]
@@ -1023,19 +834,5 @@ mod tests {
             .expect("whitespace-only edit should apply");
 
         assert_eq!(prepared.content, "a,b");
-    }
-
-    #[test]
-    fn fuzzy_edit_reports_byte_counts_of_the_edit_texts() {
-        let original = "foo    bar";
-        let revision = sha256(original.as_bytes());
-        let prepared = prepare_update(original, &revision, &[edit("foo bar", "baz")], "file.txt")
-            .expect("fuzzy edit should apply");
-
-        assert_eq!(prepared.previous_revision, revision);
-        assert_eq!(prepared.revision, sha256(b"baz"));
-        assert_eq!(prepared.applied_edits, 1);
-        assert_eq!(prepared.bytes_added, 3);
-        assert_eq!(prepared.bytes_removed, 7);
     }
 }
