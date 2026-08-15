@@ -2,99 +2,73 @@ use std::{
     collections::VecDeque,
     env,
     path::{Component, Path, PathBuf},
-    sync::Arc,
 };
 
-use glob::{MatchOptions, Pattern};
-use ignore::{
-    Match,
-    gitignore::{Gitignore, GitignoreBuilder},
-};
-use rig::tool::{Tool, ToolContext, ToolErrorKind, ToolExecutionError, ToolOutput};
+use glob::Pattern;
+use rig::tool::{Tool, ToolContext, ToolErrorKind, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
-const DEFAULT_MAX_RESULTS: usize = 100;
-const MAX_PATTERNS: usize = 20;
-const MAX_RESULTS: usize = 1000;
-const IGNORE_FILE_NAMES: [&str; 2] = [".gitignore", ".ignore"];
+use crate::tools::{
+    contracts::{CollectionEnvelope, error_codes},
+    find_paths_ignore::{IgnoreStack, load_directory_ignore_files},
+};
+
+const MAX_RESULTS: usize = 500;
+const DEFAULT_EXCLUDES: &str = include_str!("excludes.txt");
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FindPathsArgs {
+    query: String,
     path: String,
-    patterns: Vec<String>,
-    exclude: Option<Vec<String>>,
-    #[serde(default)]
-    r#type: PathTypeFilter,
-    #[serde(default)]
-    include_hidden: bool,
-    #[serde(default = "default_respect_ignore_files")]
-    respect_ignore_files: bool,
-    #[serde(default = "default_max_results")]
-    max_results: usize,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-enum PathTypeFilter {
-    #[default]
-    File,
-    Directory,
-    Symlink,
-    Any,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum FoundPathType {
-    File,
-    Directory,
-    Symlink,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct FoundPath {
     path: String,
-    r#type: FoundPathType,
+    #[serde(rename = "type")]
+    kind: FoundPathKind,
 }
 
-#[derive(Debug, Default, PartialEq, Eq, Serialize)]
-pub(crate) struct FindPathsOutput {
-    paths: Vec<FoundPath>,
-    matched: usize,
-    truncated: bool,
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum FoundPathKind {
+    File,
+    Directory,
 }
 
-#[derive(Debug)]
-struct GlobPatterns {
+pub(crate) type FindPathsOutput = CollectionEnvelope<FoundPath>;
+
+struct NameQuery {
+    normalized: String,
+}
+
+struct BuiltInExclusions {
     patterns: Vec<Pattern>,
-}
-
-struct SearchFilters {
-    patterns: GlobPatterns,
-    exclude: GlobPatterns,
-    path_type: PathTypeFilter,
-    include_hidden: bool,
 }
 
 struct SearchDirectory {
     physical_path: PathBuf,
     logical_path: PathBuf,
-    search_relative: PathBuf,
     current_directory_relative: PathBuf,
     ignore_stack: IgnoreStack,
 }
 
-#[derive(Clone, Default)]
-struct IgnoreStack {
-    current: Option<Arc<IgnoreLayer>>,
+struct SearchState {
+    directories: VecDeque<SearchDirectory>,
+    paths: Vec<FoundPath>,
+    query: NameQuery,
+    exclusions: BuiltInExclusions,
 }
 
-struct IgnoreLayer {
-    parent: IgnoreStack,
-    gitignore: Gitignore,
-    ignore: Gitignore,
+struct ScannedEntry {
+    name: String,
+    relative: PathBuf,
+    logical_path: PathBuf,
+    display_path: String,
+    kind: FoundPathKind,
+    physical_directory: Option<PathBuf>,
 }
 
 pub(crate) struct FindPaths {
@@ -106,25 +80,22 @@ impl FindPaths {
         let current_dir = env::current_dir().map_err(|error| {
             coded_error(
                 ToolErrorKind::Other,
-                "IO_ERROR",
+                error_codes::IO_ERROR,
                 format!("Cannot determine the current directory: {error}"),
-                None,
             )
             .with_source(error)
         })?;
         let root = fs::canonicalize(&current_dir).await.map_err(|error| {
             coded_error(
                 ToolErrorKind::Other,
-                "IO_ERROR",
+                error_codes::IO_ERROR,
                 format!(
                     "Cannot access the current directory root \"{}\": {error}",
                     current_dir.display()
                 ),
-                None,
             )
             .with_source(error)
         })?;
-
         Ok(Self { root })
     }
 
@@ -133,193 +104,195 @@ impl FindPaths {
         path: &str,
     ) -> Result<(PathBuf, PathBuf), ToolExecutionError> {
         let relative = normalize_relative_path(path)?;
-        let mut logical = self.root.clone();
-        let mut physical = self.root.clone();
-
-        for component in relative.components() {
-            let Component::Normal(component) = component else {
-                continue;
-            };
-            logical.push(component);
-            physical = fs::canonicalize(&logical)
-                .await
-                .map_err(|error| resolve_path_error(path, error))?;
-
-            if !physical.starts_with(&self.root) {
-                return Err(outside_current_directory_error(path));
-            }
+        let resolved = fs::canonicalize(self.root.join(&relative))
+            .await
+            .map_err(|error| resolve_path_error(path, error))?;
+        if !resolved.starts_with(&self.root) {
+            return Err(outside_current_directory_error(path));
         }
 
-        let metadata = fs::metadata(&physical)
+        let metadata = fs::metadata(&resolved)
             .await
-            .map_err(|error| find_io_error(path, "inspecting the search root", error))?;
-
+            .map_err(|error| find_io_error(path, "inspecting the search path", error))?;
         if !metadata.is_dir() {
             return Err(coded_error(
                 ToolErrorKind::InvalidArgs,
-                "NOT_A_DIRECTORY",
-                "find_paths requires a directory path.",
-                Some(serde_json::json!({ "path": path })),
+                error_codes::INVALID_PATH_TYPE,
+                format!("Cannot search \"{path}\": path is not a directory."),
             ));
         }
 
-        Ok((physical, relative))
+        Ok((resolved, relative))
     }
 
     async fn search(
         &self,
         physical_root: PathBuf,
         current_directory_relative: PathBuf,
-        filters: &SearchFilters,
-        respect_ignore_files: bool,
-        max_results: usize,
+        query: NameQuery,
     ) -> Result<FindPathsOutput, ToolExecutionError> {
-        if is_system_git_path(&current_directory_relative)
-            || (!filters.include_hidden && has_hidden_component(&current_directory_relative))
+        let Some(mut state) = self
+            .initialize_search(physical_root, current_directory_relative, query)
+            .await?
+        else {
+            return Ok(CollectionEnvelope::new(Vec::new(), false));
+        };
+
+        while let Some(directory) = state.directories.pop_front() {
+            self.scan_directory(directory, &mut state).await?;
+            if state.paths.len() > MAX_RESULTS {
+                break;
+            }
+        }
+
+        Ok(finish_output(state.paths))
+    }
+
+    async fn initialize_search(
+        &self,
+        physical_root: PathBuf,
+        current_directory_relative: PathBuf,
+        query: NameQuery,
+    ) -> Result<Option<SearchState>, ToolExecutionError> {
+        let exclusions = BuiltInExclusions::new()?;
+        if exclusions.matches(&current_directory_relative, true) {
+            return Ok(None);
+        }
+        let ignore_stack = self
+            .load_ancestor_ignore_files(&current_directory_relative)
+            .await?;
+        let logical_root = self.root.join(&current_directory_relative);
+        if !current_directory_relative.as_os_str().is_empty()
+            && ignore_stack.is_ignored(&logical_root, true)
         {
-            return Ok(FindPathsOutput::default());
+            return Ok(None);
         }
+        Ok(Some(SearchState {
+            directories: VecDeque::from([SearchDirectory {
+                physical_path: physical_root,
+                logical_path: logical_root,
+                current_directory_relative,
+                ignore_stack,
+            }]),
+            paths: Vec::new(),
+            query,
+            exclusions,
+        }))
+    }
 
-        let mut initial_ignore_stack = IgnoreStack::default();
+    async fn scan_directory(
+        &self,
+        mut directory: SearchDirectory,
+        state: &mut SearchState,
+    ) -> Result<(), ToolExecutionError> {
+        let ignore_stack = load_directory_ignore_files(
+            &self.root,
+            &directory.physical_path,
+            &directory.logical_path,
+            directory.ignore_stack.clone(),
+        )
+        .await?;
+        directory.ignore_stack = ignore_stack;
+        let directory_display = path_for_output(&directory.current_directory_relative);
+        let mut entries = read_entries(&directory.physical_path, &directory_display).await?;
+        entries.sort_by_key(|entry| entry.file_name());
 
-        if respect_ignore_files {
-            initial_ignore_stack = self
-                .load_ancestor_ignore_files(&current_directory_relative)
-                .await?;
-
-            if !current_directory_relative.as_os_str().is_empty()
-                && initial_ignore_stack
-                    .is_ignored(&self.root.join(&current_directory_relative), true)
-            {
-                return Ok(FindPathsOutput::default());
+        for entry in entries {
+            self.scan_entry(entry, &directory, state).await?;
+            if state.paths.len() > MAX_RESULTS {
+                break;
             }
         }
 
-        let mut directories = VecDeque::from([SearchDirectory {
-            physical_path: physical_root,
-            logical_path: self.root.join(&current_directory_relative),
-            search_relative: PathBuf::new(),
-            current_directory_relative,
-            ignore_stack: initial_ignore_stack,
-        }]);
-        let mut paths = Vec::new();
+        Ok(())
+    }
 
-        'search: while let Some(directory) = directories.pop_front() {
-            let ignore_stack = if respect_ignore_files {
-                load_directory_ignore_files(
-                    &self.root,
-                    &directory.physical_path,
-                    &directory.logical_path,
-                    directory.ignore_stack,
-                )
-                .await?
-            } else {
-                directory.ignore_stack
-            };
-            let directory_display = path_for_output(&directory.current_directory_relative);
-            let mut read_dir = fs::read_dir(&directory.physical_path)
+    async fn scan_entry(
+        &self,
+        entry: fs::DirEntry,
+        directory: &SearchDirectory,
+        state: &mut SearchState,
+    ) -> Result<(), ToolExecutionError> {
+        let Some(entry) = self.inspect_entry(entry, directory).await? else {
+            return Ok(());
+        };
+        if state
+            .exclusions
+            .matches(&entry.relative, entry.kind == FoundPathKind::Directory)
+            || directory
+                .ignore_stack
+                .is_ignored(&entry.logical_path, entry.kind == FoundPathKind::Directory)
+        {
+            return Ok(());
+        }
+        if state.query.matches(&entry.name) {
+            state.paths.push(FoundPath {
+                path: entry.display_path,
+                kind: entry.kind,
+            });
+        }
+        if let Some(physical_path) = entry.physical_directory {
+            state.directories.push_back(SearchDirectory {
+                physical_path,
+                logical_path: entry.logical_path,
+                current_directory_relative: entry.relative,
+                ignore_stack: directory.ignore_stack.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn inspect_entry(
+        &self,
+        entry: fs::DirEntry,
+        directory: &SearchDirectory,
+    ) -> Result<Option<ScannedEntry>, ToolExecutionError> {
+        let file_name = entry.file_name();
+        let relative = directory.current_directory_relative.join(&file_name);
+        let display_path = path_for_output(&relative);
+        let logical_path = directory.logical_path.join(&file_name);
+        let file_type = entry
+            .file_type()
+            .await
+            .map_err(|error| find_io_error(&display_path, "inspecting a directory entry", error))?;
+
+        if file_type.is_symlink() {
+            return Ok(None);
+        }
+
+        let kind = if file_type.is_dir() {
+            FoundPathKind::Directory
+        } else if file_type.is_file() {
+            FoundPathKind::File
+        } else {
+            return Ok(None);
+        };
+        let is_directory = kind == FoundPathKind::Directory;
+        let physical_directory = if is_directory {
+            let physical_path = fs::canonicalize(entry.path())
                 .await
-                .map_err(|error| find_io_error(&directory_display, "reading a directory", error))?;
-            let mut entries = Vec::new();
-
-            while let Some(entry) = read_dir.next_entry().await.map_err(|error| {
-                find_io_error(&directory_display, "reading a directory entry", error)
-            })? {
-                entries.push(entry);
+                .map_err(|error| find_io_error(&display_path, "resolving a directory", error))?;
+            if !physical_path.starts_with(&self.root) {
+                return Err(outside_current_directory_error(&display_path));
             }
-
-            entries.sort_by_key(|entry| entry.file_name());
-
-            for entry in entries {
-                let file_name = entry.file_name();
-                let search_relative = directory.search_relative.join(&file_name);
-                let current_directory_relative =
-                    directory.current_directory_relative.join(&file_name);
-                let logical_path = directory.logical_path.join(&file_name);
-                let search_glob_path = path_for_glob(&search_relative);
-                let display_path = path_for_output(&current_directory_relative);
-                let file_type = entry.file_type().await.map_err(|error| {
-                    find_io_error(&display_path, "inspecting a directory entry", error)
-                })?;
-                let found_type = if file_type.is_symlink() {
-                    Some(FoundPathType::Symlink)
-                } else if file_type.is_dir() {
-                    Some(FoundPathType::Directory)
-                } else if file_type.is_file() {
-                    Some(FoundPathType::File)
-                } else {
-                    None
-                };
-
-                if is_system_git_path(&current_directory_relative)
-                    || (!filters.include_hidden
-                        && has_hidden_component(&current_directory_relative))
-                {
-                    continue;
-                }
-
-                let is_directory = found_type == Some(FoundPathType::Directory);
-
-                if ignore_stack.is_ignored(&logical_path, is_directory)
-                    || filters
-                        .exclude
-                        .matches_path_or_directory(&search_glob_path, is_directory)
-                {
-                    continue;
-                }
-
-                let physical_directory_path = if is_directory {
-                    let physical_path = fs::canonicalize(entry.path()).await.map_err(|error| {
-                        find_io_error(&display_path, "resolving a directory", error)
-                    })?;
-
-                    if !physical_path.starts_with(&self.root) {
-                        return Err(outside_current_directory_error(&display_path));
-                    }
-
-                    Some(physical_path)
-                } else {
-                    None
-                };
-
-                if let Some(found_type) = found_type
-                    && filters.path_type.matches(found_type)
-                    && filters.patterns.matches(&search_glob_path)
-                {
-                    paths.push(FoundPath {
-                        path: display_path,
-                        r#type: found_type,
-                    });
-
-                    if paths.len() > max_results {
-                        break 'search;
-                    }
-                }
-
-                if is_directory {
-                    directories.push_back(SearchDirectory {
-                        physical_path: physical_directory_path
-                            .expect("directory path must be resolved before traversal"),
-                        logical_path,
-                        search_relative,
-                        current_directory_relative,
-                        ignore_stack: ignore_stack.clone(),
-                    });
-                }
-            }
-        }
-
-        Ok(finish_output(paths, max_results))
+            Some(physical_path)
+        } else {
+            None
+        };
+        Ok(Some(ScannedEntry {
+            name: file_name.to_string_lossy().into_owned(),
+            relative,
+            logical_path,
+            display_path,
+            kind,
+            physical_directory,
+        }))
     }
 
     async fn load_ancestor_ignore_files(
         &self,
         search_root: &Path,
     ) -> Result<IgnoreStack, ToolExecutionError> {
-        if search_root.as_os_str().is_empty() {
-            return Ok(IgnoreStack::default());
-        }
-
         let components = search_root.components().collect::<Vec<_>>();
         let mut stack =
             load_directory_ignore_files(&self.root, &self.root, &self.root, IgnoreStack::default())
@@ -335,13 +308,11 @@ impl FindPaths {
             let physical_path = fs::canonicalize(&logical_path)
                 .await
                 .map_err(|error| resolve_path_error(&path_for_output(&parent_relative), error))?;
-
             if !physical_path.starts_with(&self.root) {
                 return Err(outside_current_directory_error(&path_for_output(
                     &parent_relative,
                 )));
             }
-
             stack = load_directory_ignore_files(&self.root, &physical_path, &logical_path, stack)
                 .await?;
         }
@@ -357,70 +328,26 @@ impl Tool for FindPaths {
     type Error = ToolExecutionError;
 
     fn description(&self) -> String {
-        "Find paths by glob patterns relative to path. Search is not recursive by default. To search all nested directories, prefix every extension pattern with '**/' (for example, '**/*.rs', '**/*.py', and '**/*.ts'); '*.rs' matches only files directly in path. Set include_hidden for hidden files.".to_string()
+        "Find files and directories by case-insensitive name match inside the current directory."
+            .to_string()
     }
 
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
             "properties": {
+                "query": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "A file or directory name, or part of a name."
+                },
                 "path": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Current directory-relative directory in which to search; '.' means the workspace root"
-                },
-                "patterns": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 20,
-                    "items": {
-                        "type": "string",
-                        "minLength": 1
-                    },
-                    "description": "OR glob patterns relative to path: * does not cross '/', ** does, ? matches one character, and [abc] matches one listed character"
-                },
-                "exclude": {
-                    "type": "array",
-                    "maxItems": 20,
-                    "items": {
-                        "type": "string",
-                        "minLength": 1
-                    },
-                    "description": "Glob patterns to exclude, relative to path"
-                },
-                "type": {
-                    "type": "string",
-                    "enum": [
-                        "file",
-                        "directory",
-                        "symlink",
-                        "any"
-                    ],
-                    "default": "file",
-                    "description": "Type of paths to return: files, directories, symlinks, or any type"
-                },
-                "include_hidden": {
-                    "type": "boolean",
-                    "default": false,
-                    "description": "Include paths with a component beginning with '.'; .git is always excluded"
-                },
-                "respect_ignore_files": {
-                    "type": "boolean",
-                    "default": true,
-                    "description": "Respect nested .gitignore and .ignore files"
-                },
-                "max_results": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 1000,
-                    "default": 100,
-                    "description": "Maximum number of matching paths to return"
+                    "description": "Directory path relative to the current directory; '.' means the current directory."
                 }
             },
-            "required": [
-                "path",
-                "patterns"
-            ],
+            "required": ["query", "path"],
             "additionalProperties": false
         })
     }
@@ -430,268 +357,86 @@ impl Tool for FindPaths {
         _context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
-        validate_args(&args)?;
-        let filters = SearchFilters::new(
-            &args.patterns,
-            args.exclude.as_deref().unwrap_or(&[]),
-            args.r#type,
-            args.include_hidden,
-        )?;
-        let (physical_root, current_directory_relative) =
-            self.resolve_directory(&args.path).await?;
-
-        self.search(
-            physical_root,
-            current_directory_relative,
-            &filters,
-            args.respect_ignore_files,
-            args.max_results,
-        )
-        .await
+        let query = NameQuery::new(&args.query)?;
+        let (physical_root, relative_path) = self.resolve_directory(&args.path).await?;
+        self.search(physical_root, relative_path, query).await
     }
 }
 
-impl PathTypeFilter {
-    fn matches(self, found: FoundPathType) -> bool {
-        matches!(
-            (self, found),
-            (Self::Any, _)
-                | (Self::File, FoundPathType::File)
-                | (Self::Directory, FoundPathType::Directory)
-                | (Self::Symlink, FoundPathType::Symlink)
-        )
-    }
-}
-
-impl SearchFilters {
-    fn new(
-        patterns: &[String],
-        exclude: &[String],
-        path_type: PathTypeFilter,
-        include_hidden: bool,
-    ) -> Result<Self, ToolExecutionError> {
+impl NameQuery {
+    fn new(query: &str) -> Result<Self, ToolExecutionError> {
+        if query.is_empty() {
+            return Err(coded_error(
+                ToolErrorKind::InvalidArgs,
+                error_codes::INVALID_ARGUMENT,
+                "Search query must not be empty.",
+            ));
+        }
         Ok(Self {
-            patterns: GlobPatterns::compile(patterns, "patterns")?,
-            exclude: GlobPatterns::compile(exclude, "exclude")?,
-            path_type,
-            include_hidden,
+            normalized: query.to_lowercase(),
+        })
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        name.to_lowercase().contains(&self.normalized)
+    }
+}
+
+impl BuiltInExclusions {
+    fn new() -> Result<Self, ToolExecutionError> {
+        let patterns = DEFAULT_EXCLUDES
+            .lines()
+            .map(str::trim)
+            .filter(|pattern| !pattern.is_empty() && !pattern.starts_with('#'))
+            .map(|pattern| {
+                Pattern::new(pattern).map_err(|error| {
+                    coded_error(
+                        ToolErrorKind::Other,
+                        error_codes::IO_ERROR,
+                        format!("Cannot compile built-in exclusion \"{pattern}\": {error}"),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { patterns })
+    }
+
+    fn matches(&self, path: &Path, is_directory: bool) -> bool {
+        let path = path_for_output(path);
+        self.patterns.iter().any(|pattern| {
+            pattern.matches(&path)
+                || (is_directory && pattern.matches(&format!("{path}/__rigel_descendant__")))
         })
     }
 }
 
-impl GlobPatterns {
-    fn compile(patterns: &[String], argument: &str) -> Result<Self, ToolExecutionError> {
-        let mut compiled = Vec::with_capacity(patterns.len());
-
-        for pattern in patterns {
-            if pattern.is_empty() {
-                return Err(coded_error(
-                    ToolErrorKind::InvalidArgs,
-                    "INVALID_GLOB",
-                    format!("{argument} glob patterns must not be empty."),
-                    Some(serde_json::json!({ "pattern": pattern })),
-                ));
-            }
-
-            compiled.push(Pattern::new(pattern).map_err(|error| {
-                coded_error(
-                    ToolErrorKind::InvalidArgs,
-                    "INVALID_GLOB",
-                    format!("Invalid {argument} glob \"{pattern}\": {error}"),
-                    Some(serde_json::json!({ "pattern": pattern })),
-                )
-            })?);
-        }
-
-        Ok(Self { patterns: compiled })
-    }
-
-    fn matches(&self, path: &str) -> bool {
-        let options = glob_options();
-        self.patterns
-            .iter()
-            .any(|pattern| pattern.matches_with(path, options))
-    }
-
-    fn matches_path_or_directory(&self, path: &str, is_directory: bool) -> bool {
-        if self.matches(path) {
-            return true;
-        }
-
-        is_directory
-            && self.matches(&format!(
-                "{}/__rigel_descendant__",
-                path.trim_end_matches('/')
-            ))
-    }
-}
-
-impl IgnoreStack {
-    fn push(self, gitignore: Gitignore, ignore: Gitignore) -> Self {
-        if gitignore.is_empty() && ignore.is_empty() {
-            return self;
-        }
-
-        Self {
-            current: Some(Arc::new(IgnoreLayer {
-                parent: self,
-                gitignore,
-                ignore,
-            })),
-        }
-    }
-
-    fn is_ignored(&self, path: &Path, is_directory: bool) -> bool {
-        if let Some(ignored) = self.match_layers(path, is_directory, |layer| &layer.ignore) {
-            return ignored;
-        }
-
-        self.match_layers(path, is_directory, |layer| &layer.gitignore)
-            .unwrap_or(false)
-    }
-
-    fn match_layers<'a>(
-        &'a self,
-        path: &Path,
-        is_directory: bool,
-        matcher: impl Fn(&'a IgnoreLayer) -> &'a Gitignore,
-    ) -> Option<bool> {
-        let mut current = self.current.as_deref();
-
-        while let Some(layer) = current {
-            let matched = matcher(layer).matched(path, is_directory);
-
-            if !matched.is_none() {
-                return Some(matches!(matched, Match::Ignore(_)));
-            }
-
-            current = layer.parent.current.as_deref();
-        }
-
-        None
-    }
-}
-
-async fn load_directory_ignore_files(
-    current_directory: &Path,
-    physical_directory: &Path,
-    logical_directory: &Path,
-    stack: IgnoreStack,
-) -> Result<IgnoreStack, ToolExecutionError> {
-    let gitignore = load_ignore_file(
-        current_directory,
-        physical_directory,
-        logical_directory,
-        IGNORE_FILE_NAMES[0],
-    )
-    .await?;
-    let ignore = load_ignore_file(
-        current_directory,
-        physical_directory,
-        logical_directory,
-        IGNORE_FILE_NAMES[1],
-    )
-    .await?;
-
-    Ok(stack.push(gitignore, ignore))
-}
-
-async fn load_ignore_file(
-    current_directory_root: &Path,
-    physical_directory: &Path,
-    logical_directory: &Path,
-    file_name: &str,
-) -> Result<Gitignore, ToolExecutionError> {
-    let physical_path = physical_directory.join(file_name);
-    let logical_path = logical_directory.join(file_name);
-    let resolved_path = match fs::canonicalize(&physical_path).await {
-        Ok(path) => path,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Gitignore::empty());
-        }
-        Err(error) => {
-            return Err(find_io_error(
-                &path_for_output(&logical_path),
-                "reading an ignore file",
-                error,
-            ));
-        }
-    };
-    if !resolved_path.starts_with(current_directory_root) {
-        return Err(outside_current_directory_error(&path_for_output(
-            &logical_path,
-        )));
-    }
-    let bytes = fs::read(&resolved_path).await.map_err(|error| {
-        find_io_error(
-            &path_for_output(&logical_path),
-            "reading an ignore file",
-            error,
-        )
-    })?;
-    let content = String::from_utf8_lossy(&bytes);
-
-    compile_ignore_content(logical_directory, &logical_path, &content)
-}
-
-fn compile_ignore_content(
+async fn read_entries(
     directory: &Path,
-    source: &Path,
-    content: &str,
-) -> Result<Gitignore, ToolExecutionError> {
-    let mut builder = GitignoreBuilder::new(directory);
-
-    for (index, line) in content.lines().enumerate() {
-        let line = if index == 0 {
-            line.trim_start_matches('\u{feff}')
-        } else {
-            line
-        };
-
-        builder
-            .add_line(Some(source.to_path_buf()), line)
-            .map_err(|error| {
-                coded_error(
-                    ToolErrorKind::InvalidArgs,
-                    "INVALID_IGNORE_FILE",
-                    format!(
-                        "Cannot parse ignore rule at \"{}\":{}: {error}",
-                        path_for_output(source),
-                        index + 1
-                    ),
-                    Some(serde_json::json!({
-                        "path": path_for_output(source),
-                        "line": index + 1
-                    })),
-                )
-            })?;
+    display_path: &str,
+) -> Result<Vec<fs::DirEntry>, ToolExecutionError> {
+    let mut reader = fs::read_dir(directory)
+        .await
+        .map_err(|error| find_io_error(display_path, "reading a directory", error))?;
+    let mut entries = Vec::new();
+    while let Some(entry) = reader
+        .next_entry()
+        .await
+        .map_err(|error| find_io_error(display_path, "reading a directory entry", error))?
+    {
+        entries.push(entry);
     }
-
-    builder.build().map_err(|error| {
-        coded_error(
-            ToolErrorKind::InvalidArgs,
-            "INVALID_IGNORE_FILE",
-            format!(
-                "Cannot compile ignore rules from \"{}\": {error}",
-                path_for_output(source)
-            ),
-            Some(serde_json::json!({ "path": path_for_output(source) })),
-        )
-    })
+    Ok(entries)
 }
 
 fn normalize_relative_path(path: &str) -> Result<PathBuf, ToolExecutionError> {
     if path.is_empty() {
         return Err(coded_error(
             ToolErrorKind::InvalidArgs,
-            "INVALID_ARGUMENT",
-            "Search root must not be empty.",
-            Some(serde_json::json!({ "path": path })),
+            error_codes::INVALID_ARGUMENT,
+            "Search path must not be empty.",
         ));
     }
-
     let mut normalized = PathBuf::new();
-
     for component in Path::new(path).components() {
         match component {
             Component::Normal(component) => normalized.push(component),
@@ -701,132 +446,27 @@ fn normalize_relative_path(path: &str) -> Result<PathBuf, ToolExecutionError> {
             }
         }
     }
-
     Ok(normalized)
 }
 
-fn validate_args(args: &FindPathsArgs) -> Result<(), ToolExecutionError> {
-    if args.path.is_empty() {
-        return Err(coded_error(
-            ToolErrorKind::InvalidArgs,
-            "INVALID_ARGUMENT",
-            "Search root must not be empty.",
-            Some(serde_json::json!({ "path": args.path })),
-        ));
-    }
-
-    if args.patterns.is_empty() || args.patterns.len() > MAX_PATTERNS {
-        return Err(coded_error(
-            ToolErrorKind::InvalidArgs,
-            "INVALID_ARGUMENT",
-            format!("patterns must contain between 1 and {MAX_PATTERNS} glob patterns."),
-            Some(serde_json::json!({ "patterns_count": args.patterns.len() })),
-        ));
-    }
-
-    if args
-        .exclude
-        .as_ref()
-        .is_some_and(|items| items.len() > MAX_PATTERNS)
-    {
-        return Err(coded_error(
-            ToolErrorKind::InvalidArgs,
-            "INVALID_ARGUMENT",
-            format!("exclude must contain at most {MAX_PATTERNS} glob patterns."),
-            Some(serde_json::json!({
-                "exclude_count": args.exclude.as_ref().map_or(0, Vec::len)
-            })),
-        ));
-    }
-
-    if !(1..=MAX_RESULTS).contains(&args.max_results) {
-        return Err(coded_error(
-            ToolErrorKind::InvalidArgs,
-            "INVALID_ARGUMENT",
-            format!("max_results must be between 1 and {MAX_RESULTS}."),
-            Some(serde_json::json!({ "max_results": args.max_results })),
-        ));
-    }
-
-    Ok(())
-}
-
-fn default_respect_ignore_files() -> bool {
-    true
-}
-
-fn default_max_results() -> usize {
-    DEFAULT_MAX_RESULTS
-}
-
-fn glob_options() -> MatchOptions {
-    MatchOptions {
-        case_sensitive: true,
-        require_literal_separator: true,
-        require_literal_leading_dot: false,
-    }
-}
-
-fn has_hidden_component(path: &Path) -> bool {
-    path.components().any(|component| {
-        let Component::Normal(component) = component else {
-            return false;
-        };
-        component.to_string_lossy().starts_with('.')
-    })
-}
-
-fn is_system_git_path(path: &Path) -> bool {
-    path.components().any(|component| {
-        matches!(
-            component,
-            Component::Normal(value) if value.to_string_lossy() == ".git"
-        )
-    })
-}
-
-fn sort_paths(paths: &mut [FoundPath]) {
-    paths.sort_by(|left, right| {
-        path_depth(&left.path)
-            .cmp(&path_depth(&right.path))
-            .then_with(|| left.path.cmp(&right.path))
-    });
-}
-
-fn finish_output(mut paths: Vec<FoundPath>, max_results: usize) -> FindPathsOutput {
-    sort_paths(&mut paths);
-    let truncated = paths.len() > max_results;
-
+fn finish_output(mut paths: Vec<FoundPath>) -> FindPathsOutput {
+    paths.sort_by(|left, right| left.path.cmp(&right.path));
+    let truncated = paths.len() > MAX_RESULTS;
     if truncated {
-        paths.truncate(max_results);
+        paths.truncate(MAX_RESULTS);
     }
-
-    FindPathsOutput {
-        matched: paths.len(),
-        paths,
-        truncated,
-    }
+    CollectionEnvelope::new(paths, truncated)
 }
 
-fn path_depth(path: &str) -> usize {
-    path.split('/')
-        .filter(|component| !component.is_empty())
-        .count()
-}
-
-fn path_for_glob(path: &Path) -> String {
-    path.components()
+pub(crate) fn path_for_output(path: &Path) -> String {
+    let output = path
+        .components()
         .filter_map(|component| match component {
             Component::Normal(component) => Some(component.to_string_lossy()),
             _ => None,
         })
         .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn path_for_output(path: &Path) -> String {
-    let output = path_for_glob(path);
-
+        .join("/");
     if output.is_empty() {
         ".".to_string()
     } else {
@@ -838,160 +478,163 @@ fn resolve_path_error(path: &str, error: std::io::Error) -> ToolExecutionError {
     if error.kind() == std::io::ErrorKind::NotFound {
         return coded_error(
             ToolErrorKind::NotFound,
-            "PATH_NOT_FOUND",
-            "Search root does not exist.",
-            Some(serde_json::json!({ "path": path })),
+            error_codes::PATH_NOT_FOUND,
+            format!("Cannot search \"{path}\": path does not exist."),
         )
         .with_source(error);
     }
-
-    find_io_error(path, "resolving the search root", error)
+    find_io_error(path, "resolving the search path", error)
 }
 
-fn find_io_error(path: &str, operation: &str, error: std::io::Error) -> ToolExecutionError {
+pub(crate) fn find_io_error(
+    path: &str,
+    operation: &str,
+    error: std::io::Error,
+) -> ToolExecutionError {
     let (kind, code, message) = match error.kind() {
         std::io::ErrorKind::NotFound => (
             ToolErrorKind::NotFound,
-            "PATH_NOT_FOUND",
-            format!(
-                "Cannot continue find_paths for \"{path}\" while {operation}: path no longer exists."
-            ),
+            error_codes::PATH_NOT_FOUND,
+            format!("Cannot search \"{path}\" while {operation}: path does not exist."),
         ),
         std::io::ErrorKind::PermissionDenied => (
             ToolErrorKind::PermissionDenied,
-            "PERMISSION_DENIED",
-            format!(
-                "Cannot continue find_paths for \"{path}\" while {operation}: permission denied."
-            ),
+            error_codes::PERMISSION_DENIED,
+            format!("Cannot search \"{path}\" while {operation}: permission denied."),
         ),
         _ => (
             ToolErrorKind::Other,
-            "IO_ERROR",
-            format!("Cannot continue find_paths for \"{path}\" while {operation}: {error}"),
+            error_codes::IO_ERROR,
+            format!("Cannot search \"{path}\" while {operation}: {error}"),
         ),
     };
+    coded_error(kind, code, message).with_source(error)
+}
 
+pub(crate) fn outside_current_directory_error(path: &str) -> ToolExecutionError {
     coded_error(
-        kind,
-        code,
-        message,
-        Some(serde_json::json!({ "path": path, "operation": operation })),
-    )
-    .with_source(error)
-}
-
-fn outside_current_directory_error(path: &str) -> ToolExecutionError {
-    let message = format!(
-        "Search root \"{path}\" is outside the current directory. Use a current directory-relative directory path without '..'."
-    );
-    with_coded_output(
-        ToolExecutionError::refused(message.clone()),
-        "PATH_OUTSIDE_CURRENT_DIRECTORY",
-        message,
-        Some(serde_json::json!({ "path": path })),
+        ToolErrorKind::PermissionDenied,
+        error_codes::PATH_OUTSIDE_CURRENT_DIRECTORY,
+        format!(
+            "Cannot search \"{path}\": path is outside the current directory. Use a relative path without '..'."
+        ),
     )
 }
 
-fn coded_error(
+pub(crate) fn coded_error(
     kind: ToolErrorKind,
     code: &'static str,
     message: impl Into<String>,
-    details: Option<serde_json::Value>,
 ) -> ToolExecutionError {
     let message = message.into();
-    with_coded_output(
-        ToolExecutionError::new(kind, message.clone()),
-        code,
-        message,
-        details,
-    )
-}
-
-fn with_coded_output(
-    error: ToolExecutionError,
-    code: &'static str,
-    message: String,
-    details: Option<serde_json::Value>,
-) -> ToolExecutionError {
-    let mut output = serde_json::json!({
-        "code": code,
-        "message": message,
-    });
-
-    if let Some(details) = details {
-        output["details"] = details;
-    }
-
-    error
-        .with_code(code)
-        .with_model_output(ToolOutput::json(output))
+    ToolExecutionError::new(kind, message).with_code(code)
 }
 
 #[cfg(test)]
 mod tests {
+    use ignore::gitignore::Gitignore;
+
+    use crate::tools::find_paths_ignore::compile_ignore_content;
+
     use super::*;
 
-    fn args(value: serde_json::Value) -> FindPathsArgs {
-        serde_json::from_value(value).expect("arguments should deserialize")
+    fn parse_args(value: serde_json::Value) -> Result<FindPathsArgs, serde_json::Error> {
+        serde_json::from_value(value)
     }
 
     #[test]
-    fn defaults_match_contract() {
-        let args = args(serde_json::json!({
-            "path": ".",
-            "patterns": ["**/*.rs"]
-        }));
-
-        assert_eq!(args.r#type, PathTypeFilter::File);
-        assert!(!args.include_hidden);
-        assert!(args.respect_ignore_files);
-        assert_eq!(args.max_results, 100);
+    fn schema_args_are_only_query_and_path() {
+        assert!(
+            parse_args(serde_json::json!({
+                "query": "chat",
+                "path": "."
+            }))
+            .is_ok()
+        );
+        assert!(
+            parse_args(serde_json::json!({
+                "query": "chat",
+                "path": ".",
+                "type": "file"
+            }))
+            .is_err()
+        );
     }
 
     #[test]
-    fn parent_components_are_rejected() {
-        let error = normalize_relative_path("src/../secrets").expect_err("path must be rejected");
+    fn query_matching_ignores_case_and_matches_name_parts() {
+        let query = NameQuery::new("ChAt");
 
-        assert_eq!(error.code(), Some("PATH_OUTSIDE_CURRENT_DIRECTORY"));
+        assert!(query.is_ok());
+        if let Ok(query) = query {
+            assert!(query.matches("myChat.rs"));
+            assert!(!query.matches("main.rs"));
+        }
     }
 
     #[test]
-    fn recursive_glob_matches_root_and_nested_paths() {
-        let patterns =
-            GlobPatterns::compile(&["**/*.rs".to_string()], "patterns").expect("valid glob");
+    fn empty_query_is_invalid() {
+        let error = NameQuery::new("");
 
-        assert!(patterns.matches("main.rs"));
-        assert!(patterns.matches("config/mod.rs"));
-        assert!(!patterns.matches("config/mod.toml"));
+        assert!(error.is_err());
+        if let Err(error) = error {
+            assert_eq!(error.code(), Some(error_codes::INVALID_ARGUMENT));
+        }
     }
 
     #[test]
-    fn single_star_does_not_cross_directory_separator() {
-        let patterns =
-            GlobPatterns::compile(&["*.rs".to_string()], "patterns").expect("valid glob");
-
-        assert!(patterns.matches("main.rs"));
-        assert!(!patterns.matches("config/mod.rs"));
+    fn relative_path_rejects_absolute_and_parent_paths() {
+        assert!(normalize_relative_path("../outside").is_err());
+        assert!(normalize_relative_path("/outside").is_err());
+        assert_eq!(
+            normalize_relative_path("./src").ok(),
+            Some(PathBuf::from("src"))
+        );
     }
 
     #[test]
-    fn exclusion_can_prune_directory_descendants() {
-        let patterns =
-            GlobPatterns::compile(&["target/**".to_string()], "exclude").expect("valid glob");
+    fn built_in_exclusions_match_directories_and_descendants() {
+        let exclusions = BuiltInExclusions::new();
 
-        assert!(patterns.matches_path_or_directory("target", true));
-        assert!(patterns.matches_path_or_directory("target/debug/app", false));
-        assert!(!patterns.matches_path_or_directory("src", true));
+        assert!(exclusions.is_ok());
+        if let Ok(exclusions) = exclusions {
+            assert!(exclusions.matches(Path::new(".git"), true));
+            assert!(exclusions.matches(Path::new("target/debug/app"), false));
+            assert!(exclusions.matches(Path::new("node_modules"), true));
+            assert!(!exclusions.matches(Path::new("src/main.rs"), false));
+        }
     }
 
     #[test]
-    fn hidden_and_git_components_are_detected() {
-        assert!(has_hidden_component(Path::new(".github/workflows/ci.yml")));
-        assert!(has_hidden_component(Path::new("src/.generated/file.rs")));
-        assert!(!has_hidden_component(Path::new("src/main.rs")));
-        assert!(is_system_git_path(Path::new(".git/config")));
-        assert!(is_system_git_path(Path::new("nested/.git/hooks")));
-        assert!(!is_system_git_path(Path::new(".github/workflows")));
+    fn result_limit_returns_500_items_and_marks_truncation() {
+        let paths = (0..=MAX_RESULTS)
+            .map(|index| FoundPath {
+                path: format!("src/file-{index}.rs"),
+                kind: FoundPathKind::File,
+            })
+            .collect();
+        let output = finish_output(paths);
+
+        assert_eq!(output.count, MAX_RESULTS);
+        assert_eq!(output.items.len(), MAX_RESULTS);
+        assert!(output.truncated);
+    }
+
+    #[test]
+    fn results_are_sorted_by_normalized_relative_path() {
+        let output = finish_output(vec![
+            FoundPath {
+                path: "src/z.rs".to_string(),
+                kind: FoundPathKind::File,
+            },
+            FoundPath {
+                path: "Cargo.toml".to_string(),
+                kind: FoundPathKind::File,
+            },
+        ]);
+
+        assert_eq!(output.items[0].path, "Cargo.toml");
+        assert_eq!(output.items[1].path, "src/z.rs");
     }
 
     #[test]
@@ -1000,142 +643,13 @@ mod tests {
             Path::new("workspace"),
             Path::new("workspace/.gitignore"),
             "*.rs\n!important.rs\n",
-        )
-        .expect("ignore rules should compile");
-        let stack = IgnoreStack::default().push(matcher, Gitignore::empty());
-
-        assert!(stack.is_ignored(Path::new("workspace/generated.rs"), false));
-        assert!(!stack.is_ignored(Path::new("workspace/important.rs"), false));
-    }
-
-    #[test]
-    fn nested_ignore_rules_override_parent_rules() {
-        let parent = compile_ignore_content(
-            Path::new("workspace"),
-            Path::new("workspace/.gitignore"),
-            "*.log\n",
-        )
-        .expect("parent ignore should compile");
-        let child = compile_ignore_content(
-            Path::new("workspace/logs"),
-            Path::new("workspace/logs/.gitignore"),
-            "!keep.log\n",
-        )
-        .expect("child ignore should compile");
-        let stack = IgnoreStack::default()
-            .push(parent, Gitignore::empty())
-            .push(child, Gitignore::empty());
-
-        assert!(stack.is_ignored(Path::new("workspace/logs/drop.log"), false));
-        assert!(!stack.is_ignored(Path::new("workspace/logs/keep.log"), false));
-    }
-
-    #[test]
-    fn ignore_file_has_precedence_over_gitignore() {
-        let gitignore = compile_ignore_content(
-            Path::new("workspace"),
-            Path::new("workspace/.gitignore"),
-            "keep.txt\n",
-        )
-        .expect("gitignore should compile");
-        let ignore = compile_ignore_content(
-            Path::new("workspace"),
-            Path::new("workspace/.ignore"),
-            "!keep.txt\n",
-        )
-        .expect("ignore should compile");
-        let stack = IgnoreStack::default().push(gitignore, ignore);
-
-        assert!(!stack.is_ignored(Path::new("workspace/keep.txt"), false));
-    }
-
-    #[test]
-    fn results_sort_by_depth_then_path() {
-        let mut paths = vec![
-            FoundPath {
-                path: "src/config/mod.rs".to_string(),
-                r#type: FoundPathType::File,
-            },
-            FoundPath {
-                path: "src/main.rs".to_string(),
-                r#type: FoundPathType::File,
-            },
-            FoundPath {
-                path: "Cargo.toml".to_string(),
-                r#type: FoundPathType::File,
-            },
-            FoundPath {
-                path: "crates/core/Cargo.toml".to_string(),
-                r#type: FoundPathType::File,
-            },
-        ];
-
-        sort_paths(&mut paths);
-
-        assert_eq!(
-            paths
-                .iter()
-                .map(|entry| entry.path.as_str())
-                .collect::<Vec<_>>(),
-            vec![
-                "Cargo.toml",
-                "src/main.rs",
-                "crates/core/Cargo.toml",
-                "src/config/mod.rs"
-            ]
-        );
-    }
-
-    #[test]
-    fn max_results_truncates_paths_after_deterministic_sorting() {
-        let output = finish_output(
-            vec![
-                FoundPath {
-                    path: "src/z.rs".to_string(),
-                    r#type: FoundPathType::File,
-                },
-                FoundPath {
-                    path: "Cargo.toml".to_string(),
-                    r#type: FoundPathType::File,
-                },
-                FoundPath {
-                    path: "src/a.rs".to_string(),
-                    r#type: FoundPathType::File,
-                },
-            ],
-            2,
         );
 
-        assert_eq!(output.matched, 2);
-        assert!(output.truncated);
-        assert_eq!(
-            output
-                .paths
-                .iter()
-                .map(|entry| entry.path.as_str())
-                .collect::<Vec<_>>(),
-            vec!["Cargo.toml", "src/a.rs"]
-        );
-    }
-
-    #[test]
-    fn invalid_glob_has_machine_readable_code() {
-        let error =
-            GlobPatterns::compile(&["**/[abc".to_string()], "patterns").expect_err("invalid glob");
-
-        assert_eq!(error.code(), Some("INVALID_GLOB"));
-    }
-
-    #[test]
-    fn argument_limits_are_validated_without_io() {
-        let invalid = args(serde_json::json!({
-            "path": ".",
-            "patterns": ["**/*"],
-            "max_results": 1001
-        }));
-
-        let error = validate_args(&invalid).expect_err("limit should be rejected");
-
-        assert_eq!(error.code(), Some("INVALID_ARGUMENT"));
+        assert!(matcher.is_ok());
+        if let Ok(matcher) = matcher {
+            let stack = IgnoreStack::default().push(matcher, Gitignore::empty());
+            assert!(stack.is_ignored(Path::new("workspace/generated.rs"), false));
+            assert!(!stack.is_ignored(Path::new("workspace/important.rs"), false));
+        }
     }
 }

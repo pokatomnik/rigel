@@ -7,7 +7,10 @@ use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
+use crate::tools::contracts::{CollectionEnvelope, error_codes};
+
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ListDirectoryArgs {
     path: String,
 }
@@ -18,6 +21,8 @@ pub(crate) struct DirectoryEntry {
     #[serde(rename = "type")]
     kind: DirectoryEntryKind,
 }
+
+pub(crate) type ListDirectoryOutput = CollectionEnvelope<DirectoryEntry>;
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -35,7 +40,8 @@ pub(crate) struct ListDirectory {
 impl ListDirectory {
     pub(crate) async fn new() -> Result<Self, ToolExecutionError> {
         let current_dir = env::current_dir().map_err(|error| {
-            ToolExecutionError::other(format!("Cannot determine the project root: {error}"))
+            ToolExecutionError::other(format!("Cannot determine the current directory: {error}"))
+                .with_code(error_codes::IO_ERROR)
                 .with_source(error)
         })?;
 
@@ -45,9 +51,10 @@ impl ListDirectory {
     async fn with_root(root: PathBuf) -> Result<Self, ToolExecutionError> {
         let root = fs::canonicalize(&root).await.map_err(|error| {
             ToolExecutionError::other(format!(
-                "Cannot access the project root \"{}\": {error}",
+                "Cannot access the current directory \"{}\": {error}",
                 root.display()
             ))
+            .with_code(error_codes::IO_ERROR)
             .with_source(error)
         })?;
 
@@ -61,24 +68,23 @@ impl ListDirectory {
     ) -> Result<(), ToolExecutionError> {
         if original.is_empty() {
             return Err(ToolExecutionError::invalid_args(
-                "Cannot list directory: path must not be empty. Use \".\" for the project root.",
-            ));
+                "Cannot list directory: path must not be empty. Use \".\" for the current directory.",
+            )
+            .with_code(error_codes::INVALID_ARGUMENT));
         }
-
-        let mut depth = 0_usize;
 
         for component in path.components() {
             match component {
-                Component::Normal(_) => depth += 1,
-                Component::ParentDir if depth == 0 => {
-                    return Err(outside_project_error(original));
+                Component::Normal(_) => {}
+                Component::ParentDir => {
+                    return Err(outside_current_directory_error(original));
                 }
-                Component::ParentDir => depth -= 1,
                 Component::CurDir => {}
                 Component::RootDir | Component::Prefix(_) => {
                     return Err(ToolExecutionError::invalid_args(format!(
-                        "Cannot list directory \"{original}\": path must be relative to the project root."
-                    )));
+                        "Cannot list directory \"{original}\": path must be relative to the current directory."
+                    ))
+                    .with_code(error_codes::INVALID_ARGUMENT));
                 }
             }
         }
@@ -98,7 +104,7 @@ impl ListDirectory {
             .map_err(|error| access_error(original, error))?;
 
         if !resolved.starts_with(&self.root) {
-            return Err(outside_project_error(original));
+            return Err(outside_current_directory_error(original));
         }
 
         let metadata = fs::metadata(&resolved)
@@ -108,7 +114,8 @@ impl ListDirectory {
         if !metadata.is_dir() {
             return Err(ToolExecutionError::invalid_args(format!(
                 "Cannot list directory \"{original}\": path points to a file, not a directory."
-            )));
+            ))
+            .with_code(error_codes::INVALID_PATH_TYPE));
         }
 
         Ok(resolved)
@@ -118,21 +125,22 @@ impl ListDirectory {
 impl Tool for ListDirectory {
     const NAME: &'static str = "list_directory";
     type Args = ListDirectoryArgs;
-    type Output = Vec<DirectoryEntry>;
+    type Output = ListDirectoryOutput;
     type Error = ToolExecutionError;
 
     fn description(&self) -> String {
-        "List files and directories in a project directory.".to_string()
+        "List direct entries in a current-directory-relative directory.".to_string()
     }
 
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "path": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Directory path relative to the project root. Use \".\" for the project root."
+                    "description": "Directory path relative to the current directory. Use \".\" for the current directory."
                 }
             },
             "required": ["path"]
@@ -162,6 +170,7 @@ impl Tool for ListDirectory {
                     entry.file_name().to_string_lossy(),
                     args.path
                 ))
+                .with_code(error_codes::IO_ERROR)
                 .with_source(error)
             })?;
             let kind = if file_type.is_dir() {
@@ -182,14 +191,15 @@ impl Tool for ListDirectory {
 
         entries.sort_by(|left, right| left.name.cmp(&right.name));
 
-        Ok(entries)
+        Ok(CollectionEnvelope::new(entries, false))
     }
 }
 
-fn outside_project_error(path: &str) -> ToolExecutionError {
+fn outside_current_directory_error(path: &str) -> ToolExecutionError {
     ToolExecutionError::refused(format!(
-        "Cannot list directory \"{path}\": path resolves outside the project root."
+        "Cannot list directory \"{path}\": path resolves outside the current directory."
     ))
+    .with_code(error_codes::PATH_OUTSIDE_CURRENT_DIRECTORY)
 }
 
 fn access_error(path: &str, error: std::io::Error) -> ToolExecutionError {
@@ -207,17 +217,23 @@ fn access_error(path: &str, error: std::io::Error) -> ToolExecutionError {
     };
 
     match error.kind() {
-        std::io::ErrorKind::NotFound => ToolExecutionError::not_found(message),
-        std::io::ErrorKind::PermissionDenied => ToolExecutionError::permission_denied(message),
-        std::io::ErrorKind::NotADirectory => ToolExecutionError::invalid_args(message),
-        _ => ToolExecutionError::other(message),
+        std::io::ErrorKind::NotFound => {
+            ToolExecutionError::not_found(message).with_code(error_codes::PATH_NOT_FOUND)
+        }
+        std::io::ErrorKind::PermissionDenied => {
+            ToolExecutionError::permission_denied(message).with_code(error_codes::PERMISSION_DENIED)
+        }
+        std::io::ErrorKind::NotADirectory => {
+            ToolExecutionError::invalid_args(message).with_code(error_codes::INVALID_PATH_TYPE)
+        }
+        _ => ToolExecutionError::other(message).with_code(error_codes::IO_ERROR),
     }
     .with_source(error)
 }
 
 #[cfg(test)]
 mod tests {
-    use rig::tool::ToolErrorKind;
+    use rig::tool::{Tool, ToolErrorKind};
 
     use super::*;
 
@@ -225,6 +241,18 @@ mod tests {
         ListDirectory {
             root: PathBuf::from("/project"),
         }
+    }
+
+    #[test]
+    fn schema_and_output_use_collection_contract() {
+        let schema = tool().parameters();
+        let output = CollectionEnvelope::new(Vec::<DirectoryEntry>::new(), false);
+
+        assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+        assert_eq!(
+            serde_json::to_value(output).ok(),
+            Some(serde_json::json!({"items": [], "count": 0, "truncated": false}))
+        );
     }
 
     #[test]
@@ -250,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn parent_path_outside_project_is_refused() {
+    fn parent_path_outside_current_directory_is_refused() {
         let error = tool()
             .validate_relative_path(Path::new("../outside"), "../outside")
             .expect_err("outside path should fail");
@@ -258,7 +286,9 @@ mod tests {
         assert!(error.is_refusal());
         assert_eq!(
             error.model_feedback(),
-            Some("Cannot list directory \"../outside\": path resolves outside the project root.")
+            Some(
+                "Cannot list directory \"../outside\": path resolves outside the current directory."
+            )
         );
     }
 
@@ -278,9 +308,11 @@ mod tests {
     }
 
     #[test]
-    fn normalized_path_inside_project_is_allowed() {
-        tool()
+    fn parent_components_are_rejected() {
+        let error = tool()
             .validate_relative_path(Path::new("src/../tests"), "src/../tests")
-            .expect("path should remain inside the project");
+            .expect_err("parent components should be rejected");
+
+        assert!(error.is_refusal());
     }
 }

@@ -3,32 +3,40 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use rig::tool::{Tool, ToolContext, ToolExecutionError};
+use rig::tool::{Tool, ToolContext, ToolErrorKind, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
-use crate::tools::revision::sha256;
+use crate::tools::{contracts::error_codes, revision::sha256};
+
+const DEFAULT_MAX_LINES: usize = 200;
+const MAX_LINES: usize = 500;
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ReadFileArgs {
     path: String,
-    line_start: Option<usize>,
-    line_end: Option<usize>,
+    start_line: Option<usize>,
+    max_lines: Option<usize>,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct ReadFileOutput {
     path: String,
-    line_start: Option<usize>,
-    line_end: Option<usize>,
+    start_line: usize,
+    end_line: usize,
+    total_lines: usize,
+    has_more: bool,
     revision: String,
     content: String,
 }
 
-#[derive(Debug)]
-struct SelectedContent {
-    line_start: Option<usize>,
-    line_end: Option<usize>,
+#[derive(Debug, PartialEq, Eq)]
+struct LineSelection {
+    start_line: usize,
+    end_line: usize,
+    total_lines: usize,
+    has_more: bool,
     content: String,
 }
 
@@ -39,64 +47,56 @@ pub(crate) struct ReadFile {
 impl ReadFile {
     pub(crate) async fn new() -> Result<Self, ToolExecutionError> {
         let current_dir = env::current_dir().map_err(|error| {
-            ToolExecutionError::other(format!("Cannot determine the project root: {error}"))
+            ToolExecutionError::other(format!("Cannot determine the current directory: {error}"))
+                .with_code(error_codes::IO_ERROR)
                 .with_source(error)
         })?;
         let root = fs::canonicalize(&current_dir).await.map_err(|error| {
             ToolExecutionError::other(format!(
-                "Cannot access the project root \"{}\": {error}",
+                "Cannot access the current directory \"{}\": {error}",
                 current_dir.display()
             ))
+            .with_code(error_codes::IO_ERROR)
             .with_source(error)
         })?;
-
         Ok(Self { root })
     }
 
     fn normalize_relative_path(path: &str) -> Result<PathBuf, ToolExecutionError> {
         if path.is_empty() {
-            return Err(ToolExecutionError::invalid_args(
+            return Err(coded_error(
+                error_codes::INVALID_ARGUMENT,
                 "Cannot read file: path must not be empty.",
             ));
         }
-
         let mut normalized = PathBuf::new();
-
         for component in Path::new(path).components() {
             match component {
                 Component::Normal(component) => normalized.push(component),
-                Component::ParentDir if !normalized.pop() => {
-                    return Err(outside_project_error(path));
-                }
-                Component::ParentDir | Component::CurDir => {}
-                Component::RootDir | Component::Prefix(_) => {
-                    return Err(ToolExecutionError::invalid_args(format!(
-                        "Cannot read file \"{path}\": path must be relative to the project root."
-                    )));
+                Component::CurDir => {}
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    return Err(outside_current_directory_error(path));
                 }
             }
         }
-
         if normalized.as_os_str().is_empty() {
-            return Err(ToolExecutionError::invalid_args(format!(
-                "Cannot read file \"{path}\": path must name a file."
-            )));
+            return Err(coded_error(
+                error_codes::INVALID_ARGUMENT,
+                format!("Cannot read file \"{path}\": path must name a file."),
+            ));
         }
-
         Ok(normalized)
     }
 
     async fn resolve_path(&self, path: &str) -> Result<(PathBuf, String), ToolExecutionError> {
-        let relative_path = Self::normalize_relative_path(path)?;
-        let resolved = fs::canonicalize(self.root.join(&relative_path))
+        let relative = Self::normalize_relative_path(path)?;
+        let resolved = fs::canonicalize(self.root.join(&relative))
             .await
             .map_err(|error| read_error(path, error))?;
-
         if !resolved.starts_with(&self.root) {
-            return Err(outside_project_error(path));
+            return Err(outside_current_directory_error(path));
         }
-
-        Ok((resolved, relative_path.to_string_lossy().into_owned()))
+        Ok((resolved, relative.to_string_lossy().into_owned()))
     }
 }
 
@@ -107,8 +107,7 @@ impl Tool for ReadFile {
     type Error = ToolExecutionError;
 
     fn description(&self) -> String {
-        "Read all or a 1-based inclusive line range and return the file's SHA-256 revision."
-            .to_string()
+        "Read a UTF-8 file in line chunks and return its full-content revision.".to_string()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -118,20 +117,22 @@ impl Tool for ReadFile {
                 "path": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "File path relative to the project root."
+                    "description": "File path relative to the current directory."
                 },
-                "line_start": {
+                "start_line": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Optional first line to return, starting from 1."
+                    "description": "First 1-based line to return. The default is 1."
                 },
-                "line_end": {
+                "max_lines": {
                     "type": "integer",
                     "minimum": 1,
-                    "description": "Optional last line to return, inclusive."
+                    "maximum": MAX_LINES,
+                    "description": "Maximum number of lines to return. The server limits this value."
                 }
             },
-            "required": ["path"]
+            "required": ["path"],
+            "additionalProperties": false
         })
     }
 
@@ -140,218 +141,197 @@ impl Tool for ReadFile {
         _context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
-        validate_range(args.line_start, args.line_end, &args.path)?;
-
+        let max_lines = validate_range(args.start_line, args.max_lines, &args.path)?;
         let (resolved, path) = self.resolve_path(&args.path).await?;
         let metadata = fs::metadata(&resolved)
             .await
             .map_err(|error| read_error(&args.path, error))?;
-
         if !metadata.is_file() {
-            return Err(ToolExecutionError::invalid_args(format!(
-                "Cannot read file \"{}\": path is not a regular file.",
-                args.path
-            )));
+            return Err(coded_error(
+                error_codes::INVALID_PATH_TYPE,
+                format!(
+                    "Cannot read file \"{}\": path is not a regular file.",
+                    args.path
+                ),
+            ));
         }
-
-        let content = fs::read_to_string(&resolved)
+        let bytes = fs::read(&resolved)
             .await
             .map_err(|error| read_error(&args.path, error))?;
-        let revision = sha256(content.as_bytes());
-        let selected = select_content(&content, args.line_start, args.line_end, &args.path)?;
-
+        let revision = sha256(&bytes);
+        let content = String::from_utf8(bytes).map_err(|error| {
+            read_error(
+                &args.path,
+                std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+            )
+        })?;
+        let selection = select_lines(&content, args.start_line, max_lines);
         Ok(ReadFileOutput {
             path,
-            line_start: selected.line_start,
-            line_end: selected.line_end,
+            start_line: selection.start_line,
+            end_line: selection.end_line,
+            total_lines: selection.total_lines,
+            has_more: selection.has_more,
             revision,
-            content: selected.content,
+            content: selection.content,
         })
     }
 }
 
 fn validate_range(
-    line_start: Option<usize>,
-    line_end: Option<usize>,
+    start_line: Option<usize>,
+    max_lines: Option<usize>,
     path: &str,
-) -> Result<(), ToolExecutionError> {
-    if line_start == Some(0) {
-        return Err(ToolExecutionError::invalid_args(format!(
-            "Cannot read file \"{path}\": line_start must be at least 1."
-        )));
+) -> Result<usize, ToolExecutionError> {
+    if start_line == Some(0) {
+        return Err(coded_error(
+            error_codes::INVALID_ARGUMENT,
+            format!("Cannot read file \"{path}\": start_line must be at least 1."),
+        ));
     }
-
-    if line_end == Some(0) {
-        return Err(ToolExecutionError::invalid_args(format!(
-            "Cannot read file \"{path}\": line_end must be at least 1."
-        )));
+    if max_lines == Some(0) {
+        return Err(coded_error(
+            error_codes::INVALID_ARGUMENT,
+            format!("Cannot read file \"{path}\": max_lines must be at least 1."),
+        ));
     }
-
-    if let (Some(line_start), Some(line_end)) = (line_start, line_end)
-        && line_start > line_end
-    {
-        return Err(ToolExecutionError::invalid_args(format!(
-            "Cannot read file \"{path}\": line_start ({line_start}) must be less than or equal to line_end ({line_end})."
-        )));
-    }
-
-    Ok(())
+    Ok(max_lines.unwrap_or(DEFAULT_MAX_LINES).min(MAX_LINES))
 }
 
-fn select_content(
-    content: &str,
-    line_start: Option<usize>,
-    line_end: Option<usize>,
-    path: &str,
-) -> Result<SelectedContent, ToolExecutionError> {
-    if line_start.is_none() && line_end.is_none() {
-        return Ok(SelectedContent {
-            line_start: None,
-            line_end: None,
-            content: content.to_string(),
-        });
-    }
-
-    validate_range(line_start, line_end, path)?;
-
+fn select_lines(content: &str, start_line: Option<usize>, max_lines: usize) -> LineSelection {
     let lines = content.lines().collect::<Vec<_>>();
-    let line_count = lines.len();
-    let selected_start = line_start.unwrap_or(1);
-
-    if let Some(line_end) = line_end
-        && line_end > line_count
-    {
-        return Err(ToolExecutionError::invalid_args(format!(
-            "Cannot read file \"{path}\" through line {line_end}: file has only {line_count} lines."
-        )));
+    let total_lines = lines.len();
+    let requested_start = start_line.unwrap_or(1);
+    let selected_start = requested_start.min(total_lines.saturating_add(1));
+    let selected_end = if selected_start <= total_lines {
+        (selected_start + max_lines - 1).min(total_lines)
+    } else {
+        0
+    };
+    let content = if selected_end == 0 {
+        String::new()
+    } else {
+        lines[selected_start - 1..selected_end].join("\n")
+    };
+    LineSelection {
+        start_line: selected_start,
+        end_line: selected_end,
+        total_lines,
+        has_more: selected_end < total_lines,
+        content,
     }
-
-    if selected_start > line_count {
-        return Err(ToolExecutionError::invalid_args(format!(
-            "Cannot read file \"{path}\" from line {selected_start}: file has {line_count} lines."
-        )));
-    }
-
-    let selected_end = line_end.unwrap_or(line_count);
-
-    Ok(SelectedContent {
-        line_start: Some(selected_start),
-        line_end: Some(selected_end),
-        content: lines[selected_start - 1..selected_end].join("\n"),
-    })
 }
 
-fn outside_project_error(path: &str) -> ToolExecutionError {
+fn outside_current_directory_error(path: &str) -> ToolExecutionError {
     ToolExecutionError::refused(format!(
-        "Cannot read file \"{path}\": path resolves outside the project root."
+        "Cannot read file \"{path}\": path is outside the current directory."
     ))
+    .with_code(error_codes::PATH_OUTSIDE_CURRENT_DIRECTORY)
 }
 
 fn read_error(path: &str, error: std::io::Error) -> ToolExecutionError {
-    let message = match error.kind() {
-        std::io::ErrorKind::NotFound => {
-            format!("Cannot read file \"{path}\": file does not exist.")
-        }
-        std::io::ErrorKind::PermissionDenied => {
-            format!("Cannot read file \"{path}\": permission denied.")
-        }
-        std::io::ErrorKind::InvalidData => {
-            format!("Cannot read file \"{path}\": file is not valid UTF-8 text.")
-        }
-        std::io::ErrorKind::IsADirectory => {
-            format!("Cannot read file \"{path}\": path is a directory.")
-        }
-        std::io::ErrorKind::NotADirectory => {
-            format!("Cannot read file \"{path}\": a path component is not a directory.")
-        }
-        _ => format!("Cannot read file \"{path}\": {error}"),
+    let (kind, code, message) = match error.kind() {
+        std::io::ErrorKind::NotFound => (
+            ToolErrorKind::NotFound,
+            error_codes::PATH_NOT_FOUND,
+            format!("Cannot read file \"{path}\": file does not exist."),
+        ),
+        std::io::ErrorKind::PermissionDenied => (
+            ToolErrorKind::PermissionDenied,
+            error_codes::PERMISSION_DENIED,
+            format!("Cannot read file \"{path}\": permission denied."),
+        ),
+        std::io::ErrorKind::InvalidData => (
+            ToolErrorKind::InvalidArgs,
+            error_codes::BINARY_FILE,
+            format!("Cannot read file \"{path}\": file is not valid UTF-8 text."),
+        ),
+        _ => (
+            ToolErrorKind::Other,
+            error_codes::IO_ERROR,
+            format!("Cannot read file \"{path}\": {error}"),
+        ),
     };
+    ToolExecutionError::new(kind, message)
+        .with_code(code)
+        .with_source(error)
+}
 
-    match error.kind() {
-        std::io::ErrorKind::NotFound => ToolExecutionError::not_found(message),
-        std::io::ErrorKind::PermissionDenied => ToolExecutionError::permission_denied(message),
-        std::io::ErrorKind::InvalidData
-        | std::io::ErrorKind::IsADirectory
-        | std::io::ErrorKind::NotADirectory => ToolExecutionError::invalid_args(message),
-        _ => ToolExecutionError::other(message),
-    }
-    .with_source(error)
+fn coded_error(code: &'static str, message: impl Into<String>) -> ToolExecutionError {
+    ToolExecutionError::invalid_args(message).with_code(code)
 }
 
 #[cfg(test)]
 mod tests {
-    use rig::tool::ToolErrorKind;
-
     use super::*;
 
     #[test]
-    fn full_file_read_preserves_original_content() {
-        let selected = select_content("first\r\nsecond\n", None, None, "file.txt")
-            .expect("full content should be selected");
-
-        assert_eq!(selected.line_start, None);
-        assert_eq!(selected.line_end, None);
-        assert_eq!(selected.content, "first\r\nsecond\n");
-    }
-
-    #[test]
-    fn inclusive_line_range_is_selected() {
-        let selected = select_content("one\ntwo\nthree\nfour", Some(2), Some(3), "file.txt")
-            .expect("range should be selected");
-
-        assert_eq!(selected.line_start, Some(2));
-        assert_eq!(selected.line_end, Some(3));
-        assert_eq!(selected.content, "two\nthree");
-    }
-
-    #[test]
-    fn omitted_range_bound_uses_file_boundary() {
-        let from_second = select_content("one\ntwo\nthree", Some(2), None, "file.txt")
-            .expect("range should be selected");
-        let through_second = select_content("one\ntwo\nthree", None, Some(2), "file.txt")
-            .expect("range should be selected");
-
-        assert_eq!(from_second.content, "two\nthree");
-        assert_eq!(from_second.line_end, Some(3));
-        assert_eq!(through_second.content, "one\ntwo");
-        assert_eq!(through_second.line_start, Some(1));
-    }
-
-    #[test]
-    fn line_end_beyond_file_is_a_clear_error() {
-        let error = select_content("one\ntwo", Some(1), Some(3), "file.txt")
-            .expect_err("out-of-range line_end should fail");
-
-        assert_eq!(error.kind(), ToolErrorKind::InvalidArgs);
-        assert_eq!(
-            error.model_feedback(),
-            Some("Cannot read file \"file.txt\" through line 3: file has only 2 lines.")
+    fn schema_accepts_only_path_and_optional_chunk_fields() {
+        assert!(
+            serde_json::from_value::<ReadFileArgs>(serde_json::json!({
+                "path": "src/main.rs"
+            }))
+            .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<ReadFileArgs>(serde_json::json!({
+                "path": "src/main.rs",
+                "line_end": 10
+            }))
+            .is_err()
         );
     }
 
     #[test]
-    fn reversed_range_is_a_clear_error() {
-        let error =
-            validate_range(Some(3), Some(2), "file.txt").expect_err("reversed range should fail");
+    fn line_selection_uses_defaults_and_reports_more_lines() {
+        let selection = select_lines("one\ntwo\nthree", None, 2);
 
-        assert_eq!(error.kind(), ToolErrorKind::InvalidArgs);
-        assert_eq!(
-            error.model_feedback(),
-            Some(
-                "Cannot read file \"file.txt\": line_start (3) must be less than or equal to line_end (2)."
-            )
-        );
+        assert_eq!(selection.start_line, 1);
+        assert_eq!(selection.end_line, 2);
+        assert_eq!(selection.total_lines, 3);
+        assert!(selection.has_more);
+        assert_eq!(selection.content, "one\ntwo");
     }
 
     #[test]
-    fn outside_path_is_refused() {
-        let error =
-            ReadFile::normalize_relative_path("../outside").expect_err("outside path should fail");
+    fn line_selection_continues_from_requested_line() {
+        let selection = select_lines("one\ntwo\nthree", Some(2), 2);
 
-        assert!(error.is_refusal());
-        assert_eq!(
-            error.model_feedback(),
-            Some("Cannot read file \"../outside\": path resolves outside the project root.")
-        );
+        assert_eq!(selection.start_line, 2);
+        assert_eq!(selection.end_line, 3);
+        assert!(!selection.has_more);
+        assert_eq!(selection.content, "two\nthree");
+    }
+
+    #[test]
+    fn line_selection_clamps_max_lines_and_tolerates_eof() {
+        let selection = select_lines("one\ntwo", Some(2), MAX_LINES + 100);
+        let beyond_eof = select_lines("one\ntwo", Some(20), 10);
+
+        assert_eq!(selection.end_line, 2);
+        assert!(!selection.has_more);
+        assert_eq!(beyond_eof.start_line, 3);
+        assert_eq!(beyond_eof.end_line, 0);
+        assert_eq!(beyond_eof.content, "");
+    }
+
+    #[test]
+    fn invalid_range_is_model_visible() {
+        let error = validate_range(Some(0), None, "file.txt");
+
+        assert!(error.is_err());
+        if let Err(error) = error {
+            assert_eq!(error.code(), Some(error_codes::INVALID_ARGUMENT));
+            assert!(
+                error
+                    .model_feedback()
+                    .is_some_and(|message| message.contains("start_line"))
+            );
+        }
+    }
+
+    #[test]
+    fn full_content_revision_uses_bytes() {
+        assert_eq!(sha256("one\ntwo".as_bytes()), sha256(b"one\ntwo"));
     }
 }

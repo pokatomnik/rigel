@@ -7,23 +7,18 @@ use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
+use super::contracts::{Action, error_codes};
+
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CreateDirectoryArgs {
     path: String,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct CreateDirectoryOutput {
+    action: Action,
     path: String,
-    status: CreateDirectoryStatus,
-    message: String,
-}
-
-#[derive(Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum CreateDirectoryStatus {
-    Created,
-    AlreadyExists,
 }
 
 pub(crate) struct CreateDirectory {
@@ -33,117 +28,58 @@ pub(crate) struct CreateDirectory {
 impl CreateDirectory {
     pub(crate) async fn new() -> Result<Self, ToolExecutionError> {
         let current_dir = env::current_dir().map_err(|error| {
-            ToolExecutionError::other(format!("Cannot determine the project root: {error}"))
+            ToolExecutionError::other(format!("Cannot determine the current directory: {error}"))
+                .with_code(error_codes::IO_ERROR)
                 .with_source(error)
         })?;
         let root = fs::canonicalize(&current_dir).await.map_err(|error| {
             ToolExecutionError::other(format!(
-                "Cannot access the project root \"{}\": {error}",
+                "Cannot access the current directory \"{}\": {error}",
                 current_dir.display()
             ))
+            .with_code(error_codes::IO_ERROR)
             .with_source(error)
         })?;
-
         Ok(Self { root })
     }
 
     fn normalize_relative_path(path: &str) -> Result<PathBuf, ToolExecutionError> {
         if path.is_empty() {
-            return Err(ToolExecutionError::invalid_args(
-                "Cannot create directory: path must not be empty. Use \".\" for the project root.",
+            return Err(invalid_path(
+                "Cannot create directory: path must not be empty. Use \".\" for the current directory.",
             ));
         }
-
         let mut normalized = PathBuf::new();
-
         for component in Path::new(path).components() {
             match component {
                 Component::Normal(component) => normalized.push(component),
-                Component::ParentDir if !normalized.pop() => {
-                    return Err(outside_project_error(path));
-                }
-                Component::ParentDir | Component::CurDir => {}
+                Component::CurDir => {}
+                Component::ParentDir => return Err(outside_current_directory(path)),
                 Component::RootDir | Component::Prefix(_) => {
-                    return Err(ToolExecutionError::invalid_args(format!(
-                        "Cannot create directory \"{path}\": path must be relative to the project root."
+                    return Err(invalid_path(format!(
+                        "Cannot create directory \"{path}\": path must be relative to the current directory."
                     )));
                 }
             }
         }
-
         Ok(normalized)
     }
 
-    async fn closest_existing_ancestor(
+    async fn ensure_chain(
         &self,
-        target: &Path,
+        relative: &Path,
         original: &str,
-    ) -> Result<(PathBuf, PathBuf), ToolExecutionError> {
-        let mut ancestor = target.to_path_buf();
-
-        loop {
-            match fs::canonicalize(&ancestor).await {
-                Ok(resolved) => {
-                    if !resolved.starts_with(&self.root) {
-                        return Err(outside_project_error(original));
-                    }
-
-                    return Ok((ancestor, resolved));
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    if !ancestor.pop() {
-                        return Err(ToolExecutionError::other(format!(
-                            "Cannot create directory \"{original}\": no accessible parent directory was found."
-                        ))
-                        .with_source(error));
-                    }
-                }
-                Err(error) => return Err(create_error(original, error)),
-            }
+    ) -> Result<bool, ToolExecutionError> {
+        let mut current = self.root.clone();
+        let mut final_created = false;
+        for component in relative.components() {
+            let Component::Normal(name) = component else {
+                continue;
+            };
+            current.push(name);
+            final_created = ensure_directory_component(&self.root, &current, original).await?;
         }
-    }
-
-    async fn existing_target_result(
-        &self,
-        target: &Path,
-        original: &str,
-    ) -> Result<CreateDirectoryOutput, ToolExecutionError> {
-        let resolved = match fs::canonicalize(target).await {
-            Ok(resolved) => resolved,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return match fs::symlink_metadata(target).await {
-                    Ok(_) => Err(path_is_not_directory_error(original)),
-                    Err(metadata_error)
-                        if metadata_error.kind() == std::io::ErrorKind::NotFound =>
-                    {
-                        Err(ToolExecutionError::other(format!(
-                            "Cannot create directory \"{original}\": path changed during creation; retry the operation."
-                        ))
-                        .with_retryable(true)
-                        .with_source(metadata_error))
-                    }
-                    Err(metadata_error) => Err(create_error(original, metadata_error)),
-                };
-            }
-            Err(error) => return Err(create_error(original, error)),
-        };
-
-        if !resolved.starts_with(&self.root) {
-            return Err(outside_project_error(original));
-        }
-
-        let metadata = fs::metadata(&resolved)
-            .await
-            .map_err(|error| create_error(original, error))?;
-
-        if metadata.is_dir() {
-            Ok(directory_result(
-                original,
-                CreateDirectoryStatus::AlreadyExists,
-            ))
-        } else {
-            Err(path_is_not_directory_error(original))
-        }
+        Ok(final_created)
     }
 }
 
@@ -154,17 +90,18 @@ impl Tool for CreateDirectory {
     type Error = ToolExecutionError;
 
     fn description(&self) -> String {
-        "Create a directory inside the project.".to_string()
+        "Create a directory chain in the current directory.".to_string()
     }
 
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({
             "type": "object",
+            "additionalProperties": false,
             "properties": {
                 "path": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Directory path relative to the project root. Missing parent directories are also created."
+                    "description": "Directory path relative to the current directory."
                 }
             },
             "required": ["path"]
@@ -176,87 +113,86 @@ impl Tool for CreateDirectory {
         _context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
-        let relative_path = Self::normalize_relative_path(&args.path)?;
-        let target = self.root.join(relative_path);
-        let (existing_ancestor, resolved_ancestor) =
-            self.closest_existing_ancestor(&target, &args.path).await?;
-        let ancestor_metadata = fs::metadata(&resolved_ancestor)
-            .await
-            .map_err(|error| create_error(&args.path, error))?;
+        let relative = Self::normalize_relative_path(&args.path)?;
+        let action = if relative.as_os_str().is_empty() {
+            Action::Unchanged
+        } else if self.ensure_chain(&relative, &args.path).await? {
+            Action::Created
+        } else {
+            Action::Unchanged
+        };
+        Ok(CreateDirectoryOutput {
+            action,
+            path: if relative.as_os_str().is_empty() {
+                ".".to_string()
+            } else {
+                relative.to_string_lossy().into_owned()
+            },
+        })
+    }
+}
 
-        if !ancestor_metadata.is_dir() {
-            return Err(path_is_not_directory_error(&args.path));
+async fn ensure_directory_component(
+    root: &Path,
+    path: &Path,
+    original: &str,
+) -> Result<bool, ToolExecutionError> {
+    match fs::symlink_metadata(path).await {
+        Ok(_) => {
+            validate_directory_component(root, path, original).await?;
+            Ok(false)
         }
-
-        if existing_ancestor == target {
-            return Ok(directory_result(
-                &args.path,
-                CreateDirectoryStatus::AlreadyExists,
-            ));
-        }
-
-        let parent = target.parent().ok_or_else(|| {
-            ToolExecutionError::other(format!(
-                "Cannot create directory \"{}\": parent path could not be determined.",
-                args.path
-            ))
-        })?;
-
-        fs::create_dir_all(parent)
-            .await
-            .map_err(|error| create_error(&args.path, error))?;
-
-        let resolved_parent = fs::canonicalize(parent)
-            .await
-            .map_err(|error| create_error(&args.path, error))?;
-
-        if !resolved_parent.starts_with(&self.root) {
-            return Err(outside_project_error(&args.path));
-        }
-
-        let directory_name = target.file_name().ok_or_else(|| {
-            ToolExecutionError::invalid_args(format!(
-                "Cannot create directory \"{}\": path does not name a directory.",
-                args.path
-            ))
-        })?;
-        let final_target = resolved_parent.join(directory_name);
-
-        match fs::create_dir(&final_target).await {
-            Ok(()) => Ok(directory_result(&args.path, CreateDirectoryStatus::Created)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                self.existing_target_result(&final_target, &args.path).await
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match fs::create_dir(path).await {
+                Ok(()) => Ok(true),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    validate_directory_component(root, path, original).await?;
+                    Ok(false)
+                }
+                Err(error) => Err(create_error(original, error)),
             }
-            Err(error) => Err(create_error(&args.path, error)),
         }
+        Err(error) => Err(create_error(original, error)),
     }
 }
 
-fn directory_result(path: &str, status: CreateDirectoryStatus) -> CreateDirectoryOutput {
-    let message = match status {
-        CreateDirectoryStatus::Created => format!("Directory \"{path}\" was created."),
-        CreateDirectoryStatus::AlreadyExists => {
-            format!("Directory \"{path}\" already exists; no changes were made.")
-        }
-    };
-
-    CreateDirectoryOutput {
-        path: path.to_string(),
-        status,
-        message,
+async fn validate_directory_component(
+    root: &Path,
+    path: &Path,
+    original: &str,
+) -> Result<(), ToolExecutionError> {
+    let resolved = fs::canonicalize(path)
+        .await
+        .map_err(|error| create_error(original, error))?;
+    if !resolved.starts_with(root) {
+        return Err(outside_current_directory(original));
+    }
+    let metadata = fs::metadata(&resolved)
+        .await
+        .map_err(|error| create_error(original, error))?;
+    if metadata.is_dir() {
+        Ok(())
+    } else {
+        Err(invalid_path_type(original))
     }
 }
 
-fn outside_project_error(path: &str) -> ToolExecutionError {
-    ToolExecutionError::refused(format!(
-        "Cannot create directory \"{path}\": path resolves outside the project root."
-    ))
+fn invalid_path(message: impl Into<String>) -> ToolExecutionError {
+    ToolExecutionError::invalid_args(message).with_code(error_codes::INVALID_ARGUMENT)
 }
 
-fn path_is_not_directory_error(path: &str) -> ToolExecutionError {
+fn invalid_path_type(path: &str) -> ToolExecutionError {
     ToolExecutionError::invalid_args(format!(
-        "Cannot create directory \"{path}\": path already exists and is not a directory."
+        "Cannot create directory \"{path}\": path is occupied by a file."
     ))
+    .with_code(error_codes::INVALID_PATH_TYPE)
+}
+
+fn outside_current_directory(path: &str) -> ToolExecutionError {
+    ToolExecutionError::refused(format!(
+        "Cannot create directory \"{path}\": path resolves outside the current directory."
+    ))
+    .with_code(error_codes::PATH_OUTSIDE_CURRENT_DIRECTORY)
 }
 
 fn create_error(path: &str, error: std::io::Error) -> ToolExecutionError {
@@ -267,84 +203,69 @@ fn create_error(path: &str, error: std::io::Error) -> ToolExecutionError {
         std::io::ErrorKind::PermissionDenied => {
             format!("Cannot create directory \"{path}\": permission denied.")
         }
-        std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::NotADirectory => {
-            format!(
-                "Cannot create directory \"{path}\": a path component exists and is not a directory."
-            )
-        }
         _ => format!("Cannot create directory \"{path}\": {error}"),
     };
-
-    match error.kind() {
+    let tool_error = match error.kind() {
         std::io::ErrorKind::NotFound => ToolExecutionError::not_found(message),
         std::io::ErrorKind::PermissionDenied => ToolExecutionError::permission_denied(message),
-        std::io::ErrorKind::AlreadyExists | std::io::ErrorKind::NotADirectory => {
-            ToolExecutionError::invalid_args(message)
-        }
         _ => ToolExecutionError::other(message),
-    }
-    .with_source(error)
+    };
+    tool_error
+        .with_code(match error.kind() {
+            std::io::ErrorKind::NotFound => error_codes::PATH_NOT_FOUND,
+            std::io::ErrorKind::PermissionDenied => error_codes::PERMISSION_DENIED,
+            _ => error_codes::IO_ERROR,
+        })
+        .with_source(error)
 }
 
 #[cfg(test)]
 mod tests {
-    use rig::tool::ToolErrorKind;
+    use rig::tool::{Tool, ToolErrorKind};
 
     use super::*;
 
     #[test]
-    fn created_result_is_explicit() {
-        let result = directory_result("src/generated", CreateDirectoryStatus::Created);
+    fn output_has_one_action_and_path() {
+        let output = CreateDirectoryOutput {
+            action: Action::Unchanged,
+            path: "src".to_string(),
+        };
 
-        assert_eq!(result.status, CreateDirectoryStatus::Created);
-        assert_eq!(result.message, "Directory \"src/generated\" was created.");
-    }
-
-    #[test]
-    fn already_existing_result_is_explicit() {
-        let result = directory_result("src", CreateDirectoryStatus::AlreadyExists);
-
-        assert_eq!(result.status, CreateDirectoryStatus::AlreadyExists);
         assert_eq!(
-            result.message,
-            "Directory \"src\" already exists; no changes were made."
+            serde_json::to_value(output).ok(),
+            Some(serde_json::json!({"action": "unchanged", "path": "src"}))
         );
     }
 
     #[test]
-    fn parent_path_outside_project_is_refused() {
+    fn schema_rejects_extra_fields() {
+        let tool = CreateDirectory {
+            root: PathBuf::from("."),
+        };
+        assert_eq!(
+            tool.parameters()["additionalProperties"],
+            serde_json::json!(false)
+        );
+    }
+
+    #[test]
+    fn parent_path_outside_current_directory_is_refused() {
         let error = CreateDirectory::normalize_relative_path("../outside")
             .expect_err("outside path should fail");
 
         assert!(error.is_refusal());
         assert_eq!(
-            error.model_feedback(),
-            Some("Cannot create directory \"../outside\": path resolves outside the project root.")
+            error.code(),
+            Some(error_codes::PATH_OUTSIDE_CURRENT_DIRECTORY)
         );
     }
 
     #[test]
-    fn absolute_path_is_rejected() {
-        let path = std::path::MAIN_SEPARATOR.to_string();
-        let error =
-            CreateDirectory::normalize_relative_path(&path).expect_err("absolute path should fail");
+    fn file_occupying_directory_path_has_invalid_type() {
+        let error = invalid_path_type("notes.txt");
 
         assert_eq!(error.kind(), ToolErrorKind::InvalidArgs);
-        assert!(
-            error
-                .model_feedback()
-                .is_some_and(|message| message.contains("path must be relative"))
-        );
-    }
-
-    #[test]
-    fn permission_error_is_clear_and_model_visible() {
-        let error = create_error("protected", std::io::ErrorKind::PermissionDenied.into());
-
-        assert_eq!(error.kind(), ToolErrorKind::PermissionDenied);
-        assert_eq!(
-            error.model_feedback(),
-            Some("Cannot create directory \"protected\": permission denied.")
-        );
+        assert_eq!(error.code(), Some(error_codes::INVALID_PATH_TYPE));
     }
 }

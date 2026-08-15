@@ -143,17 +143,17 @@ Rigel provides a suite of atomic filesystem operations, each with narrow respons
 
 | Tool               | Description                                     |
 | ------------------ | ----------------------------------------------- |
-| `create_file`      | Create new files in current directory           |
+| `create_file`      | Create new files and missing parent directories |
 | `read_file`        | Read file content (returns SHA-256 revision)    |
 | `apply_patch`      | Atomic UTF-8 text edits with revision checking  |
 | `create_directory` | Create directories recursively                  |
-| `delete_directory` | Remove directory and contents                   |
-| `delete_file`      | Delete existing file (requires existence check) |
-| `find_paths`       | Recursive glob pattern matching                 |
+| `delete_path`      | Delete a file or directory recursively          |
+| `find_paths`       | Find files and directories by name              |
 | `list_directory`   | Inspect directory contents                      |
-| `move_path`        | Rename or move files/directories                |
-| `search_text`      | Search file contents (supports regex)           |
-| `stat`             | Return file/directory metadata                  |
+| `rename_path`      | Rename a file or directory without overwrite    |
+| `search_text`      | Search exact, case-sensitive file text          |
+| `run_command`      | Run build, test, format, or program commands     |
+| `fetch_url`        | Fetch readable text from an HTTP or HTTPS URL  |
 
 **Security Constraints**: All tools work only within the current directory where Rigel started. Current directory-relative paths are validated; absolute paths and parent references (`..`) are rejected. The current directory is protected from delete/move operations.
 
