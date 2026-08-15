@@ -2,164 +2,80 @@
 
 ## Project Structure & Module Organization
 
-Rigel is a Rust 2024 CLI for chatting with OpenAI-compatible model APIs. The
-entry point is `src/main.rs`. Command-line parsing lives in `src/cmd/`, request
-orchestration in `src/controllers/`, and application workflows in
-`src/use_cases/` (currently chat and model selection). Shared terminal behavior
-belongs in `src/shared/`; LLM prompts and prompt text are under `src/prompts/`;
-agent-callable tools live in `src/tools/`. Keep each module exported through its
-nearest `mod.rs`. Dependencies and crate metadata are maintained in
-`Cargo.toml`, with reproducible versions recorded in `Cargo.lock`.
+Rigel is a Rust 2024 CLI for OpenAI-compatible model APIs. Entry point: `src/main.rs`. Modules:
+
+- `src/cmd/` — CLI parsing
+- `src/controllers/` — request orchestration
+- `src/use_cases/` — application workflows
+- `src/shared/` — shared terminal behavior
+- `src/prompts/` — LLM prompts and text
+- `src/tools/` — agent-callable tools
+
+Each module exports via its nearest `mod.rs`. Dependencies in `Cargo.toml`, reproducible versions in `Cargo.lock`.
 
 ## Chat Run Loop Architecture
 
-`Chat::run` in `src/use_cases/chat/chat.rs` is core project functionality and
-must remain a simple, linear orchestration loop. Treat this as a strict
-contribution rule, not a style preference.
+`Chat::run` (`src/use_cases/chat/chat.rs`) is core functionality and must remain a
+simple, linear orchestration loop. This is a strict rule, not a style preference.
 
-- Keep `Chat::run` focused on sequencing the high-level chat steps: read user
-  input, run the model stream, choose the completion or recovery path, report
-  the turn outcome, and continue or exit.
-- Any new substantive step added to the chat loop must be implemented as a
-  clearly named method on `Chat` and invoked from `run`. This includes parsing,
-  formatting, state transitions, history mutation, recovery preparation, and
-  error-handling details.
-- Do not add nested workflow logic, multi-step transformations, or detailed
-  branch bodies directly to `run` unless they are strictly necessary to express
-  the top-level control flow.
-- If a change makes `run` harder to read from top to bottom, refactor the new
-  logic out before considering the change complete. A reviewer should be able
-  to understand the full lifecycle of one user turn from `run` without reading
-  implementation details there.
+- `Chat::run` sequences high-level steps: read input, run stream, choose completion or recovery path, report turn outcome, continue or exit.
+- Add new substantive steps as named methods on `Chat`, invoked from `run`. This includes parsing, formatting, state transitions, history mutation, recovery prep, and error handling.
+- Do not add nested workflow logic or detailed branch bodies to `run` unless strictly necessary for top-level control flow.
+- Refactor new logic out of `run` if it makes the loop harder to read. A reviewer must understand one user turn from `run` without reading implementation details.
 
 ## Filesystem Tool Architecture
 
-- A tool may access only the directory in which Rigel started. Capture and
-  canonicalize that root when constructing the tool. Accept current directory-relative
-  paths only; reject absolute paths and `..`. Resolve existing ancestors and
-  symlinks before I/O so neither source nor destination can escape the root.
-  Explicitly protect the current directory from delete or move operations.
-- Use `tokio::fs` for every filesystem operation. Keep path validation,
-  matching, formatting, hashing, and edit planning as pure functions where
-  practical.
-- Give each tool one narrow responsibility. `list_directory` inspects one
-  directory, `find_paths` recursively matches path globs, `search_text` searches
-  file contents, `stat` returns metadata, and `read_file` returns content.
-  Search tools must not grow into general filesystem APIs.
-- Tool descriptions and successful results must be short, deterministic, and
-  explicit about what changed. Return normalized current directory-relative paths,
-  never canonical absolute paths. Sort collections deterministically.
-- Errors are model-facing recovery data. State what failed, why, which path or
-  argument caused it, and the next corrective action. Prefer stable structured
-  codes such as `PATH_NOT_FOUND`, `PATH_OUTSIDE_CURRENT_DIRECTORY`, or `INVALID_GLOB`
-  where the tool has structured output. Never hide an I/O error behind a generic
-  failure message.
-- Preserve idempotent outcomes as explicit non-errors when the contract calls
-  for them, for example deleting a missing directory returns `not_found`.
-  Conversely, creating an existing file is an error and must direct the model
-  to `apply_patch`.
-- File reads are UTF-8 and return a SHA-256 `revision`. `apply_patch` requires
-  that revision, validates every edit before writing, evaluates edits against
-  the same original text, rejects missing/ambiguous/overlapping matches, and
-  commits atomically. On success it returns the new revision and asks the model
-  to read the file again.
-- Recursive search skips binary files when searching a directory but rejects a
-  directly selected binary file. Built-in search exclusions live in data files
-  included with `include_str!`, not duplicated as Rust literals. Keep search
-  result limits bounded and report truncation.
+- Tools access only Rigel's startup directory. Canonicalize root on construction. Accept `.`-relative paths only; reject absolute paths and `..`. Resolve ancestors and symlinks before I/O. Protect current directory from delete/move.
+- Use `tokio::fs` for every filesystem operation. Path validation, matching, formatting, hashing, and edit planning may be pure functions.
+- One tool per narrow responsibility: `list_directory`, `find_paths`, `search_text`, `stat`, `read_file`. Search tools must not become general filesystem APIs.
+- Descriptions and successes are short, deterministic, explicit about what changed. Return normalized current-directory-relative paths (never absolute). Sort collections deterministically.
+- Errors are model-facing recovery data: state what failed, why, which path or argument caused it, and the next corrective action. Prefer structured codes (`PATH_NOT_FOUND`, `PATH_OUTSIDE_CURRENT_DIRECTORY`, `INVALID_GLOB`) where available. Never hide an I/O error behind a generic message.
+- Idempotent outcomes are explicit non-errors (e.g. deleting a missing directory returns `not_found`). Creating an existing file is an error directing the model to use `apply_patch`.
+- File reads are UTF-8 and return a SHA-256 `revision`. `apply_patch` requires that revision, validates edits before writing, rejects missing/ambiguous/overlapping matches, and commits atomically. On success returns new revision.
+- Recursive search skips binary files in directories but rejects directly selected binaries. Built-in exclusions live in data files via `include_str!`, not duplicated as Rust literals. Keep result limits bounded and report truncation.
 
 ## Tool Error Recovery
 
-Recovery is designed for weak models, where both malformed and unnecessary tool
-calls are expected. A tool error requires an intelligible next step, not
-necessarily another tool call.
+Recovery handles weak models where malformed and unnecessary tool calls are expected.
 
-- After an error, accept either a corrected tool call or a non-empty final
-  answer when the failed call was unnecessary or the user request is already
-  complete. Retry only responses containing neither. Prompts must explicitly
-  forbid unrelated calls made only to clear an error state.
-- Do not treat arbitrary success as recovery. Only a later, non-no-op success
-  from the same tool clears its pending failure. In particular, `not_found`
-  does not resolve a previous failure. A final answer may still close the
-  pending state.
-- Recovery state is scoped to one Rig agent run. Do not reconstruct pending
-  failures by scanning old chat history: an older error may already have been
-  intentionally closed by a final answer.
-- Budgets are hard and do not reset after a successful call: at most 12 model
-  turns, 6 failed tool executions, 2 identical failures, 2 empty recovery
-  responses, and 2 invalid-tool retries. Detect a repeated A-B-A-B invocation
-  cycle, including error/no-op cycles.
-- When a failure budget or cycle guard fires, set `ToolChoice::None` for the
-  following completion and request a concise final report of what succeeded and
-  what could not be completed. If the model still emits tools, stop after the
-  invalid-call budget instead of reopening an unbounded loop.
-- `ToolRecoveryHook` writes small `rigel_tool_status` markers into model-visible
-  tool results. `StreamOutputState` consumes those markers but must never
-  suppress a non-empty final answer merely because an earlier tool failed.
+- After an error, accept a corrected call or non-empty final answer. Retry only responses containing neither. Prompts must forbid unrelated tool calls.
+- Do not treat arbitrary success as recovery. Only a later non-no-op success from the same tool clears its pending failure (`not_found` does not resolve a previous failure). A final answer may still close the pending state.
+- Recovery is scoped to one agent run. Do not reconstruct failures from old chat history.
+- Hard budgets that do not reset: 12 model turns, 6 failed tool executions, 2 identical failures, 2 empty recovery responses, 2 invalid-tool retries. Detect A-B-A-B invocation cycles (including error/no-op).
+- When budget or cycle guard fires: set `ToolChoice::None` for next completion and request a concise final report. If the model still emits tools, stop after invalid-call budget.
+- `ToolRecoveryHook` writes small `rigel_tool_status` markers into model-visible results. `StreamOutputState` consumes them but never suppresses a non-empty final answer.
 
 ## Build, Test, and Development Commands
 
-- `cargo run -- --help` displays the available CLI options.
-- `cargo run -- --base-url http://localhost:8000/v1` starts Rigel against a
-  local OpenAI-compatible server; use `--api-key` only when required.
-- `cargo build` compiles the debug binary to `target/debug/rigel`.
-- `cargo test --all-targets` runs the complete test suite.
-- `cargo fmt --all -- --check` verifies standard Rust formatting.
-- `cargo clippy --all-targets --all-features` reports common correctness and
-  maintainability issues.
+- `cargo run -- --help` — CLI options
+- `cargo run -- --base-url http://localhost:8000/v1` — start Rigel against local server; use `--api-key` only when required
+- `cargo build` — debug binary at `target/debug/rigel`
+- `cargo test --all-targets` — complete test suite
+- `cargo fmt --all -- --check` — standard Rust formatting
+- `cargo clippy --all-targets --all-features` — correctness and maintainability issues
 
 ## Coding Style & Naming Conventions
 
-Use `rustfmt` defaults (four-space indentation and trailing commas in multiline
-constructs). Follow Rust conventions: `snake_case` for modules, functions, and
-variables; `PascalCase` for structs and traits; and `SCREAMING_SNAKE_CASE` for
-constants. Prefer small modules aligned with the existing controller/use-case
-boundaries. Return `anyhow::Result` at application boundaries and use concrete
-error types where library-style APIs benefit from them.
+Use `rustfmt` defaults (four spaces, trailing commas). Follow Rust conventions: `snake_case` for modules/functions/variables; `PascalCase` for structs/traits; `SCREAMING_SNAKE_CASE` for constants. Prefer small modules aligned with controller/use-case boundaries. Return `anyhow::Result` at application boundaries; use concrete error types for library-style APIs.
 
-**CRITICAL RULE**: `.unwrap()` methods are strictly PROHIBITED. You MUST NEVER USE `.expect()`, `.unwrap()`, or similar panicking methods. All methods must return `Result<T, E>`.
+**CRITICAL RULE**: `.unwrap()` and panicking methods (`.expect()`, etc.) are **strictly PROHIBITED**. All methods must return `Result<T, E>`.
 
 ## Design and Complexity Constraints
 
-Treat the following limits as mandatory contribution rules:
+Treat the following as mandatory contribution rules:
 
-- Give every struct exactly one responsibility. A struct and its methods must not
-  accumulate substantial logic unrelated to the purpose for which the struct
-  was introduced.
-- Functions and methods may accept at most three arguments, excluding `self`.
-  Introduce additional domain operations or redesign the API instead of growing
-  long parameter lists.
-- Every new struct must be justified by the domain or by an explicit business
-  rule. Do not introduce structs merely as implementation conveniences, generic
-  parameter bags, or arbitrary groupings of otherwise unrelated data.
-- Keep control flow shallow. A function or method must not contain more than two
-  nested levels of `if` and/or `match`. Extract named operations when deeper
-  branching would be required.
-- Keep every function and method at no more than 30 lines of code. Do not satisfy
-  this limit by removing useful whitespace, combining statements, or otherwise
-  compressing formatting; decompose the logic into cohesive named operations.
-- Keep each file at no more than 500 lines of non-test code. Code inside test
-  modules is excluded from this limit and may be arbitrarily long, including
-  more than 1,000 lines, even when it makes the whole file exceed 500 lines.
-- Keep the combined descriptions of logic, structs, enums, and constants in a
-  file to no more than 300 characters. Test code is not subject to this limit.
+- One responsibility per struct. Methods must not accumulate unrelated logic.
+- At most three function/method arguments (excluding `self`). Redesign the API rather than growing parameter lists.
+- Justify every new struct by domain or a business rule. No structs as mere implementation conveniences.
+- Shallow control flow: no more than two nested `if`/`match` levels. Extract named operations for deeper branching.
+- At most 30 lines of code per function/method. Decompose into named operations rather than compressing.
+- At most 500 lines of non-test code per file. Test modules excluded (may exceed 1,000 lines even if total exceeds 500).
+- At most 300 characters combined for logic/structs/enums/constants in a file. Test code excluded.
 
 ## Testing Guidelines
 
-Tests currently use Rust's built-in test framework and sit beside the code in
-`#[cfg(test)] mod tests` blocks. Name tests after observable behavior, such as
-`reasoning_without_answer_requires_recovery`. Add tests for success, failure,
-and edge cases when changing chat state or recovery logic. No coverage threshold
-is configured; prioritize meaningful behavioral assertions. Unit tests must not
-perform any I/O, including filesystem or network access. Do not create temporary
-files or directories or contact external services from unit tests. Extract pure
-logic or inject and mock I/O boundaries instead.
+Tests use Rust's built-in test framework, placed in `#[cfg(test)] mod tests`. Name after observable behavior (`reasoning_without_answer_requires_recovery`). Cover success, failure, and edge cases. No coverage threshold; prioritize meaningful behavioral assertions. Unit tests must not perform any I/O — no temp files, directories, or external services. Extract pure logic; inject and mock I/O boundaries.
 
 ## Commit & Pull Request Guidelines
 
-Recent commits use short, imperative, title-cased subjects such as
-`Refactor chat loop`. Keep commits focused and avoid mixing unrelated cleanup
-with feature changes. Pull requests should explain the behavior change, list
-verification commands, and link relevant issues. Include terminal output or
-screenshots when CLI interaction changes, and call out any API model or server
-assumptions needed for manual testing.
+Commits use short, imperative, title-cased subjects (`Refactor chat loop`). Keep focused; avoid mixing cleanup with feature changes. PRs explain the behavior change, list verification commands, and link issues. Include terminal output or screenshots for CLI changes; call out API/server assumptions needed for manual testing.
