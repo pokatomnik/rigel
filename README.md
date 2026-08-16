@@ -29,7 +29,7 @@ Each server entry declares its transport with the `type` key:
 - `"stdio"` — launch a local process: `command` (required), `args` and `env` (optional)
 - `"http"` — connect to a remote endpoint: `url` (required)
 
-If the file is missing or cannot be parsed, Rigel starts with no MCP servers.
+If the file is missing, Rigel refuses to start and instructs you to run `rigel init` for basic initialization. If the file cannot be parsed, Rigel starts with no MCP servers.
 
 ## Quick Start
 

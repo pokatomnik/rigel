@@ -23,8 +23,16 @@ const GLOBAL_TOOL_TIMEOUT: Duration = Duration::from_secs(5);
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let config_result = RigelConfig::from_default_path().await;
 
-    let config = Arc::new(RigelConfig::from_default_path().await);
+    let config = match config_result {
+        Ok(config) => config,
+        Err(e) => {
+            anyhow::bail!(e);
+        }
+    };
+
+    let config = Arc::new(config);
 
     let terminal_io = Arc::new(TerminalIO::default());
     let http_client = Arc::new(

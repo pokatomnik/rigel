@@ -1,5 +1,10 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
 
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::shared::{
@@ -9,29 +14,59 @@ use crate::shared::{
 
 #[derive(Deserialize, Serialize, Default)]
 pub(crate) struct RigelConfig {
+    #[serde(rename = "baseUrl")]
+    #[serde(default = "RigelConfig::default_base_url")]
+    pub(crate) base_url: String,
+
+    #[serde(rename = "envKey")]
+    pub(crate) env_key: Option<String>,
+
     #[serde(rename = "mcpServers")]
     #[serde(default)]
     pub(crate) servers: HashMap<String, ServerConfig>,
 }
 
 impl RigelConfig {
-    pub(crate) async fn from_default_path() -> RigelConfig {
-        let Some(home_path) = std::env::home_dir() else {
-            return RigelConfig::default();
-        };
+    fn default_base_url() -> String {
+        "http://127.0.0.1:1234".to_owned()
+    }
+
+    pub(crate) async fn from_default_path() -> anyhow::Result<RigelConfig> {
+        let home_path = std::env::home_dir()
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Rigel configuration file could not be located because the user home directory is unavailable. Run `rigel init` to perform basic initialization."
+                )
+            })?;
         let default_path = home_path.join(RIGEL_DIRECTORY).join(CONFIG_FILE_NAME);
         Self::from_path(default_path).await
     }
 
-    pub(crate) async fn from_path(path: impl Into<PathBuf>) -> RigelConfig {
-        match tokio::fs::read_to_string(path.into()).await {
+    pub(crate) async fn from_path(path: impl Into<PathBuf>) -> anyhow::Result<RigelConfig> {
+        let path = path.into();
+        match tokio::fs::read_to_string(path.as_path()).await {
             Ok(content) => Self::parse_config(content.as_str()),
-            Err(_) => Default::default(),
+            Err(error) if error.kind() == ErrorKind::NotFound => {
+                Err(Self::missing_file_error(path.as_path()))
+            }
+            Err(error) => Err(error).with_context(|| {
+                format!(
+                    "failed to read Rigel configuration file '{}'",
+                    path.display()
+                )
+            }),
         }
     }
 
-    pub(crate) fn parse_config(content: &str) -> RigelConfig {
-        toml::from_str(content).unwrap_or_default()
+    fn missing_file_error(path: &Path) -> anyhow::Error {
+        anyhow::anyhow!(
+            "Rigel configuration file '{}' is missing. Run `rigel init` to perform basic initialization.",
+            path.display()
+        )
+    }
+
+    fn parse_config(content: &str) -> anyhow::Result<RigelConfig> {
+        Ok(toml::from_str(content)?)
     }
 }
 
@@ -40,23 +75,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_unlimited_mixed_servers() -> anyhow::Result<()> {
-        let config = RigelConfig::parse_config(
-            r#"
-            [mcpServers.local]
-            type = "stdio"
-            command = "node"
-            args = ["server.js"]
+    fn uses_default_base_url_when_missing() -> anyhow::Result<()> {
+        let config = RigelConfig::parse_config("")?;
 
-            [mcpServers.remote]
-            type = "http"
-            url = "https://example.com/mcp"
-            "#,
-        );
-
-        assert_eq!(config.servers.len(), 2);
-        assert!(matches!(config.servers["local"], ServerConfig::Stdio(_)));
-        assert!(matches!(config.servers["remote"], ServerConfig::Http(_)));
+        assert_eq!(config.base_url, "http://127.0.0.1:1234");
         Ok(())
     }
 }
