@@ -3,8 +3,8 @@ use std::{sync::Arc, time::Duration};
 use clap::Parser;
 
 use crate::{
-    cmd::cli::Cli,
-    controllers::{controller::Controller, index_controller::IndexControllerDeps},
+    cmd::{cli::Cli, commands::Commands},
+    controllers::{chat_controller::IndexControllerDeps, controller::Controller},
     shared::{
         mcp_registry::registry::McpRegistry, rigel_config::RigelConfig, terminal_io::TerminalIO,
     },
@@ -37,9 +37,13 @@ async fn main() -> anyhow::Result<()> {
             .build()?,
     );
     let mcp_registry = Arc::new(McpRegistry::from_config(config).await?);
-    let index_deps = IndexControllerDeps::new(terminal_io.clone(), http_client, mcp_registry);
+    let chat_deps = IndexControllerDeps::new(terminal_io.clone(), http_client, mcp_registry);
 
-    if let Err(e) = cli.index.handle(index_deps).await {
+    let result = match cli.command {
+        Commands::Chat(chat_controller) => chat_controller.handle(chat_deps).await,
+    };
+
+    if let Err(e) = result {
         terminal_io.eprintln(e.to_string().as_str());
     }
 

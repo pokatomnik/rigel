@@ -16,7 +16,7 @@ pub(crate) use crate::use_cases::agent::AgentDependencies as IndexControllerDeps
 
 #[derive(Args, Clone, Debug)]
 #[clap(rename_all = "kebab-case")]
-pub struct IndexController {
+pub struct ChatController {
     #[arg(
         long = "base-url",
         short = 'u',
@@ -29,7 +29,7 @@ pub struct IndexController {
     api_key: Option<String>,
 }
 
-impl IndexController {
+impl ChatController {
     async fn create_agent(
         &self,
         chat_history: Arc<ChatHistory<Arc<History>>>,
@@ -40,7 +40,7 @@ impl IndexController {
     }
 }
 
-impl Controller<IndexControllerDeps> for IndexController {
+impl Controller<IndexControllerDeps> for ChatController {
     async fn handle(&self, deps: IndexControllerDeps) -> anyhow::Result<()> {
         let deps = Arc::new(deps);
         let (history, chat_history) = History::bootstrap().await?;
