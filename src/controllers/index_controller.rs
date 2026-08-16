@@ -7,6 +7,7 @@ use crate::{
         history::History,
         mcp_registry::registry::{McpRegistry, McpToolsExt},
         terminal_io::TerminalIO,
+        tool_permissions::{ToolPermissionCatalog, ToolPermissionHook},
     },
     tools::{
         tool_apply_patch::ApplyPatch, tool_create_directory::CreateDirectory,
@@ -28,7 +29,9 @@ use clap::Args;
 use reqwest::Client;
 use rig::{
     Agent,
+    agent::{AgentBuilder, WithBuilderTools},
     client::AgentClientExt,
+    completion::CompletionModel as CompletionModelTrait,
     providers::openai::{self, CompletionModel},
 };
 
@@ -68,29 +71,55 @@ impl IndexController {
         let client = client.completions_api();
 
         let system_prompt = system_prompt().await;
+
         println!("MCP tools loaded: {}", &deps.mcp_registry.tools().len());
-        let agent = client
-            .agent(model_id)
-            .preamble(system_prompt.as_str())
+
+        let mcp_tools = deps.mcp_registry.select_tools();
+        let mut permission_catalog = ToolPermissionCatalog::default();
+
+        let builder = Self::add_builtin_tools(
+            client.agent(model_id).preamble(system_prompt.as_str()),
+            &mut permission_catalog,
+            deps.http_client.clone(),
+        )
+        .await?
+        .mcp_tools(&mcp_tools, &mut permission_catalog);
+
+        let agent = builder
             .add_hook(InvalidResponseHook::new(deps.terminal_io.clone()))
             .add_hook(HistorySyncHook::new(chat_history.clone()))
+            .add_hook(ToolPermissionHook::new(
+                deps.terminal_io.clone(),
+                permission_catalog,
+            ))
             .add_hook(ToolRecoveryHook)
-            .tool(ApplyPatch::new().await?)
-            .tool(CreateDirectory::new().await?)
-            .tool(CreateFile::new().await?)
-            .tool(DeletePath::new(deps.terminal_io.clone()).await?)
-            .tool(FindPaths::new().await?)
-            .tool(ListDirectory::new().await?)
-            .tool(RenamePath::new(deps.terminal_io.clone()).await?)
-            .tool(ReadFile::new().await?)
-            .tool(RunCommand::new(deps.terminal_io.clone()).await?)
-            .tool(SearchText::new().await?)
-            .tool(FetchUrl::new(deps.http_client.clone()))
-            .mcp_tools(&deps.mcp_registry.select_tools())
             .default_max_turns(MAX_AGENT_TURNS)
             .build();
 
         Ok(agent)
+    }
+
+    async fn add_builtin_tools<M>(
+        builder: AgentBuilder<M>,
+        catalog: &mut ToolPermissionCatalog,
+        http_client: Arc<Client>,
+    ) -> anyhow::Result<AgentBuilder<M, WithBuilderTools>>
+    where
+        M: CompletionModelTrait,
+    {
+        let builder = builder
+            .tool(catalog.register_builtin_tool(ApplyPatch::new().await?))
+            .tool(catalog.register_builtin_tool(CreateDirectory::new().await?))
+            .tool(catalog.register_builtin_tool(CreateFile::new().await?))
+            .tool(catalog.register_builtin_tool(DeletePath::new().await?))
+            .tool(catalog.register_builtin_tool(FindPaths::new().await?))
+            .tool(catalog.register_builtin_tool(ListDirectory::new().await?))
+            .tool(catalog.register_builtin_tool(RenamePath::new().await?))
+            .tool(catalog.register_builtin_tool(ReadFile::new().await?))
+            .tool(catalog.register_builtin_tool(RunCommand::new().await?))
+            .tool(catalog.register_builtin_tool(SearchText::new().await?))
+            .tool(catalog.register_builtin_tool(FetchUrl::new(http_client)));
+        Ok(builder)
     }
 }
 

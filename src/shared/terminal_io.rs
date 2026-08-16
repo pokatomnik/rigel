@@ -45,9 +45,9 @@ impl TerminalIO {
         let _ = io::stdout().flush();
     }
 
-    pub fn confirm_toll_call(&self, prompt: &str) -> ToolConfirmResult {
+    pub fn confirm_tool_call(&self, prompt: &str) -> ToolConfirmResult {
         let items: &'static [ToolConfirmResult] =
-            &[ToolConfirmResult::No, ToolConfirmResult::YesOnce];
+            &[ToolConfirmResult::No, ToolConfirmResult::AllowOnce];
         let answer_idx = dialoguer::Select::new()
             .with_prompt(prompt)
             .items(items)

@@ -6,6 +6,8 @@ use reqwest::{Client, Response, Url};
 use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::Serialize;
 
+use crate::shared::tool_permissions::{PermissionRequirement, ToolPermissionMetadata};
+
 use super::contracts::{Action, error_codes};
 
 const SERVER_TIMEOUT: Duration = Duration::from_secs(20);
@@ -31,11 +33,15 @@ pub(crate) struct FetchUrlOutput {
 
 pub(crate) struct FetchUrl {
     client: Arc<Client>,
+    permission: PermissionRequirement,
 }
 
 impl FetchUrl {
     pub(crate) fn new(client: Arc<Client>) -> Self {
-        Self { client }
+        Self {
+            client,
+            permission: PermissionRequirement::Automatic,
+        }
     }
 
     fn parse_url(url: &str) -> Result<Url, ToolExecutionError> {
@@ -67,6 +73,12 @@ impl FetchUrl {
             content,
             truncated: body_truncated || content_truncated,
         })
+    }
+}
+
+impl ToolPermissionMetadata for FetchUrl {
+    fn permission_requirement(&self) -> PermissionRequirement {
+        self.permission
     }
 }
 

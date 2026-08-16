@@ -97,7 +97,9 @@ impl AgentHook for ToolRecoveryHook {
         ctx: &HookContext,
         event: ToolResultEvent<'_>,
     ) -> ToolResultAction {
-        let failed = event.raw_result.is_error() || event.raw_result.is_refused();
+        let failed = event.raw_result.is_error()
+            || event.raw_result.is_refused()
+            || event.raw_result.is_skipped();
         let successful = event.raw_result.is_success();
         let no_op = is_no_op_result(event.presentation);
         let diagnostic = event.presentation.render();

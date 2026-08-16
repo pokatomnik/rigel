@@ -9,7 +9,10 @@ use rig::tool::{Tool, ToolContext, ToolErrorKind, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
-use crate::tools::contracts::{CollectionEnvelope, error_codes};
+use crate::{
+    shared::tool_permissions::{PermissionRequirement, ToolPermissionMetadata},
+    tools::contracts::{CollectionEnvelope, error_codes},
+};
 
 const DEFAULT_EXCLUDES: &str = include_str!("excludes.txt");
 const CONTEXT_LINES: usize = 2;
@@ -61,6 +64,7 @@ enum TextContent {
 
 pub(crate) struct SearchText {
     root: PathBuf,
+    permission: PermissionRequirement,
 }
 
 impl SearchText {
@@ -84,7 +88,10 @@ impl SearchText {
             )
             .with_source(error)
         })?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            permission: PermissionRequirement::Automatic,
+        })
     }
 
     async fn resolve_path(&self, path: &str) -> Result<(PathBuf, PathBuf), ToolExecutionError> {
@@ -153,6 +160,12 @@ impl SearchText {
             }
         }
         Ok(finish_output(items, false))
+    }
+}
+
+impl ToolPermissionMetadata for SearchText {
+    fn permission_requirement(&self) -> PermissionRequirement {
+        self.permission
     }
 }
 

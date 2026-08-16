@@ -7,7 +7,10 @@ use rig::tool::{Tool, ToolContext, ToolErrorKind, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
-use crate::tools::{contracts::error_codes, revision::sha256};
+use crate::{
+    shared::tool_permissions::{PermissionRequirement, ToolPermissionMetadata},
+    tools::{contracts::error_codes, revision::sha256},
+};
 
 const DEFAULT_MAX_LINES: usize = 200;
 const MAX_LINES: usize = 500;
@@ -42,6 +45,7 @@ struct LineSelection {
 
 pub(crate) struct ReadFile {
     root: PathBuf,
+    permission: PermissionRequirement,
 }
 
 impl ReadFile {
@@ -59,7 +63,10 @@ impl ReadFile {
             .with_code(error_codes::IO_ERROR)
             .with_source(error)
         })?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            permission: PermissionRequirement::Automatic,
+        })
     }
 
     fn normalize_relative_path(path: &str) -> Result<PathBuf, ToolExecutionError> {
@@ -97,6 +104,12 @@ impl ReadFile {
             return Err(outside_current_directory_error(path));
         }
         Ok((resolved, relative.to_string_lossy().into_owned()))
+    }
+}
+
+impl ToolPermissionMetadata for ReadFile {
+    fn permission_requirement(&self) -> PermissionRequirement {
+        self.permission
     }
 }
 

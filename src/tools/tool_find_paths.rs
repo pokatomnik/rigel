@@ -9,9 +9,12 @@ use rig::tool::{Tool, ToolContext, ToolErrorKind, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
-use crate::tools::{
-    contracts::{CollectionEnvelope, error_codes},
-    find_paths_ignore::{IgnoreStack, load_directory_ignore_files},
+use crate::{
+    shared::tool_permissions::{PermissionRequirement, ToolPermissionMetadata},
+    tools::{
+        contracts::{CollectionEnvelope, error_codes},
+        find_paths_ignore::{IgnoreStack, load_directory_ignore_files},
+    },
 };
 
 const MAX_RESULTS: usize = 500;
@@ -73,6 +76,7 @@ struct ScannedEntry {
 
 pub(crate) struct FindPaths {
     root: PathBuf,
+    permission: PermissionRequirement,
 }
 
 impl FindPaths {
@@ -96,7 +100,10 @@ impl FindPaths {
             )
             .with_source(error)
         })?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            permission: PermissionRequirement::Automatic,
+        })
     }
 
     async fn resolve_directory(
@@ -318,6 +325,12 @@ impl FindPaths {
         }
 
         Ok(stack)
+    }
+}
+
+impl ToolPermissionMetadata for FindPaths {
+    fn permission_requirement(&self) -> PermissionRequirement {
+        self.permission
     }
 }
 

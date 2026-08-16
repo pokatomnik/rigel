@@ -7,9 +7,12 @@ use rig::tool::{Tool, ToolContext, ToolErrorKind, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
-use crate::tools::{
-    contracts::{Action, error_codes},
-    revision::sha256,
+use crate::{
+    shared::tool_permissions::{PermissionRequirement, ToolPermissionMetadata},
+    tools::{
+        contracts::{Action, error_codes},
+        revision::sha256,
+    },
 };
 
 #[derive(Deserialize)]
@@ -42,6 +45,7 @@ enum OccurrenceMatch {
 
 pub(crate) struct ApplyPatch {
     root: PathBuf,
+    permission: PermissionRequirement,
 }
 
 impl ApplyPatch {
@@ -59,7 +63,10 @@ impl ApplyPatch {
             .with_code(error_codes::IO_ERROR)
             .with_source(error)
         })?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            permission: PermissionRequirement::Automatic,
+        })
     }
 
     fn normalize_relative_path(path: &str) -> Result<PathBuf, ToolExecutionError> {
@@ -97,6 +104,12 @@ impl ApplyPatch {
             return Err(outside_current_directory_error(path));
         }
         Ok((resolved, relative.to_string_lossy().into_owned()))
+    }
+}
+
+impl ToolPermissionMetadata for ApplyPatch {
+    fn permission_requirement(&self) -> PermissionRequirement {
+        self.permission
     }
 }
 

@@ -7,6 +7,8 @@ use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
+use crate::shared::tool_permissions::{PermissionRequirement, ToolPermissionMetadata};
+
 use super::contracts::{Action, error_codes};
 
 #[derive(Deserialize)]
@@ -23,6 +25,7 @@ pub(crate) struct CreateDirectoryOutput {
 
 pub(crate) struct CreateDirectory {
     root: PathBuf,
+    permission: PermissionRequirement,
 }
 
 impl CreateDirectory {
@@ -40,7 +43,10 @@ impl CreateDirectory {
             .with_code(error_codes::IO_ERROR)
             .with_source(error)
         })?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            permission: PermissionRequirement::Automatic,
+        })
     }
 
     fn normalize_relative_path(path: &str) -> Result<PathBuf, ToolExecutionError> {
@@ -80,6 +86,12 @@ impl CreateDirectory {
             final_created = ensure_directory_component(&self.root, &current, original).await?;
         }
         Ok(final_created)
+    }
+}
+
+impl ToolPermissionMetadata for CreateDirectory {
+    fn permission_requirement(&self) -> PermissionRequirement {
+        self.permission
     }
 }
 
@@ -242,6 +254,7 @@ mod tests {
     fn schema_rejects_extra_fields() {
         let tool = CreateDirectory {
             root: PathBuf::from("."),
+            permission: PermissionRequirement::Automatic,
         };
         assert_eq!(
             tool.parameters()["additionalProperties"],

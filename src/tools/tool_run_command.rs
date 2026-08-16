@@ -4,7 +4,6 @@ use std::{
     io::{PipeReader, PipeWriter, Read, pipe},
     path::PathBuf,
     process::Stdio,
-    sync::Arc,
     time::Duration,
 };
 
@@ -16,7 +15,7 @@ use tokio::{
     task::{self, JoinHandle},
 };
 
-use crate::{entities::tool_confirm_result::ToolConfirmResult, shared::terminal_io::TerminalIO};
+use crate::shared::tool_permissions::{PermissionRequirement, ToolPermissionMetadata};
 
 use super::contracts::{Action, error_codes};
 
@@ -63,11 +62,11 @@ struct ProcessResult {
 pub(crate) struct RunCommand {
     root: PathBuf,
     shell: UserShell,
-    terminal_io: Arc<TerminalIO>,
+    permission: PermissionRequirement,
 }
 
 impl RunCommand {
-    pub(crate) async fn new(terminal_io: Arc<TerminalIO>) -> Result<Self, ToolExecutionError> {
+    pub(crate) async fn new() -> Result<Self, ToolExecutionError> {
         let current_dir = env::current_dir().map_err(|error| {
             ToolExecutionError::other(format!("Cannot determine the current directory: {error}"))
                 .with_code(error_codes::IO_ERROR)
@@ -84,19 +83,8 @@ impl RunCommand {
         Ok(Self {
             root,
             shell: detect_user_shell(),
-            terminal_io,
+            permission: PermissionRequirement::ConfirmationRequired,
         })
-    }
-
-    fn confirm(&self, command: &str) -> Result<(), ToolExecutionError> {
-        let prompt = format!("Run command \"{command}\"?");
-        if matches!(
-            self.terminal_io.confirm_toll_call(&prompt),
-            ToolConfirmResult::No
-        ) {
-            return Err(user_refused(command));
-        }
-        Ok(())
     }
 
     async fn execute_with_timeout(&self, command: &str) -> RunCommandOutput {
@@ -151,6 +139,12 @@ impl RunCommand {
     }
 }
 
+impl ToolPermissionMetadata for RunCommand {
+    fn permission_requirement(&self) -> PermissionRequirement {
+        self.permission
+    }
+}
+
 impl Tool for RunCommand {
     const NAME: &'static str = "run_command";
     type Args = RunCommandArgs;
@@ -181,7 +175,6 @@ impl Tool for RunCommand {
         _context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
-        self.confirm(&args.command)?;
         Ok(self.execute_with_timeout(&args.command).await)
     }
 }
@@ -281,13 +274,6 @@ fn limit_output(output: String, already_truncated: bool) -> (String, bool) {
         format!("{}{}", &output[..end], OUTPUT_TRUNCATION_SUFFIX),
         true,
     )
-}
-
-fn user_refused(command: &str) -> ToolExecutionError {
-    ToolExecutionError::refused(format!(
-        "The user did not approve running command \"{command}\"."
-    ))
-    .with_code(error_codes::USER_REFUSED)
 }
 
 fn internal_failure(message: String) -> ProcessResult {
@@ -397,7 +383,7 @@ mod tests {
         let tool = RunCommand {
             root: PathBuf::from("."),
             shell: user_shell(OsStr::new("sh"), false),
-            terminal_io: Arc::new(TerminalIO),
+            permission: PermissionRequirement::ConfirmationRequired,
         };
         let schema = tool.parameters();
         assert_eq!(schema["required"], serde_json::json!(["command"]));
@@ -412,19 +398,6 @@ mod tests {
         assert!(truncated);
         assert!(output.ends_with("[output truncated]"));
         assert!(output.is_char_boundary(output.len()));
-    }
-
-    #[test]
-    fn refusal_mentions_command_and_uses_shared_code() {
-        let error = user_refused("cargo test --all-targets");
-
-        assert!(error.is_refusal());
-        assert_eq!(error.code(), Some(error_codes::USER_REFUSED));
-        assert!(
-            error
-                .model_feedback()
-                .is_some_and(|message| message.contains("cargo test --all-targets"))
-        );
     }
 
     #[test]

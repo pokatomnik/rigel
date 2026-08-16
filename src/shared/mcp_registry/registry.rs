@@ -17,6 +17,7 @@ use rmcp::{
 use tokio::process::Command;
 
 use crate::shared::rigel_config::RigelConfig;
+use crate::shared::tool_permissions::ToolPermissionCatalog;
 
 use super::http_config::HttpConfig;
 use super::server_config::ServerConfig;
@@ -164,15 +165,23 @@ impl McpConnector for ServerConfig {
 }
 
 pub(crate) trait McpToolsExt<M: CompletionModel> {
-    fn mcp_tools(self, servers: &[(Vec<Tool>, ServerSink)]) -> AgentBuilder<M, WithBuilderTools>;
+    fn mcp_tools(
+        self,
+        servers: &[(Vec<Tool>, ServerSink)],
+        catalog: &mut ToolPermissionCatalog,
+    ) -> AgentBuilder<M, WithBuilderTools>;
 }
 
 impl<M: CompletionModel> McpToolsExt<M> for AgentBuilder<M, WithBuilderTools> {
     fn mcp_tools(
         mut self,
         servers: &[(Vec<Tool>, ServerSink)],
+        catalog: &mut ToolPermissionCatalog,
     ) -> AgentBuilder<M, WithBuilderTools> {
         for (tools, peer) in servers {
+            for tool in tools {
+                catalog.register_mcp_tool(tool.name.as_ref());
+            }
             self = self.rmcp_tools(tools.clone(), peer.clone());
         }
         self

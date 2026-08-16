@@ -60,6 +60,12 @@ Use `rustfmt` defaults (four spaces, trailing commas). Follow Rust conventions: 
 
 **CRITICAL RULE**: `.unwrap()` and panicking methods (`.expect()`, etc.) are **strictly PROHIBITED**. All methods must return `Result<T, E>`.
 
+## Encapsulation
+
+- Logic that belongs to a structure or reads and changes its state must be implemented as a method, associated function, or trait method of that type. Do not use free-standing procedural functions for behavior owned by a structure.
+- State that belongs to a structure must be stored with that structure rather than in a parallel procedural helper or unrelated registry.
+- When the structure belongs to an external crate and cannot be changed, use a local wrapper or extension trait to keep the behavior at the structure boundary.
+
 ## Design and Complexity Constraints
 
 Treat the following as mandatory contribution rules:

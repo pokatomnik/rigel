@@ -1,33 +1,20 @@
 use std::fmt::Display;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub(crate) enum ToolConfirmResult {
-    /// Allow once
-    YesOnce,
-
-    /// Allow and remember for a current directory
-    // TODO implement later
-    // YesProject,
-
-    /// Allow and never ask again for the OS user
-    // TODO implement later
-    // YesGlobal,
-
-    /// Forbid
+    /// Do not execute the tool call.
+    #[default]
     No,
-}
 
-impl Default for ToolConfirmResult {
-    fn default() -> Self {
-        return ToolConfirmResult::No;
-    }
+    /// Execute this tool call once.
+    AllowOnce,
 }
 
 impl Display for ToolConfirmResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ToolConfirmResult::YesOnce => f.write_str("Yes (once)"),
             ToolConfirmResult::No => f.write_str("No"),
+            ToolConfirmResult::AllowOnce => f.write_str("Allow once"),
         }
     }
 }

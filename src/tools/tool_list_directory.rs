@@ -7,6 +7,8 @@ use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
+use crate::shared::tool_permissions::{PermissionRequirement, ToolPermissionMetadata};
+
 use crate::tools::contracts::{CollectionEnvelope, error_codes};
 
 #[derive(Deserialize)]
@@ -35,6 +37,7 @@ enum DirectoryEntryKind {
 
 pub(crate) struct ListDirectory {
     root: PathBuf,
+    permission: PermissionRequirement,
 }
 
 impl ListDirectory {
@@ -58,7 +61,10 @@ impl ListDirectory {
             .with_source(error)
         })?;
 
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            permission: PermissionRequirement::Automatic,
+        })
     }
 
     fn validate_relative_path(
@@ -119,6 +125,12 @@ impl ListDirectory {
         }
 
         Ok(resolved)
+    }
+}
+
+impl ToolPermissionMetadata for ListDirectory {
+    fn permission_requirement(&self) -> PermissionRequirement {
+        self.permission
     }
 }
 
@@ -240,6 +252,7 @@ mod tests {
     fn tool() -> ListDirectory {
         ListDirectory {
             root: PathBuf::from("/project"),
+            permission: PermissionRequirement::Automatic,
         }
     }
 

@@ -1,14 +1,13 @@
 use std::{
     env,
     path::{Component, Path, PathBuf},
-    sync::Arc,
 };
 
 use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
-use crate::{entities::tool_confirm_result::ToolConfirmResult, shared::terminal_io::TerminalIO};
+use crate::shared::tool_permissions::{PermissionRequirement, ToolPermissionMetadata};
 
 use super::contracts::{Action, error_codes};
 
@@ -35,11 +34,11 @@ pub(crate) struct DeletePathOutput {
 
 pub(crate) struct DeletePath {
     root: PathBuf,
-    terminal_io: Arc<TerminalIO>,
+    permission: PermissionRequirement,
 }
 
 impl DeletePath {
-    pub(crate) async fn new(terminal_io: Arc<TerminalIO>) -> Result<Self, ToolExecutionError> {
+    pub(crate) async fn new() -> Result<Self, ToolExecutionError> {
         let current_dir = env::current_dir().map_err(|error| {
             ToolExecutionError::other(format!("Cannot determine the current directory: {error}"))
                 .with_code(error_codes::IO_ERROR)
@@ -53,7 +52,10 @@ impl DeletePath {
             .with_code(error_codes::IO_ERROR)
             .with_source(error)
         })?;
-        Ok(Self { root, terminal_io })
+        Ok(Self {
+            root,
+            permission: PermissionRequirement::ConfirmationRequired,
+        })
     }
 
     fn normalize_relative_path(path: &str) -> Result<PathBuf, ToolExecutionError> {
@@ -134,6 +136,12 @@ impl DeletePath {
     }
 }
 
+impl ToolPermissionMetadata for DeletePath {
+    fn permission_requirement(&self) -> PermissionRequirement {
+        self.permission
+    }
+}
+
 impl Tool for DeletePath {
     const NAME: &'static str = "delete_path";
     type Args = DeletePathArgs;
@@ -172,27 +180,12 @@ impl Tool for DeletePath {
                 Action::NotFound,
             ));
         };
-        self.confirm(&args.path, kind)?;
         let previous_kind = kind;
         let Some((target, kind)) = self.inspect_target(&relative, &args.path).await? else {
             return Ok(delete_result(relative, previous_kind, Action::NotFound));
         };
         remove_target(&target, kind, &args.path).await?;
         Ok(delete_result(relative, kind, Action::Deleted))
-    }
-}
-
-impl DeletePath {
-    fn confirm(&self, path: &str, kind: DeleteKind) -> Result<(), ToolExecutionError> {
-        let recursive = matches!(kind, DeleteKind::Directory);
-        let prompt = confirmation_prompt(path, kind, recursive);
-        if matches!(
-            self.terminal_io.confirm_toll_call(&prompt),
-            ToolConfirmResult::No
-        ) {
-            return Err(user_refused(path));
-        }
-        Ok(())
     }
 }
 
@@ -228,23 +221,6 @@ fn delete_result(path: PathBuf, kind: DeleteKind, action: Action) -> DeletePathO
         path: path.to_string_lossy().into_owned(),
         kind,
     }
-}
-
-fn confirmation_prompt(path: &str, kind: DeleteKind, recursive: bool) -> String {
-    let kind = match kind {
-        DeleteKind::File => "file",
-        DeleteKind::Directory => "directory",
-        DeleteKind::Unknown => "path",
-    };
-    let scope = if recursive { " recursively" } else { "" };
-    format!("Delete {kind} \"{path}\"{scope}?")
-}
-
-fn user_refused(path: &str) -> ToolExecutionError {
-    ToolExecutionError::refused(format!(
-        "Cannot delete \"{path}\": the user refused the deletion."
-    ))
-    .with_code(error_codes::USER_REFUSED)
 }
 
 fn outside_current_directory(path: &str) -> ToolExecutionError {
@@ -333,14 +309,6 @@ mod tests {
     }
 
     #[test]
-    fn confirmation_mentions_kind_and_recursive_scope() {
-        assert_eq!(
-            confirmation_prompt("build", DeleteKind::Directory, true),
-            "Delete directory \"build\" recursively?"
-        );
-    }
-
-    #[test]
     fn path_safety_rejects_current_directory_and_parent_components() {
         let root = DeletePath::normalize_relative_path(".").expect_err("root should be protected");
         let parent = DeletePath::normalize_relative_path("src/../file")
@@ -358,21 +326,12 @@ mod tests {
     fn schema_is_flat_and_rejects_unknown_arguments() {
         let tool = DeletePath {
             root: PathBuf::from("."),
-            terminal_io: Arc::new(TerminalIO),
+            permission: PermissionRequirement::ConfirmationRequired,
         };
         assert_eq!(
             tool.parameters()["additionalProperties"],
             serde_json::json!(false)
         );
         assert_eq!(tool.parameters()["required"], serde_json::json!(["path"]));
-    }
-
-    #[test]
-    fn user_refusal_has_no_retry_instruction() {
-        let error = user_refused("notes.txt");
-
-        assert!(error.is_refusal());
-        assert_eq!(error.code(), Some(error_codes::USER_REFUSED));
-        assert!(!error.model_feedback().unwrap_or_default().contains("retry"));
     }
 }

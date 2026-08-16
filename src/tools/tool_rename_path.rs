@@ -1,14 +1,13 @@
 use std::{
     env,
     path::{Component, Path, PathBuf},
-    sync::Arc,
 };
 
 use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
-use crate::{entities::tool_confirm_result::ToolConfirmResult, shared::terminal_io::TerminalIO};
+use crate::shared::tool_permissions::{PermissionRequirement, ToolPermissionMetadata};
 
 use super::contracts::{Action, error_codes};
 
@@ -36,11 +35,11 @@ pub(crate) struct RenamePathOutput {
 
 pub(crate) struct RenamePath {
     root: PathBuf,
-    terminal_io: Arc<TerminalIO>,
+    permission: PermissionRequirement,
 }
 
 impl RenamePath {
-    pub(crate) async fn new(terminal_io: Arc<TerminalIO>) -> Result<Self, ToolExecutionError> {
+    pub(crate) async fn new() -> Result<Self, ToolExecutionError> {
         let current_dir = env::current_dir().map_err(|error| {
             ToolExecutionError::other(format!("Cannot determine the current directory: {error}"))
                 .with_code(error_codes::IO_ERROR)
@@ -54,7 +53,10 @@ impl RenamePath {
             .with_code(error_codes::IO_ERROR)
             .with_source(error)
         })?;
-        Ok(Self { root, terminal_io })
+        Ok(Self {
+            root,
+            permission: PermissionRequirement::Automatic,
+        })
     }
 
     fn normalize_relative_path(
@@ -172,26 +174,6 @@ impl RenamePath {
         Ok(self.root.join(relative))
     }
 
-    fn confirm(
-        &self,
-        source: &str,
-        destination: &str,
-        kind: RenameKind,
-    ) -> Result<(), ToolExecutionError> {
-        let kind = match kind {
-            RenameKind::File => "file",
-            RenameKind::Directory => "directory",
-        };
-        let prompt = format!("Rename {kind} \"{source}\" to \"{destination}\"?");
-        if matches!(
-            self.terminal_io.confirm_toll_call(&prompt),
-            ToolConfirmResult::No
-        ) {
-            return Err(user_refused(source, destination));
-        }
-        Ok(())
-    }
-
     async fn reject_existing_destination(
         &self,
         relative: &Path,
@@ -205,6 +187,12 @@ impl RenamePath {
             return Err(path_already_exists(original));
         }
         Ok(())
+    }
+}
+
+impl ToolPermissionMetadata for RenamePath {
+    fn permission_requirement(&self) -> PermissionRequirement {
+        self.permission
     }
 }
 
@@ -262,7 +250,6 @@ impl Tool for RenamePath {
         )?;
         self.reject_existing_destination(&destination, &args.destination)
             .await?;
-        self.confirm(&args.source, &args.destination, kind)?;
         let destination_path = self
             .ensure_destination_parent(&destination, &args.source, &args.destination)
             .await?;
@@ -388,13 +375,6 @@ fn path_already_exists(path: &str) -> ToolExecutionError {
     .with_code(error_codes::PATH_ALREADY_EXISTS)
 }
 
-fn user_refused(source: &str, destination: &str) -> ToolExecutionError {
-    ToolExecutionError::refused(format!(
-        "Cannot rename \"{source}\" to \"{destination}\": the user refused the operation."
-    ))
-    .with_code(error_codes::USER_REFUSED)
-}
-
 fn outside_current_directory(path: &str, argument: &str) -> ToolExecutionError {
     ToolExecutionError::refused(format!(
         "Cannot rename {argument} \"{path}\": path resolves outside the current directory."
@@ -515,7 +495,7 @@ mod tests {
     fn schema_requires_source_and_destination() {
         let tool = RenamePath {
             root: PathBuf::from("."),
-            terminal_io: Arc::new(TerminalIO),
+            permission: PermissionRequirement::Automatic,
         };
         assert_eq!(
             tool.parameters()["required"],

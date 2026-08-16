@@ -11,6 +11,8 @@ use tokio::{
     io::AsyncWriteExt,
 };
 
+use crate::shared::tool_permissions::{PermissionRequirement, ToolPermissionMetadata};
+
 use super::contracts::{Action, error_codes};
 
 const TEMP_FILE_ATTEMPTS: usize = 8;
@@ -31,6 +33,7 @@ pub(crate) struct CreateFileOutput {
 
 pub(crate) struct CreateFile {
     root: PathBuf,
+    permission: PermissionRequirement,
 }
 
 impl CreateFile {
@@ -49,7 +52,10 @@ impl CreateFile {
             .with_source(error)
         })?;
 
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            permission: PermissionRequirement::Automatic,
+        })
     }
 
     fn normalize_relative_path(path: &str) -> Result<PathBuf, ToolExecutionError> {
@@ -92,6 +98,12 @@ impl CreateFile {
             ensure_directory_component(&self.root, &current, original).await?;
         }
         Ok(current)
+    }
+}
+
+impl ToolPermissionMetadata for CreateFile {
+    fn permission_requirement(&self) -> PermissionRequirement {
+        self.permission
     }
 }
 
@@ -357,6 +369,7 @@ mod tests {
     fn schema_requires_complete_content_and_rejects_extra_fields() {
         let tool = CreateFile {
             root: PathBuf::from("."),
+            permission: PermissionRequirement::Automatic,
         };
         let schema = tool.parameters();
 
