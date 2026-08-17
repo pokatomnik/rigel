@@ -27,6 +27,7 @@ pub(crate) mod error_codes {
     pub(crate) const IO_ERROR: &str = "IO_ERROR";
     pub(crate) const NETWORK_ERROR: &str = "NETWORK_ERROR";
     pub(crate) const TIMEOUT: &str = "TIMEOUT";
+    pub(crate) const SUBAGENT_ERROR: &str = "SUBAGENT_ERROR";
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

@@ -74,8 +74,8 @@ impl ChatController {
         chat_history: Arc<ChatHistory<Arc<History>>>,
         deps: Arc<IndexControllerDeps>,
     ) -> anyhow::Result<RigAgent<CompletionModel>> {
-        let config = self.read_config().await?;
-        let config = AgentConfig::new(config.base_url().to_owned(), config.api_key());
+        let config = Arc::new(self.read_config().await?);
+        let config = AgentConfig::new(config);
         Agent::new_chat_agent(config, chat_history, Arc::new(deps.agent_dependencies())).await
     }
 }
@@ -99,7 +99,7 @@ impl Controller<IndexControllerDeps> for ChatController {
         });
 
         deps.terminal_io()
-            .eprintln("Let's chat. Type /help to get available commands");
+            .eprintln(include_str!("./welcome_message.txt"));
         chat.run().await
     }
 }

@@ -12,3 +12,4 @@ pub(crate) mod tool_read_file;
 pub(crate) mod tool_rename_path;
 pub(crate) mod tool_run_command;
 pub(crate) mod tool_search_text;
+pub(crate) mod tool_spawn_subagent;

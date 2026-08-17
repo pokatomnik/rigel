@@ -9,10 +9,16 @@ use rig::{
     providers::openai::{self, CompletionModel},
 };
 
+use super::{
+    agent_config::AgentConfig, agent_tool_set::AgentToolSet, tool_build_context::ToolBuildContext,
+};
+
 use crate::{
     prompts::system::system_prompt,
     shared::{
-        history::{ChatHistory, History, HistorySyncHook},
+        history::{
+            ChatHistory, History, HistoryPersistence, HistorySyncHook, NonPersistentHistory,
+        },
         mcp_registry::{McpRegistry, McpToolsExt},
         recovery::ToolRecoveryHook,
         response::InvalidResponseHook,
@@ -24,6 +30,7 @@ use crate::{
         tool_create_file::CreateFile, tool_delete_path::DeletePath, tool_fetch_url::FetchUrl,
         tool_find_paths::FindPaths, tool_list_directory::ListDirectory, tool_read_file::ReadFile,
         tool_rename_path::RenamePath, tool_run_command::RunCommand, tool_search_text::SearchText,
+        tool_spawn_subagent::SpawnSubagent,
     },
     use_cases::model_selector::model_selector::ModelSelector,
 };
@@ -31,55 +38,6 @@ use crate::{
 const MAX_AGENT_TURNS: usize = 12;
 
 pub(crate) struct Agent;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AgentToolSet {
-    Subagent,
-    Orchestrator,
-    Chat,
-}
-
-impl AgentToolSet {
-    async fn add_tools<M>(
-        self,
-        builder: AgentBuilder<M>,
-        catalog: &mut ToolPermissionCatalog,
-        http_client: Arc<Client>,
-    ) -> anyhow::Result<AgentBuilder<M, WithBuilderTools>>
-    where
-        M: CompletionModelTrait,
-    {
-        match self {
-            Self::Subagent => Agent::add_subagent_tools(builder, catalog, http_client).await,
-            Self::Orchestrator => {
-                Agent::add_orchestrator_tools(builder, catalog, http_client).await
-            }
-            Self::Chat => Agent::add_chat_tools(builder, catalog, http_client).await,
-        }
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct AgentConfig {
-    base_url: String,
-    api_key: Option<String>,
-    tool_set: AgentToolSet,
-}
-
-impl AgentConfig {
-    pub(crate) fn new(base_url: String, api_key: Option<String>) -> Self {
-        Self {
-            base_url,
-            api_key,
-            tool_set: AgentToolSet::Chat,
-        }
-    }
-
-    fn with_tool_set(mut self, tool_set: AgentToolSet) -> Self {
-        self.tool_set = tool_set;
-        self
-    }
-}
 
 #[derive(Clone)]
 pub(crate) struct AgentDependencies {
@@ -106,7 +64,7 @@ impl Agent {
     #[allow(dead_code)]
     pub(crate) async fn new_subagent(
         config: AgentConfig,
-        chat_history: Arc<ChatHistory<Arc<History>>>,
+        chat_history: Arc<ChatHistory<NonPersistentHistory>>,
         deps: Arc<AgentDependencies>,
     ) -> anyhow::Result<RigAgent<CompletionModel>> {
         Self::build_agent(
@@ -139,11 +97,14 @@ impl Agent {
         Self::build_agent(config.with_tool_set(AgentToolSet::Chat), chat_history, deps).await
     }
 
-    async fn build_agent(
+    async fn build_agent<P>(
         config: AgentConfig,
-        chat_history: Arc<ChatHistory<Arc<History>>>,
+        chat_history: Arc<ChatHistory<P>>,
         deps: Arc<AgentDependencies>,
-    ) -> anyhow::Result<RigAgent<CompletionModel>> {
+    ) -> anyhow::Result<RigAgent<CompletionModel>>
+    where
+        P: HistoryPersistence,
+    {
         let client = Self::build_client(&config, &deps)?;
         let model_id = client.select_model(deps.terminal_io.clone()).await?;
         let system_prompt = system_prompt().await;
@@ -155,9 +116,13 @@ impl Agent {
             .completions_api()
             .agent(model_id)
             .preamble(system_prompt.as_str());
+        let tool_context = ToolBuildContext {
+            config: config.rigel_config.clone(),
+            dependencies: deps.clone(),
+        };
         let builder = config
             .tool_set
-            .add_tools(builder, &mut permission_catalog, deps.http_client.clone())
+            .add_tools(builder, &mut permission_catalog, tool_context)
             .await?
             .mcp_tools(&mcp_tools, &mut permission_catalog);
 
@@ -171,13 +136,14 @@ impl Agent {
             .build())
     }
 
-    fn add_hooks<M>(
+    fn add_hooks<M, P>(
         builder: AgentBuilder<M, WithBuilderTools>,
-        chat_history: Arc<ChatHistory<Arc<History>>>,
+        chat_history: Arc<ChatHistory<P>>,
         deps: Arc<AgentDependencies>,
     ) -> AgentBuilder<M, WithBuilderTools>
     where
         M: CompletionModelTrait,
+        P: HistoryPersistence,
     {
         builder
             .add_hook(InvalidResponseHook::new(deps.terminal_io.clone()))
@@ -199,10 +165,10 @@ impl Agent {
             .build()?)
     }
 
-    async fn add_chat_tools<M>(
+    pub(super) async fn add_chat_tools<M>(
         builder: AgentBuilder<M>,
         catalog: &mut ToolPermissionCatalog,
-        http_client: Arc<Client>,
+        context: ToolBuildContext,
     ) -> anyhow::Result<AgentBuilder<M, WithBuilderTools>>
     where
         M: CompletionModelTrait,
@@ -218,14 +184,27 @@ impl Agent {
             .tool(catalog.register_builtin_tool(ReadFile::new().await?))
             .tool(catalog.register_builtin_tool(RunCommand::new().await?))
             .tool(catalog.register_builtin_tool(SearchText::new().await?))
-            .tool(catalog.register_builtin_tool(FetchUrl::new(http_client)));
+            .tool(
+                catalog
+                    .register_builtin_tool(FetchUrl::new(context.dependencies.http_client.clone())),
+            )
+            .tool(
+                catalog.register_builtin_tool(
+                    SpawnSubagent::new(
+                        context.dependencies.terminal_io.clone(),
+                        context.dependencies.http_client.clone(),
+                        context.config,
+                    )
+                    .await?,
+                ),
+            );
         Ok(builder)
     }
 
-    async fn add_subagent_tools<M>(
+    pub(super) async fn add_subagent_tools<M>(
         builder: AgentBuilder<M>,
         catalog: &mut ToolPermissionCatalog,
-        http_client: Arc<Client>,
+        context: ToolBuildContext,
     ) -> anyhow::Result<AgentBuilder<M, WithBuilderTools>>
     where
         M: CompletionModelTrait,
@@ -241,14 +220,17 @@ impl Agent {
         let builder = builder
             .tool(catalog.register_builtin_tool(RunCommand::new().await?))
             .tool(catalog.register_builtin_tool(SearchText::new().await?))
-            .tool(catalog.register_builtin_tool(FetchUrl::new(http_client)));
+            .tool(
+                catalog
+                    .register_builtin_tool(FetchUrl::new(context.dependencies.http_client.clone())),
+            );
         Ok(builder)
     }
 
-    async fn add_orchestrator_tools<M>(
+    pub(super) async fn add_orchestrator_tools<M>(
         builder: AgentBuilder<M>,
         catalog: &mut ToolPermissionCatalog,
-        http_client: Arc<Client>,
+        context: ToolBuildContext,
     ) -> anyhow::Result<AgentBuilder<M, WithBuilderTools>>
     where
         M: CompletionModelTrait,
@@ -261,29 +243,20 @@ impl Agent {
             .tool(catalog.register_builtin_tool(ReadFile::new().await?))
             .tool(catalog.register_builtin_tool(RunCommand::new().await?))
             .tool(catalog.register_builtin_tool(SearchText::new().await?))
-            .tool(catalog.register_builtin_tool(FetchUrl::new(http_client)));
+            .tool(
+                catalog
+                    .register_builtin_tool(FetchUrl::new(context.dependencies.http_client.clone())),
+            )
+            .tool(
+                catalog.register_builtin_tool(
+                    SpawnSubagent::new(
+                        context.dependencies.terminal_io.clone(),
+                        context.dependencies.http_client.clone(),
+                        context.config,
+                    )
+                    .await?,
+                ),
+            );
         Ok(builder)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{AgentConfig, AgentToolSet};
-
-    #[test]
-    fn agent_config_selects_each_declared_tool_set() {
-        let config = AgentConfig::new("http://localhost/v1".to_string(), None);
-        assert_eq!(config.tool_set, AgentToolSet::Chat);
-        assert_eq!(
-            config
-                .clone()
-                .with_tool_set(AgentToolSet::Subagent)
-                .tool_set,
-            AgentToolSet::Subagent
-        );
-        assert_eq!(
-            config.with_tool_set(AgentToolSet::Orchestrator).tool_set,
-            AgentToolSet::Orchestrator
-        );
     }
 }

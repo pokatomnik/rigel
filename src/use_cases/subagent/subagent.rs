@@ -2,14 +2,13 @@
 
 use std::sync::Arc;
 
-use futures::future::BoxFuture;
-use rig::{Agent, completion::CompletionModel, message::Message};
+use rig::{Agent, completion::CompletionModel};
 use tokio::sync::Mutex;
 
 use crate::{
     prompts::subagent::task_prompt,
     shared::{
-        history::{ChatHistory, HistoryPersistence},
+        history::{ChatHistory, NonPersistentHistory},
         recovery::{RecoveryRequest, TurnRecoverer, TurnStatus},
         streaming::{StreamRunOutcome, StreamedTurn},
         terminal::TerminalIO,
@@ -26,23 +25,24 @@ where
     history: Arc<ChatHistory<NonPersistentHistory>>,
 }
 
-struct NonPersistentHistory;
-
-impl HistoryPersistence for NonPersistentHistory {
-    fn save<'a>(&'a self, _messages: &'a [Message]) -> BoxFuture<'a, anyhow::Result<()>> {
-        Box::pin(async { Ok(()) })
-    }
-}
-
 impl<CM> Subagent<CM>
 where
     CM: CompletionModel + 'static,
 {
     pub(crate) fn new(agent: Agent<CM>, terminal_io: Arc<TerminalIO>) -> Self {
+        let history = Arc::new(ChatHistory::new(Vec::new(), NonPersistentHistory));
+        Self::with_history(agent, terminal_io, history)
+    }
+
+    pub(crate) fn with_history(
+        agent: Agent<CM>,
+        terminal_io: Arc<TerminalIO>,
+        history: Arc<ChatHistory<NonPersistentHistory>>,
+    ) -> Self {
         Self {
             agent: Arc::new(Mutex::new(agent)),
             terminal_io,
-            history: Arc::new(ChatHistory::new(Vec::new(), NonPersistentHistory)),
+            history,
         }
     }
 
