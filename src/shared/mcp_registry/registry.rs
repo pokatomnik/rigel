@@ -37,9 +37,9 @@ struct McpConnection {
 impl McpRegistry {
     pub async fn from_config(config: Arc<RigelConfig>) -> anyhow::Result<Self> {
         let tool_server = ToolServer::new().run();
-        let mut connections = Vec::with_capacity(config.servers.len());
+        let mut connections = Vec::with_capacity(config.mcp_servers().len());
 
-        for (name, server) in &config.servers {
+        for (name, server) in config.mcp_servers() {
             connections.push(server.connect(name.as_str(), tool_server.clone()).await?);
         }
 

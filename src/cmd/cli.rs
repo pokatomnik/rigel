@@ -22,6 +22,8 @@ mod tests {
 
     #[test]
     fn api_key_is_optional() {
-        assert!(Cli::try_parse_from(["rigel", "--base-url", "http://localhost/v1"]).is_ok());
+        assert!(
+            Cli::try_parse_from(["rigel", "chat", "--base-url", "http://localhost/v1"]).is_ok()
+        );
     }
 }

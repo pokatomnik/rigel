@@ -1,11 +1,11 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use clap::Args;
 use rig::{Agent as RigAgent, providers::openai::CompletionModel};
 
 use crate::{
     controllers::controller::Controller,
-    shared::history::History,
+    shared::{history::History, rigel_config::RigelConfig},
     use_cases::{
         agent::{Agent, AgentConfig},
         chat::{chat::Chat, history_sync::ChatHistory},
@@ -18,24 +18,29 @@ pub(crate) use crate::use_cases::agent::AgentDependencies as IndexControllerDeps
 #[clap(rename_all = "kebab-case")]
 pub struct ChatController {
     #[arg(
-        long = "base-url",
-        short = 'u',
-        required = true,
-        help = "OpenAI-compatible API base URL"
+        long = "profile",
+        short = 'p',
+        required = false,
+        help = "Path to configuration file"
     )]
-    base_url: String,
-
-    #[arg(long = "api-key", short = 'k', help = "API key for authentication")]
-    api_key: Option<String>,
+    profile: Option<PathBuf>,
 }
 
 impl ChatController {
+    async fn read_config(&self) -> anyhow::Result<RigelConfig> {
+        match &self.profile {
+            Some(path) => RigelConfig::from_path(path).await,
+            None => Ok(RigelConfig::from_default_path().await),
+        }
+    }
+
     async fn create_agent(
         &self,
         chat_history: Arc<ChatHistory<Arc<History>>>,
         deps: Arc<IndexControllerDeps>,
     ) -> anyhow::Result<RigAgent<CompletionModel>> {
-        let config = AgentConfig::new(self.base_url.clone(), self.api_key.clone());
+        let config = self.read_config().await?;
+        let config = AgentConfig::new(config.base_url().to_owned(), config.api_key());
         Agent::new(config, chat_history, deps).await
     }
 }
