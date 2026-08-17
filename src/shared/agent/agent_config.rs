@@ -8,8 +8,8 @@ use super::agent_tool_set::AgentToolSet;
 pub(crate) struct AgentConfig {
     pub(super) base_url: String,
     pub(super) api_key: Option<String>,
-    pub(super) rigel_config: Arc<RigelConfig>,
     pub(super) tool_set: AgentToolSet,
+    pub(super) model_id: Option<String>,
 }
 
 impl AgentConfig {
@@ -17,9 +17,14 @@ impl AgentConfig {
         Self {
             base_url: config.base_url().to_owned(),
             api_key: config.api_key(),
-            rigel_config: config,
             tool_set: AgentToolSet::Chat,
+            model_id: None,
         }
+    }
+
+    pub(crate) fn with_model_id(mut self, model_id: String) -> Self {
+        self.model_id = Some(model_id);
+        self
     }
 
     pub(super) fn with_tool_set(mut self, tool_set: AgentToolSet) -> Self {
@@ -52,5 +57,13 @@ mod tests {
             config.with_tool_set(AgentToolSet::Orchestrator).tool_set,
             AgentToolSet::Orchestrator
         );
+    }
+
+    #[test]
+    fn agent_config_can_reuse_a_selected_model() {
+        let config = AgentConfig::new(Arc::new(RigelConfig::default()))
+            .with_model_id("selected-model".to_string());
+
+        assert_eq!(config.model_id.as_deref(), Some("selected-model"));
     }
 }

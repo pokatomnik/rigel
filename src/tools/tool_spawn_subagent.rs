@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
-use reqwest::Client;
 use rig::{
     providers::openai::CompletionModel,
     tool::{Tool, ToolContext, ToolExecutionError},
@@ -13,9 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     shared::{
         agent::{Agent, AgentConfig, AgentDependencies},
-        config::RigelConfig,
         history::{ChatHistory, NonPersistentHistory},
-        mcp_registry::McpRegistry,
         terminal::TerminalIO,
         tool_permissions::{PermissionRequirement, ToolPermissionMetadata},
     },
@@ -42,11 +39,11 @@ pub(crate) struct SpawnSubagent {
 impl SpawnSubagent {
     pub(crate) fn new(
         terminal_io: Arc<TerminalIO>,
-        http_client: Arc<Client>,
-        config: Arc<RigelConfig>,
+        dependencies: Arc<AgentDependencies>,
+        config: AgentConfig,
     ) -> BoxFuture<'static, anyhow::Result<Self>> {
         Box::pin(async move {
-            let subagent = Self::create_subagent(terminal_io, http_client, config).await?;
+            let subagent = Self::create_subagent(terminal_io, dependencies, config).await?;
             Ok(Self {
                 subagent,
                 permission: PermissionRequirement::Automatic,
@@ -56,18 +53,11 @@ impl SpawnSubagent {
 
     async fn create_subagent(
         terminal_io: Arc<TerminalIO>,
-        http_client: Arc<Client>,
-        config: Arc<RigelConfig>,
+        dependencies: Arc<AgentDependencies>,
+        config: AgentConfig,
     ) -> anyhow::Result<Subagent<CompletionModel>> {
-        let mcp_registry = Arc::new(McpRegistry::from_config(config.clone()).await?);
         let chat_history = Arc::new(ChatHistory::new(Vec::new(), NonPersistentHistory));
-        let agent_config = AgentConfig::new(config);
-        let dependencies = Arc::new(AgentDependencies::new(
-            terminal_io.clone(),
-            http_client,
-            mcp_registry,
-        ));
-        let agent = Agent::new_subagent(agent_config, chat_history.clone(), dependencies).await?;
+        let agent = Agent::new_subagent(config, chat_history.clone(), dependencies).await?;
         Ok(Subagent::with_history(agent, terminal_io, chat_history))
     }
 

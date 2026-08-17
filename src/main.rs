@@ -27,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
     let result = match cli.command {
         Commands::Init(init_controller) => init_controller.handle(()).await,
         Commands::Chat(chat_controller) => {
-            let config = get_config().await;
+            let config = Arc::new(chat_controller.read_config().await?);
             let http_client = get_http_client().await?;
             let mcp_registry = get_mcp_registry(config).await?;
             let chat_deps =
@@ -45,10 +45,6 @@ async fn main() -> anyhow::Result<()> {
 
 async fn get_mcp_registry(config: Arc<RigelConfig>) -> anyhow::Result<Arc<McpRegistry>> {
     Ok(Arc::new(McpRegistry::from_config(config).await?))
-}
-
-async fn get_config() -> Arc<RigelConfig> {
-    Arc::new(RigelConfig::from_default_path().await)
 }
 
 async fn get_http_client() -> anyhow::Result<Arc<Client>> {

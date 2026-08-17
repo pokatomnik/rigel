@@ -62,7 +62,7 @@ pub struct ChatController {
 }
 
 impl ChatController {
-    async fn read_config(&self) -> anyhow::Result<RigelConfig> {
+    pub(crate) async fn read_config(&self) -> anyhow::Result<RigelConfig> {
         match &self.profile {
             Some(path) => RigelConfig::from_path(path).await,
             None => Ok(RigelConfig::from_default_path().await),
@@ -73,9 +73,12 @@ impl ChatController {
         &self,
         chat_history: Arc<ChatHistory<Arc<History>>>,
         deps: Arc<IndexControllerDeps>,
+        reselect_mcp: bool,
     ) -> anyhow::Result<RigAgent<CompletionModel>> {
-        let config = Arc::new(self.read_config().await?);
-        let config = AgentConfig::new(config);
+        if reselect_mcp {
+            deps.mcp_registry.reselect_tools().await;
+        }
+        let config = AgentConfig::new(deps.mcp_registry.config());
         Agent::new_chat_agent(config, chat_history, Arc::new(deps.agent_dependencies())).await
     }
 }
@@ -86,7 +89,7 @@ impl Controller<IndexControllerDeps> for ChatController {
         let (history, chat_history) = History::bootstrap().await?;
         let chat_history = Arc::new(ChatHistory::new(chat_history, Arc::new(history)));
         let agent = self
-            .create_agent(chat_history.clone(), deps.clone())
+            .create_agent(chat_history.clone(), deps.clone(), false)
             .await?;
 
         let controller = self.clone();
@@ -94,7 +97,7 @@ impl Controller<IndexControllerDeps> for ChatController {
         let deps_clone = deps.clone();
         let chat = Chat::from_history(agent, deps.terminal_io(), chat_history, async move || {
             controller
-                .create_agent(chat_history_clone.clone(), deps_clone.clone())
+                .create_agent(chat_history_clone.clone(), deps_clone.clone(), true)
                 .await
         });
 

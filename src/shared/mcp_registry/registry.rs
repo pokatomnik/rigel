@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::error::Error;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -15,6 +14,7 @@ use rmcp::{
     transport::{IntoTransport, StreamableHttpClientTransport, TokioChildProcess},
 };
 use tokio::process::Command;
+use tokio::sync::Mutex;
 
 use crate::shared::config::RigelConfig;
 use crate::shared::tool_permissions::ToolPermissionCatalog;
@@ -23,9 +23,10 @@ use super::http_config::HttpConfig;
 use super::server_config::ServerConfig;
 use super::stdio_config::StdioConfig;
 
-#[derive(Default)]
 pub(crate) struct McpRegistry {
+    config: Arc<RigelConfig>,
     connections: Vec<McpConnection>,
+    selected_indices: Mutex<Option<Vec<usize>>>,
 }
 
 struct McpConnection {
@@ -43,7 +44,15 @@ impl McpRegistry {
             connections.push(server.connect(name.as_str(), tool_server.clone()).await?);
         }
 
-        Ok(Self { connections })
+        Ok(Self {
+            config,
+            connections,
+            selected_indices: Mutex::new(None),
+        })
+    }
+
+    pub(crate) fn config(&self) -> Arc<RigelConfig> {
+        self.config.clone()
     }
 
     pub fn tools(&self) -> Vec<(Vec<Tool>, ServerSink)> {
@@ -53,7 +62,21 @@ impl McpRegistry {
             .collect()
     }
 
-    pub fn select_tools(&self) -> Vec<(Vec<Tool>, ServerSink)> {
+    pub async fn select_tools(&self) -> Vec<(Vec<Tool>, ServerSink)> {
+        if let Some(selected_indices) = self.selected_indices.lock().await.clone() {
+            return self.tools_for(selected_indices.as_slice());
+        }
+
+        self.reselect_tools().await
+    }
+
+    pub async fn reselect_tools(&self) -> Vec<(Vec<Tool>, ServerSink)> {
+        let selected_indices = self.choose_indices();
+        *self.selected_indices.lock().await = Some(selected_indices.clone());
+        self.tools_for(selected_indices.as_slice())
+    }
+
+    fn choose_indices(&self) -> Vec<usize> {
         let connection_names = self
             .connections
             .iter()
@@ -64,24 +87,21 @@ impl McpRegistry {
             .iter()
             .map(|v| (v.to_string(), true))
             .collect::<Vec<(String, bool)>>();
-        let selected = dialoguer::MultiSelect::new()
+        dialoguer::MultiSelect::new()
             .with_prompt("Select MCP servers")
             .report(false)
             .clear(true)
             .items_checked(selected_names)
             .interact()
             .unwrap_or_default()
-            .iter()
-            .map(ToOwned::to_owned)
-            .collect::<HashSet<usize>>();
+    }
+
+    fn tools_for(&self, selected_indices: &[usize]) -> Vec<(Vec<Tool>, ServerSink)> {
         self.connections
             .iter()
             .enumerate()
-            .filter_map(|(index, conn)| match selected.contains(&index) {
-                true => Some(conn.to_owned()),
-                false => None,
-            })
-            .map(|connection| (connection.tools.clone(), connection.service.peer().clone()))
+            .filter(|(index, _)| selected_indices.contains(index))
+            .map(|(_, connection)| (connection.tools.clone(), connection.service.peer().clone()))
             .collect()
     }
 }

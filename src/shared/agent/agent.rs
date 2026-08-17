@@ -106,18 +106,22 @@ impl Agent {
         P: HistoryPersistence,
     {
         let client = Self::build_client(&config, &deps)?;
-        let model_id = client.select_model(deps.terminal_io.clone()).await?;
+        let model_id = match config.model_id.clone() {
+            Some(model_id) => model_id,
+            None => client.select_model(deps.terminal_io.clone()).await?,
+        };
+        let config = config.with_model_id(model_id.clone());
         let system_prompt = system_prompt().await;
         println!("MCP tools loaded: {}", deps.mcp_registry.tools().len());
 
-        let mcp_tools = deps.mcp_registry.select_tools();
+        let mcp_tools = deps.mcp_registry.select_tools().await;
         let mut permission_catalog = ToolPermissionCatalog::default();
         let builder = client
             .completions_api()
             .agent(model_id)
             .preamble(system_prompt.as_str());
         let tool_context = ToolBuildContext {
-            config: config.rigel_config.clone(),
+            config: config.clone(),
             dependencies: deps.clone(),
         };
         let builder = config
@@ -192,7 +196,7 @@ impl Agent {
                 catalog.register_builtin_tool(
                     SpawnSubagent::new(
                         context.dependencies.terminal_io.clone(),
-                        context.dependencies.http_client.clone(),
+                        context.dependencies.clone(),
                         context.config,
                     )
                     .await?,
@@ -251,7 +255,7 @@ impl Agent {
                 catalog.register_builtin_tool(
                     SpawnSubagent::new(
                         context.dependencies.terminal_io.clone(),
-                        context.dependencies.http_client.clone(),
+                        context.dependencies.clone(),
                         context.config,
                     )
                     .await?,
