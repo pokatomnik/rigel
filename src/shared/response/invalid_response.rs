@@ -5,7 +5,7 @@ use rig::{
     message::AssistantContent,
 };
 
-use crate::shared::terminal_io::TerminalIO;
+use crate::shared::terminal::TerminalIO;
 
 const MAX_RESPONSE_ATTEMPTS: usize = 10;
 const STOP_SEQUENCES: &str = include_str!("invalid_response_sequences.txt");

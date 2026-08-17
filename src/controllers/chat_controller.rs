@@ -1,18 +1,53 @@
 use std::{path::PathBuf, sync::Arc};
 
 use clap::Args;
+use reqwest::Client;
 use rig::{Agent as RigAgent, providers::openai::CompletionModel};
 
 use crate::{
     controllers::controller::Controller,
-    shared::{history::History, rigel_config::RigelConfig},
-    use_cases::{
-        agent::{Agent, AgentConfig},
-        chat::{chat::Chat, history_sync::ChatHistory},
+    shared::{
+        agent::{Agent, AgentConfig, AgentDependencies},
+        config::RigelConfig,
+        history::{ChatHistory, History},
+        mcp_registry::McpRegistry,
+        terminal::TerminalIO,
     },
+    use_cases::chat::chat::Chat,
 };
 
-pub(crate) use crate::use_cases::agent::AgentDependencies as IndexControllerDeps;
+#[derive(Clone)]
+pub(crate) struct IndexControllerDeps {
+    terminal_io: Arc<TerminalIO>,
+    http_client: Arc<Client>,
+    mcp_registry: Arc<McpRegistry>,
+}
+
+impl IndexControllerDeps {
+    pub(crate) fn new(
+        terminal_io: Arc<TerminalIO>,
+        http_client: Arc<Client>,
+        mcp_registry: Arc<McpRegistry>,
+    ) -> Self {
+        Self {
+            terminal_io,
+            http_client,
+            mcp_registry,
+        }
+    }
+
+    fn agent_dependencies(&self) -> AgentDependencies {
+        AgentDependencies::new(
+            self.terminal_io.clone(),
+            self.http_client.clone(),
+            self.mcp_registry.clone(),
+        )
+    }
+
+    fn terminal_io(&self) -> Arc<TerminalIO> {
+        self.terminal_io.clone()
+    }
+}
 
 #[derive(Args, Clone, Debug)]
 #[clap(rename_all = "kebab-case")]
@@ -41,7 +76,7 @@ impl ChatController {
     ) -> anyhow::Result<RigAgent<CompletionModel>> {
         let config = self.read_config().await?;
         let config = AgentConfig::new(config.base_url().to_owned(), config.api_key());
-        Agent::new(config, chat_history, deps).await
+        Agent::new_chat_agent(config, chat_history, Arc::new(deps.agent_dependencies())).await
     }
 }
 

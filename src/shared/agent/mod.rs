@@ -1,3 +1,3 @@
-pub(crate) mod agent;
+mod agent;
 
 pub(crate) use agent::{Agent, AgentConfig, AgentDependencies};

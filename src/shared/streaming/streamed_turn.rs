@@ -10,16 +10,14 @@ use rig::{
 };
 use tokio::sync::Mutex;
 
-use crate::{
-    shared::string_ext::StringShort,
-    shared::terminal_io::TerminalIO,
-    use_cases::chat::{
-        history_sync::{ChatHistory, HISTORY_SYNC_ERROR_PREFIX, HistoryPersistence, HistoryUpdate},
-        recovery_error::recovery_context_from_streaming_error,
-        stream_output_state::StreamOutputState,
-        tool_recovery::{MAX_INVALID_TOOL_CALL_ATTEMPTS, tool_recovery_status},
-        turn_journal::{ToolResultRecord, TurnJournal},
-    },
+use crate::shared::{
+    history::{ChatHistory, HISTORY_SYNC_ERROR_PREFIX, HistoryPersistence, HistoryUpdate},
+    recovery::recovery_context_from_streaming_error,
+    recovery::{MAX_INVALID_TOOL_CALL_ATTEMPTS, tool_recovery_status},
+    streaming::StreamOutputState,
+    streaming::{ToolResultRecord, TurnJournal},
+    string::string_ext::StringShort,
+    terminal::TerminalIO,
 };
 
 pub(crate) struct StreamCompletion {
@@ -28,6 +26,10 @@ pub(crate) struct StreamCompletion {
 }
 
 impl StreamCompletion {
+    pub(crate) fn output(&self) -> &str {
+        self.output.as_str()
+    }
+
     pub(crate) fn has_output(&self) -> bool {
         !self.output.trim().is_empty()
     }
@@ -382,11 +384,11 @@ mod tests {
 
     use super::{StreamRunOutcome, StreamedTurn};
     use crate::{
-        shared::terminal_io::TerminalIO,
-        use_cases::chat::{
-            history_sync::{ChatHistory, HistoryPersistence, HistorySyncHook},
-            invalid_response::InvalidResponseHook,
-            tool_recovery::ToolRecoveryHook,
+        shared::terminal::TerminalIO,
+        shared::{
+            history::{ChatHistory, HistoryPersistence, HistorySyncHook},
+            recovery::ToolRecoveryHook,
+            response::InvalidResponseHook,
         },
     };
 

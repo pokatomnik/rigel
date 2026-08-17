@@ -7,15 +7,11 @@ use rig::{
 };
 use tokio::sync::Mutex;
 
-use crate::{
-    shared::terminal_io::TerminalIO,
-    use_cases::chat::{
-        command_parser::{CommandParser, CommandParserResult},
-        history_sync::{ChatHistory, HistoryPersistence, HistoryUpdate},
-        recovery_error::format_recovery_stopped_notice,
-        streamed_turn::{StreamRunOutcome, StreamedTurn},
-        turn_recovery::{RecoveryRequest, TurnRecoverer, TurnStatus},
-    },
+use crate::shared::{
+    history::{ChatHistory, HistoryPersistence, HistoryUpdate},
+    recovery::{RecoveryRequest, TurnRecoverer, TurnStatus, format_recovery_stopped_notice},
+    streaming::{StreamRunOutcome, StreamedTurn},
+    terminal::{CommandParser, CommandParserResult, TerminalIO},
 };
 
 /// Orchestrates commands and conversation turns between the user and the model.
@@ -86,7 +82,9 @@ where
             StreamRunOutcome::Completed(completion) if completion.requires_answer_recovery() => {
                 RecoveryRequest::MissingAnswer
             }
-            StreamRunOutcome::Completed(_) => return Ok(TurnStatus::Complete),
+            StreamRunOutcome::Completed(completion) => {
+                return Ok(TurnStatus::Complete(completion.output().to_string()));
+            }
         };
 
         TurnRecoverer::new(streamed_turn).recover(request).await
@@ -196,8 +194,8 @@ mod tests {
     use super::{Chat, compacted_history};
     use crate::{
         prompts::summarization::summarization,
-        shared::terminal_io::TerminalIO,
-        use_cases::chat::history_sync::{ChatHistory, HistoryPersistence},
+        shared::history::{ChatHistory, HistoryPersistence},
+        shared::terminal::TerminalIO,
     };
 
     #[derive(Clone, Copy)]

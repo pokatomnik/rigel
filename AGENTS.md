@@ -13,6 +13,11 @@ Rigel is a Rust 2024 CLI for OpenAI-compatible model APIs. Entry point: `src/mai
 
 Each module exports via its nearest `mod.rs`. Dependencies in `Cargo.toml`, reproducible versions in `Cargo.lock`.
 
+- Keep every directory to at most seven files, excluding `mod.rs` from the count.
+  Before creating an eighth file, reconsider the decomposition: move a coherent
+  group of related files into a subdirectory and export only the required items
+  from that subdirectory's `mod.rs`.
+
 ## Chat Run Loop Architecture
 
 `Chat::run` (`src/use_cases/chat/chat.rs`) is core functionality and must remain a

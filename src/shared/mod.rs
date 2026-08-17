@@ -1,7 +1,10 @@
-pub(crate) mod consts;
+pub(crate) mod agent;
+pub(crate) mod config;
 pub(crate) mod history;
 pub(crate) mod mcp_registry;
-pub(crate) mod rigel_config;
-pub(crate) mod string_ext;
-pub(crate) mod terminal_io;
+pub(crate) mod recovery;
+pub(crate) mod response;
+pub(crate) mod streaming;
+pub(crate) mod string;
+pub(crate) mod terminal;
 pub(crate) mod tool_permissions;

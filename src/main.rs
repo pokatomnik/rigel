@@ -6,9 +6,7 @@ use reqwest::Client;
 use crate::{
     cmd::{cli::Cli, commands::Commands},
     controllers::{chat_controller::IndexControllerDeps, controller::Controller},
-    shared::{
-        mcp_registry::registry::McpRegistry, rigel_config::RigelConfig, terminal_io::TerminalIO,
-    },
+    shared::{config::RigelConfig, mcp_registry::McpRegistry, terminal::TerminalIO},
 };
 
 mod cmd;

@@ -6,7 +6,7 @@ use rig::{
 };
 use serde::Deserialize;
 
-use crate::shared::terminal_io::TerminalIO;
+use crate::shared::terminal::TerminalIO;
 
 pub(crate) trait ModelSelector {
     async fn select_model(&self, terminal_io: Arc<TerminalIO>) -> anyhow::Result<String>;

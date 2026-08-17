@@ -4,9 +4,9 @@ use crate::{
     prompts::recovery::{
         missing_answer_recovery_prompt, recovery_prompt, unresolved_tool_recovery_prompt,
     },
-    use_cases::chat::{
-        history_sync::HistoryPersistence,
-        streamed_turn::{StreamRunOutcome, StreamedTurn},
+    shared::{
+        history::HistoryPersistence,
+        streaming::{StreamRunOutcome, StreamedTurn},
     },
 };
 
@@ -19,8 +19,9 @@ pub(crate) enum RecoveryRequest {
     UnresolvedTool,
 }
 
+#[allow(dead_code)]
 pub(crate) enum TurnStatus {
-    Complete,
+    Complete(String),
     RecoveryStopped(String),
 }
 
@@ -55,7 +56,9 @@ where
         for attempt in 1..=MAX_RECOVERY_ATTEMPTS {
             let prompt = recovery_prompt(error.as_str(), attempt, MAX_RECOVERY_ATTEMPTS);
             match self.run_prompt(prompt).await? {
-                StreamRunOutcome::Completed(_) => return Ok(TurnStatus::Complete),
+                StreamRunOutcome::Completed(completion) => {
+                    return Ok(TurnStatus::Complete(completion.output().to_string()));
+                }
                 StreamRunOutcome::Failed(next_error) => error = next_error,
             }
         }
@@ -71,7 +74,7 @@ where
             let prompt = missing_answer_recovery_prompt(attempt, MAX_RECOVERY_ATTEMPTS);
             match self.run_prompt(prompt).await? {
                 StreamRunOutcome::Completed(completion) if completion.has_output() => {
-                    return Ok(TurnStatus::Complete);
+                    return Ok(TurnStatus::Complete(completion.output().to_string()));
                 }
                 StreamRunOutcome::Completed(_) => last_error = None,
                 StreamRunOutcome::Failed(error) => last_error = Some(error),
@@ -89,7 +92,7 @@ where
             let prompt = unresolved_tool_recovery_prompt(attempt, MAX_TOOL_RECOVERY_ATTEMPTS);
             match self.run_prompt(prompt).await? {
                 StreamRunOutcome::Completed(completion) if completion.has_output() => {
-                    return Ok(TurnStatus::Complete);
+                    return Ok(TurnStatus::Complete(completion.output().to_string()));
                 }
                 StreamRunOutcome::Completed(_) => last_error = None,
                 StreamRunOutcome::Failed(error) => last_error = Some(error),

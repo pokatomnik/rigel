@@ -11,7 +11,7 @@ use rig::{
 };
 use tokio::sync::Mutex;
 
-use crate::shared::history::History;
+use super::history::History;
 
 pub(crate) const HISTORY_SYNC_ERROR_PREFIX: &str = "chat history persistence failed";
 

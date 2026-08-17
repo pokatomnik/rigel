@@ -1,6 +1,6 @@
 use std::{fmt, path::PathBuf, sync::Arc};
 
-use crate::{prompts::summarization::summarization, shared::terminal_io::TerminalIO};
+use crate::{prompts::summarization::summarization, shared::terminal::TerminalIO};
 
 const SKILLS_DIRECTORY: &str = ".agents/skills";
 const SKILL_MANIFEST: &str = "SKILL.md";
@@ -149,7 +149,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::{CommandParser, CommandParserResult};
-    use crate::{prompts::summarization::summarization, shared::terminal_io::TerminalIO};
+    use crate::{prompts::summarization::summarization, shared::terminal::TerminalIO};
 
     fn parser() -> CommandParser {
         CommandParser::new(Arc::new(TerminalIO))

@@ -8,7 +8,7 @@ use rig::message::Message;
 use tokio::{fs, sync::Semaphore};
 
 use crate::{
-    shared::consts::{HISTORY_FILE_NAME, RIGEL_DIRECTORY},
+    shared::config::{HISTORY_FILE_NAME, RIGEL_DIRECTORY},
     tools::revision::sha256,
 };
 

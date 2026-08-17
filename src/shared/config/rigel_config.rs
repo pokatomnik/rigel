@@ -8,8 +8,8 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::shared::{
-    consts::{CONFIG_FILE_NAME, RIGEL_DIRECTORY},
-    mcp_registry::server_config::ServerConfig,
+    config::{CONFIG_FILE_NAME, RIGEL_DIRECTORY},
+    mcp_registry::ServerConfig,
 };
 
 #[derive(Deserialize, Serialize, Default)]
