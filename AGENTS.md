@@ -30,14 +30,10 @@ simple, linear orchestration loop. This is a strict rule, not a style preference
 
 ## Filesystem Tool Architecture
 
-- Tools access only Rigel's startup directory. Canonicalize root on construction. Accept `.`-relative paths only; reject absolute paths and `..`. Resolve ancestors and symlinks before I/O. Protect current directory from delete/move.
-- Use `tokio::fs` for every filesystem operation. Path validation, matching, formatting, hashing, and edit planning may be pure functions.
-- One tool per narrow responsibility: `list_directory`, `find_paths`, `search_text`, `stat`, `read_file`. Search tools must not become general filesystem APIs.
-- Descriptions and successes are short, deterministic, explicit about what changed. Return normalized current-directory-relative paths (never absolute). Sort collections deterministically.
-- Errors are model-facing recovery data: state what failed, why, which path or argument caused it, and the next corrective action. Prefer structured codes (`PATH_NOT_FOUND`, `PATH_OUTSIDE_CURRENT_DIRECTORY`, `INVALID_GLOB`) where available. Never hide an I/O error behind a generic message.
-- Idempotent outcomes are explicit non-errors (e.g. deleting a missing directory returns `not_found`). Creating an existing file is an error directing the model to use `apply_patch`.
-- File reads are UTF-8 and return a SHA-256 `revision`. `apply_patch` requires that revision, validates edits before writing, rejects missing/ambiguous/overlapping matches, and commits atomically. On success returns new revision.
-- Recursive search skips binary files in directories but rejects directly selected binaries. Built-in exclusions live in data files via `include_str!`, not duplicated as Rust literals. Keep result limits bounded and report truncation.
+- Filesystem interaction is performed through the `run_command` shell tool from Rigel's startup directory.
+- Use shell commands such as `ls`, `rg`, `find`, `rm`, `touch`, and `patch` for inspection and changes.
+- Keep the existing permissions mechanism unchanged; filesystem-changing `run_command` calls remain subject to permission checks.
+- Keep command output bounded and return actionable model-facing diagnostics on failures.
 
 ## Tool Error Recovery
 

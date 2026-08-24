@@ -427,7 +427,7 @@ mod tests {
     fn failure(turn: usize) -> ToolRecoveryState {
         let mut state = ToolRecoveryState::default();
         let decision = state.observe_tool_result(
-            "read_file",
+            "test_tool",
             r#"{"path":"missing.rs"}"#,
             turn,
             true,
@@ -499,7 +499,7 @@ mod tests {
 
         assert_eq!(
             state.observe_tool_result(
-                "read_file",
+                "test_tool",
                 r#"{"path":"src/main.rs"}"#,
                 3,
                 false,
@@ -515,11 +515,11 @@ mod tests {
     #[test]
     fn not_found_no_op_does_not_resolve_failure() {
         let mut state = ToolRecoveryState::default();
-        record_failure(&mut state, "delete_path", r#"{"path":"."}"#, 1);
+        record_failure(&mut state, "test_tool", r#"{"path":"."}"#, 1);
 
         assert_eq!(
             state.observe_tool_result(
-                "delete_path",
+                "test_tool",
                 r#"{"path":"asd"}"#,
                 2,
                 false,
@@ -537,7 +537,7 @@ mod tests {
         let mut state = ToolRecoveryState::default();
 
         for turn in 1..=3 {
-            record_failure(&mut state, "delete_path", r#"{"path":"."}"#, turn);
+            record_failure(&mut state, "test_tool", r#"{"path":"."}"#, turn);
         }
 
         assert!(state.force_final_answer.is_some());
@@ -546,10 +546,10 @@ mod tests {
     #[test]
     fn alternating_failure_cycle_forces_final_answer() {
         let mut state = ToolRecoveryState::default();
-        record_failure(&mut state, "delete_path", r#"{"path":"."}"#, 1);
-        record_failure(&mut state, "delete_path", r#"{"path":"asd"}"#, 2);
-        record_failure(&mut state, "delete_path", r#"{"path":"."}"#, 3);
-        record_failure(&mut state, "delete_path", r#"{"path":"asd"}"#, 4);
+        record_failure(&mut state, "test_tool", r#"{"path":"."}"#, 1);
+        record_failure(&mut state, "test_tool", r#"{"path":"asd"}"#, 2);
+        record_failure(&mut state, "test_tool", r#"{"path":"."}"#, 3);
+        record_failure(&mut state, "test_tool", r#"{"path":"asd"}"#, 4);
 
         assert_eq!(
             state.force_final_answer.as_deref(),
@@ -560,9 +560,9 @@ mod tests {
     #[test]
     fn error_and_no_op_cycle_from_regression_forces_final_answer() {
         let mut state = ToolRecoveryState::default();
-        record_failure(&mut state, "delete_path", r#"{"path":"."}"#, 1);
+        record_failure(&mut state, "test_tool", r#"{"path":"."}"#, 1);
         state.observe_tool_result(
-            "delete_path",
+            "test_tool",
             r#"{"path":"asd"}"#,
             2,
             false,
@@ -570,10 +570,10 @@ mod tests {
             true,
             r#"{"action":"not_found","path":"asd","kind":"unknown"}"#,
         );
-        record_failure(&mut state, "delete_path", r#"{"path":"."}"#, 3);
+        record_failure(&mut state, "test_tool", r#"{"path":"."}"#, 3);
 
         let decision = state.observe_tool_result(
-            "delete_path",
+            "test_tool",
             r#"{"path":"asd"}"#,
             4,
             false,

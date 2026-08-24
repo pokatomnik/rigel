@@ -152,7 +152,7 @@ impl Tool for RunCommand {
     type Error = ToolExecutionError;
 
     fn description(&self) -> String {
-        "Run a build, test, format, package, or program command in the current directory; do not use it for file operations.".to_string()
+        "Run a shell command in the current directory, including filesystem operations such as ls, rg, find, rm, touch, and patch.".to_string()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -163,7 +163,7 @@ impl Tool for RunCommand {
                 "command": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Build, test, format, package, or program command to run."
+                    "description": "Shell command to run for builds, tests, programs, or filesystem operations."
                 }
             },
             "required": ["command"]

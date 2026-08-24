@@ -26,11 +26,7 @@ use crate::{
         tool_permissions::{ToolPermissionCatalog, ToolPermissionHook},
     },
     tools::{
-        tool_apply_patch::ApplyPatch, tool_create_directory::CreateDirectory,
-        tool_create_file::CreateFile, tool_delete_path::DeletePath, tool_fetch_url::FetchUrl,
-        tool_find_paths::FindPaths, tool_list_directory::ListDirectory, tool_read_file::ReadFile,
-        tool_rename_path::RenamePath, tool_run_command::RunCommand, tool_search_text::SearchText,
-        tool_spawn_subagent::SpawnSubagent,
+        tool_fetch_url::FetchUrl, tool_run_command::RunCommand, tool_spawn_subagent::SpawnSubagent,
     },
     use_cases::model_selector::model_selector::ModelSelector,
 };
@@ -178,16 +174,7 @@ impl Agent {
         M: CompletionModelTrait,
     {
         let builder = builder
-            .tool(catalog.register_builtin_tool(ApplyPatch::new().await?))
-            .tool(catalog.register_builtin_tool(CreateDirectory::new().await?))
-            .tool(catalog.register_builtin_tool(CreateFile::new().await?))
-            .tool(catalog.register_builtin_tool(DeletePath::new().await?))
-            .tool(catalog.register_builtin_tool(FindPaths::new().await?))
-            .tool(catalog.register_builtin_tool(ListDirectory::new().await?))
-            .tool(catalog.register_builtin_tool(RenamePath::new().await?))
-            .tool(catalog.register_builtin_tool(ReadFile::new().await?))
             .tool(catalog.register_builtin_tool(RunCommand::new().await?))
-            .tool(catalog.register_builtin_tool(SearchText::new().await?))
             .tool(
                 catalog
                     .register_builtin_tool(FetchUrl::new(context.dependencies.http_client.clone())),
@@ -214,16 +201,7 @@ impl Agent {
         M: CompletionModelTrait,
     {
         let builder = builder
-            .tool(catalog.register_builtin_tool(CreateDirectory::new().await?))
-            .tool(catalog.register_builtin_tool(CreateFile::new().await?))
-            .tool(catalog.register_builtin_tool(DeletePath::new().await?))
-            .tool(catalog.register_builtin_tool(FindPaths::new().await?))
-            .tool(catalog.register_builtin_tool(ListDirectory::new().await?))
-            .tool(catalog.register_builtin_tool(ReadFile::new().await?))
-            .tool(catalog.register_builtin_tool(RenamePath::new().await?));
-        let builder = builder
             .tool(catalog.register_builtin_tool(RunCommand::new().await?))
-            .tool(catalog.register_builtin_tool(SearchText::new().await?))
             .tool(
                 catalog
                     .register_builtin_tool(FetchUrl::new(context.dependencies.http_client.clone())),
@@ -240,13 +218,7 @@ impl Agent {
         M: CompletionModelTrait,
     {
         let builder = builder
-            .tool(catalog.register_builtin_tool(CreateDirectory::new().await?))
-            .tool(catalog.register_builtin_tool(CreateFile::new().await?))
-            .tool(catalog.register_builtin_tool(FindPaths::new().await?))
-            .tool(catalog.register_builtin_tool(ListDirectory::new().await?))
-            .tool(catalog.register_builtin_tool(ReadFile::new().await?))
             .tool(catalog.register_builtin_tool(RunCommand::new().await?))
-            .tool(catalog.register_builtin_tool(SearchText::new().await?))
             .tool(
                 catalog
                     .register_builtin_tool(FetchUrl::new(context.dependencies.http_client.clone())),

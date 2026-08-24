@@ -1,15 +1,5 @@
 pub(crate) mod contracts;
-pub(crate) mod find_paths_ignore;
 pub(crate) mod revision;
-pub(crate) mod tool_apply_patch;
-pub(crate) mod tool_create_directory;
-pub(crate) mod tool_create_file;
-pub(crate) mod tool_delete_path;
 pub(crate) mod tool_fetch_url;
-pub(crate) mod tool_find_paths;
-pub(crate) mod tool_list_directory;
-pub(crate) mod tool_read_file;
-pub(crate) mod tool_rename_path;
 pub(crate) mod tool_run_command;
-pub(crate) mod tool_search_text;
 pub(crate) mod tool_spawn_subagent;

@@ -4,7 +4,7 @@ A Rust 2024 CLI agent for interacting with OpenAI-compatible LLM APIs.
 
 ## Project Overview
 
-Rigel is a conversational LLM agent that integrates filesystem tools into an interactive CLI session. It connects to OpenAI-compatible servers and provides deterministic filesystem operations within the current directory context. All tools work only within the current directory where Rigel started - absolute paths and parent references are rejected for security reasons.
+Rigel is a conversational LLM agent that integrates shell and network tools into an interactive CLI session. It connects to OpenAI-compatible servers and runs commands from the directory where Rigel started.
 
 ## Configuration
 
@@ -107,7 +107,7 @@ rigel/
 │   ├── entities/      # Domain entities
 │   ├── prompts/       # System prompts for LLM interaction
 │   ├── shared/        # Terminal IO and shared utilities
-│   ├── tools/         # Agent callable filesystem tools
+│   ├── tools/         # Agent-callable tools
 │   └── use_cases/     # Application workflows (chat, model selection)
 ├── Cargo.toml         # Rust package metadata and dependencies
 ├── Cargo.lock         # Resolved dependency versions
@@ -135,27 +135,19 @@ Located in `src/controllers/chat_controller.rs`, the IndexController orchestrate
 - Selects available models deterministically
 - Initializes chat with system prompt
 - Manages conversation turns (default: 12)
-- Routes filesystem tools to appropriate agents
+- Routes built-in tools to appropriate agents
 
-### Filesystem Tools
+### Built-in Tools
 
-Rigel provides a suite of filesystem operations, each with narrow responsibilities:
+Rigel provides three built-in tools:
 
-| Tool               | Description                                     |
-| ------------------ | ----------------------------------------------- |
-| `create_file`      | Create new files and missing parent directories |
-| `read_file`        | Read file content (returns SHA-256 revision)    |
-| `apply_patch`      | UTF-8 text edits with revision checking         |
-| `create_directory` | Create directories recursively                  |
-| `delete_path`      | Delete a file or directory recursively          |
-| `find_paths`       | Find files and directories by name              |
-| `list_directory`   | Inspect directory contents                      |
-| `rename_path`      | Rename a file or directory without overwrite    |
-| `search_text`      | Search exact, case-sensitive file text          |
-| `run_command`      | Run build, test, format, or program commands    |
-| `fetch_url`        | Fetch readable text from an HTTP or HTTPS URL   |
+| Tool             | Description                                         |
+| ---------------- | --------------------------------------------------- |
+| `run_command`    | Run shell commands, including filesystem operations |
+| `fetch_url`      | Fetch readable text from an HTTP or HTTPS URL       |
+| `spawn_subagent` | Run an autonomous subagent for a delegated task     |
 
-**Security Constraints**: All tools work only within the current directory where Rigel started. Current directory-relative paths are validated; absolute paths and parent references (`..`) are rejected. The current directory is protected from delete/move operations.
+Filesystem changes are performed through `run_command` in the startup directory and remain subject to the existing tool permission mechanism.
 
 ### Use Cases
 
