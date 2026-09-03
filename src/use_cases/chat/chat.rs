@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 use crate::shared::{
     history::{ChatHistory, HistoryPersistence, HistoryUpdate},
     recovery::{RecoveryRequest, TurnRecoverer, TurnStatus, format_recovery_stopped_notice},
-    streaming::{StreamRunOutcome, StreamedTurn},
+    streaming::{StreamOutputState, StreamRunOutcome, StreamedTurn, display_message},
     terminal::{CommandParser, CommandParserResult, TerminalIO},
 };
 
@@ -136,6 +136,20 @@ where
         Ok(self.command_parser.parse(input).await)
     }
 
+    async fn display_history(&self) {
+        let messages = self.history.snapshot().await;
+        if messages.is_empty() {
+            return;
+        }
+
+        let mut output_state = StreamOutputState::default();
+        for message in &messages {
+            if display_message(self.terminal_io.as_ref(), &mut output_state, message) {
+                self.terminal_io.eprintln("");
+            }
+        }
+    }
+
     async fn handle_change_model(&self) -> anyhow::Result<()> {
         let new_agent = (self.change_model)().await?;
         let mut guard = self.agent.lock().await;
@@ -145,6 +159,7 @@ where
 
     /// Runs the interactive loop until `/exit` or terminal input failure.
     pub async fn run(&self) -> anyhow::Result<()> {
+        self.display_history().await;
         loop {
             match self.next_command().await? {
                 CommandParserResult::CommandExit => break,

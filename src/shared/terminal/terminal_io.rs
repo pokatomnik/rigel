@@ -45,6 +45,10 @@ impl TerminalIO {
         let _ = io::stdout().flush();
     }
 
+    pub fn print_prompt_prefix(&self) {
+        self.eprint_gray("> ");
+    }
+
     pub fn confirm_tool_call(&self, prompt: &str) -> ToolConfirmResult {
         let items: &'static [ToolConfirmResult] =
             &[ToolConfirmResult::No, ToolConfirmResult::AllowOnce];
@@ -83,7 +87,7 @@ impl TerminalIO {
     }
 
     pub fn readline(&self) -> anyhow::Result<String> {
-        self.eprint_gray("> ");
+        self.print_prompt_prefix();
         let mut line = String::new();
         io::stdin().read_line(&mut line)?;
         Ok(line.trim().to_string())

@@ -10,6 +10,10 @@ pub(crate) struct StreamOutputState {
 }
 
 impl StreamOutputState {
+    pub(crate) fn reset(&mut self) {
+        *self = Self::default();
+    }
+
     #[cfg(test)]
     pub fn new(
         showing_reasoning: bool,
