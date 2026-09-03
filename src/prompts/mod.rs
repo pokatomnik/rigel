@@ -1,3 +1,4 @@
+pub(crate) mod goal;
 pub(crate) mod recovery;
 pub(crate) mod subagent;
 pub(crate) mod summarization;

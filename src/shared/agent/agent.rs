@@ -16,6 +16,7 @@ use super::{
 use crate::{
     prompts::system::system_prompt,
     shared::{
+        goal::{GoalCompletionHook, GoalState},
         history::{
             ChatHistory, History, HistoryPersistence, HistorySyncHook, NonPersistentHistory,
         },
@@ -26,7 +27,8 @@ use crate::{
         tool_permissions::{ToolPermissionCatalog, ToolPermissionHook},
     },
     tools::{
-        tool_fetch_url::FetchUrl, tool_run_command::RunCommand, tool_spawn_subagent::SpawnSubagent,
+        tool_fetch_url::FetchUrl, tool_mark_goal_complete::MarkGoalComplete,
+        tool_run_command::RunCommand, tool_spawn_subagent::SpawnSubagent,
     },
     use_cases::model_selector::model_selector::ModelSelector,
 };
@@ -40,6 +42,7 @@ pub(crate) struct AgentDependencies {
     terminal_io: Arc<TerminalIO>,
     http_client: Arc<Client>,
     mcp_registry: Arc<McpRegistry>,
+    goal_state: Option<Arc<GoalState>>,
 }
 
 impl AgentDependencies {
@@ -52,7 +55,19 @@ impl AgentDependencies {
             terminal_io,
             http_client,
             mcp_registry,
+            goal_state: None,
         }
+    }
+
+    pub(crate) fn with_goal_state(mut self, goal_state: Arc<GoalState>) -> Self {
+        self.goal_state = Some(goal_state);
+        self
+    }
+
+    pub(crate) fn goal_state(&self) -> anyhow::Result<Arc<GoalState>> {
+        self.goal_state
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("goal state was not configured for the chat agent"))
     }
 }
 
@@ -173,6 +188,7 @@ impl Agent {
     where
         M: CompletionModelTrait,
     {
+        let goal_state = context.dependencies.goal_state()?;
         let builder = builder
             .tool(catalog.register_builtin_tool(RunCommand::new().await?))
             .tool(
@@ -188,7 +204,9 @@ impl Agent {
                     )
                     .await?,
                 ),
-            );
+            )
+            .tool(catalog.register_builtin_tool(MarkGoalComplete::new(goal_state.clone())))
+            .add_hook(GoalCompletionHook::new(goal_state));
         Ok(builder)
     }
 

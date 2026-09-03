@@ -70,6 +70,14 @@ During `rigel chat`, the following commands are available:
 - `/new` — clear the conversation history
 - `/compact` — compact the conversation context
 - `/agent` — change agent preferences
+- `/goal <text>` — pursue the exact goal autonomously until the model calls `mark_goal_complete`
+
+While a goal is active, Rigel does not read new user commands. After each completed model run it
+sends an internal continuation prompt containing the original goal. These follow-up runs have the
+same 12-turn limit as an ordinary run, but the number of consecutive follow-up runs is unlimited.
+The original goal and internal prompts are stored in the normal conversation history. Tools that
+normally require confirmation continue to request confirmation; `mark_goal_complete` is automatic.
+This completion tool is exposed only to the main chat agent, not to subagents.
 
 ### Built-in skills
 
@@ -192,13 +200,14 @@ Located in `src/controllers/chat_controller.rs`, the IndexController orchestrate
 
 ### Built-in Tools
 
-Rigel provides three built-in tools:
+Rigel provides four built-in tools:
 
 | Tool             | Description                                         |
 | ---------------- | --------------------------------------------------- |
 | `run_command`    | Run shell commands, including filesystem operations |
 | `fetch_url`      | Fetch readable text from an HTTP or HTTPS URL       |
 | `spawn_subagent` | Run an autonomous subagent for a delegated task     |
+| `mark_goal_complete` | End the active `/goal` mode with a truthful work report |
 
 Filesystem changes are performed through `run_command` in the startup directory and remain subject to the existing tool permission mechanism.
 
