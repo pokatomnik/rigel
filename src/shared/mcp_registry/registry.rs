@@ -55,6 +55,7 @@ impl McpRegistry {
         self.config.clone()
     }
 
+    #[allow(dead_code)]
     pub fn tools(&self) -> Vec<(Vec<Tool>, ServerSink)> {
         self.connections
             .iter()
