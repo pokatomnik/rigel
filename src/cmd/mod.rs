@@ -1,2 +1,2 @@
-pub(crate) mod cli;
-pub(crate) mod commands;
+pub mod cli;
+pub mod commands;

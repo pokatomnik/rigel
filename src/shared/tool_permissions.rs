@@ -8,7 +8,9 @@ use rig::{
     tool::Tool,
 };
 
-use crate::{entities::tool_confirm_result::ToolConfirmResult, shared::terminal::TerminalIO};
+use crate::{
+    entities::tool_confirm_result::ToolConfirmResult, shared::terminal::terminal_io::TerminalIO,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PermissionRequirement {

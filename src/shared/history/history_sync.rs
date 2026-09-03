@@ -9,7 +9,10 @@ use rig::{
     message::Message,
 };
 
-use super::{ChatHistory, HistoryPersistence, HistoryUpdate};
+use super::{
+    chat_history::{ChatHistory, HistoryUpdate},
+    history_persistence::HistoryPersistence,
+};
 
 pub(crate) const HISTORY_SYNC_ERROR_PREFIX: &str = "chat history persistence failed";
 
@@ -43,6 +46,9 @@ where
         ctx: &HookContext,
         event: CompletionCallEvent<'_>,
     ) -> CompletionCallAction {
+        if self.history.is_compaction_in_progress() {
+            return CompletionCallAction::continue_run();
+        }
         ctx.scratchpad()
             .update::<PendingAssistantMessageId, _>(|pending| pending.0 = None);
         let mut messages = event.history.to_vec();
@@ -72,6 +78,9 @@ where
         ctx: &HookContext,
         event: ModelTurnFinished<'_>,
     ) -> ModelTurnAction {
+        if self.history.is_compaction_in_progress() {
+            return ModelTurnAction::continue_run();
+        }
         let message_id = ctx
             .scratchpad()
             .update::<PendingAssistantMessageId, _>(|pending| pending.0.take());
@@ -92,6 +101,9 @@ where
         _ctx: &HookContext,
         event: &InvalidToolCallContext,
     ) -> Option<InvalidToolCallAction> {
+        if self.history.is_compaction_in_progress() {
+            return None;
+        }
         let update = HistoryUpdate::Replace(event.chat_history.clone());
         match self.history.update(update).await {
             Ok(()) => None,

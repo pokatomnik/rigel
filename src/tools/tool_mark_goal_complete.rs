@@ -4,7 +4,7 @@ use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 
 use crate::shared::{
-    goal::{GoalState, GoalStateError, Report},
+    goal::goal_state::{GoalState, GoalStateError, Report},
     tool_permissions::{PermissionRequirement, ToolPermissionMetadata},
 };
 
@@ -122,7 +122,7 @@ mod tests {
     use super::{MarkGoalComplete, MarkGoalCompleteArgs};
     use crate::{
         shared::{
-            goal::GoalState,
+            goal::goal_state::GoalState,
             tool_permissions::{PermissionRequirement, ToolPermissionMetadata},
         },
         tools::contracts::error_codes,

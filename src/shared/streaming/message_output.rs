@@ -7,11 +7,12 @@ use rig::{
 };
 
 use crate::{
-    shared::recovery::tool_recovery_status,
-    shared::{string::string_ext::StringShort, terminal::TerminalIO},
+    entities::context_usage::ContextUsage,
+    shared::recovery::tool_recovery::tool_recovery_status,
+    shared::{string::string_ext::StringShort, terminal::terminal_io::TerminalIO},
 };
 
-use super::StreamOutputState;
+use super::stream_output_state::StreamOutputState;
 
 pub(crate) fn display_message(
     terminal_io: &TerminalIO,
@@ -69,7 +70,7 @@ fn display_assistant_content(
 }
 
 fn print_user_text(terminal_io: &TerminalIO, text: &Text) {
-    terminal_io.print_prompt_prefix();
+    terminal_io.print_prompt_prefix(ContextUsage::new(None, None));
     terminal_io.print(text.text());
     terminal_io.print("\n");
 }

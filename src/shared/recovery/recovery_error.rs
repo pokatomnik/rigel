@@ -61,13 +61,14 @@ pub(crate) fn format_recovery_stopped_notice(error: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{format_recovery_stopped_notice, recovery_context_from_prompt_error};
+    use anyhow::Result;
     use rig::{
         completion::PromptError,
         message::{Message, UserContent},
     };
 
     #[test]
-    fn max_turns_error_preserves_history_for_user_follow_up() {
+    fn max_turns_error_preserves_history_for_user_follow_up() -> Result<()> {
         let history = vec![
             Message::user("original request"),
             Message::user("tool error"),
@@ -81,7 +82,7 @@ mod tests {
         let context = recovery_context_from_prompt_error(error);
         let messages = context
             .chat_history
-            .expect("max-turns errors should expose their history");
+            .ok_or_else(|| anyhow::anyhow!("max-turns errors should expose their history"))?;
 
         assert_eq!(
             context.message,
@@ -93,6 +94,7 @@ mod tests {
             Message::User { content }
                 if matches!(content.first(), UserContent::Text(text) if text.text == "original request")
         ));
+        Ok(())
     }
 
     #[test]

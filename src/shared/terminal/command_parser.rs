@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
-use crate::{
-    prompts::summarization::summarization,
-    shared::{skills::SkillCatalog, terminal::TerminalIO},
-};
+use crate::shared::{skills::catalog::SkillCatalog, terminal::terminal_io::TerminalIO};
 
 #[derive(Debug)]
 pub(crate) enum CommandParserResult {
@@ -20,7 +17,7 @@ pub(crate) enum CommandParserResult {
     New,
 
     /// Context compact required
-    Compact(String),
+    Compact,
 
     /// Model change request
     AgentConfig,
@@ -160,9 +157,7 @@ impl CommandParser {
             Some(KnownCommand::Help) => self.handle_help(),
             Some(KnownCommand::Editor) => self.handle_editor(),
             Some(KnownCommand::New) => CommandParserResult::New,
-            Some(KnownCommand::Compact) => {
-                CommandParserResult::Compact(summarization().to_string())
-            }
+            Some(KnownCommand::Compact) => CommandParserResult::Compact,
             Some(KnownCommand::Agent) => CommandParserResult::AgentConfig,
             Some(KnownCommand::Goal) => self.handle_goal(None),
             None => CommandParserResult::Unknown,
@@ -175,20 +170,17 @@ mod tests {
     use std::sync::Arc;
 
     use super::{CommandParser, CommandParserResult};
-    use crate::{prompts::summarization::summarization, shared::terminal::TerminalIO};
+    use crate::shared::terminal::terminal_io::TerminalIO;
 
     fn parser() -> CommandParser {
         CommandParser::new(Arc::new(TerminalIO))
     }
 
     #[tokio::test]
-    async fn compact_command_carries_the_summarization_prompt() {
+    async fn compact_command_is_recognized() {
         let result = parser().parse("/compact".to_string()).await;
 
-        let CommandParserResult::Compact(prompt) = result else {
-            panic!("expected a compact command result");
-        };
-        assert_eq!(prompt, summarization());
+        assert!(matches!(result, CommandParserResult::Compact));
     }
 
     #[tokio::test]

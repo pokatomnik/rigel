@@ -2,17 +2,20 @@ use std::{path::PathBuf, sync::Arc};
 
 use clap::Args;
 use reqwest::Client;
-use rig::{Agent as RigAgent, providers::openai::CompletionModel};
+use rig::providers::openai::CompletionModel;
 
 use crate::{
     controllers::controller::Controller,
     shared::{
-        agent::{Agent, AgentConfig, AgentDependencies},
-        config::RigelConfig,
-        goal::GoalState,
-        history::{ChatHistory, History},
-        mcp_registry::McpRegistry,
-        terminal::TerminalIO,
+        agent::{
+            agent::{Agent, AgentDependencies, ConfiguredAgent},
+            agent_config::AgentConfig,
+        },
+        config::rigel_config::RigelConfig,
+        goal::goal_state::GoalState,
+        history::{chat_history::ChatHistory, history::History},
+        mcp_registry::registry::McpRegistry,
+        terminal::terminal_io::TerminalIO,
     },
     use_cases::chat::chat::Chat,
 };
@@ -82,7 +85,7 @@ impl ChatController {
         chat_history: Arc<ChatHistory<Arc<History>>>,
         deps: Arc<IndexControllerDeps>,
         reselect_mcp: bool,
-    ) -> anyhow::Result<RigAgent<CompletionModel>> {
+    ) -> anyhow::Result<ConfiguredAgent<CompletionModel>> {
         if reselect_mcp {
             deps.mcp_registry.reselect_tools().await;
         }
@@ -96,18 +99,23 @@ impl Controller<IndexControllerDeps> for ChatController {
         let deps = Arc::new(deps);
         let (history, chat_history) = History::bootstrap().await?;
         let chat_history = Arc::new(ChatHistory::new(chat_history, Arc::new(history)));
-        let agent = self
+        let configured_agent = self
             .create_agent(chat_history.clone(), deps.clone(), false)
             .await?;
 
         let controller = self.clone();
         let chat_history_clone = chat_history.clone();
         let deps_clone = deps.clone();
-        let chat = Chat::from_history(agent, deps.terminal_io(), chat_history, async move || {
-            controller
-                .create_agent(chat_history_clone.clone(), deps_clone.clone(), true)
-                .await
-        })
+        let chat = Chat::from_history(
+            configured_agent,
+            deps.terminal_io(),
+            chat_history,
+            async move || {
+                controller
+                    .create_agent(chat_history_clone.clone(), deps_clone.clone(), true)
+                    .await
+            },
+        )
         .with_goal_state(deps.goal_state());
 
         deps.terminal_io()

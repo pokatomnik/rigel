@@ -14,16 +14,20 @@ use super::{
 };
 
 use crate::{
+    entities::selected_model::SelectedModel,
     prompts::system::system_prompt,
     shared::{
-        goal::{GoalCompletionHook, GoalState},
+        goal::{goal_completion_hook::GoalCompletionHook, goal_state::GoalState},
         history::{
-            ChatHistory, History, HistoryPersistence, HistorySyncHook, NonPersistentHistory,
+            chat_history::ChatHistory,
+            history::History,
+            history_persistence::{HistoryPersistence, NonPersistentHistory},
+            history_sync::HistorySyncHook,
         },
-        mcp_registry::{McpRegistry, McpToolsExt},
-        recovery::ToolRecoveryHook,
-        response::InvalidResponseHook,
-        terminal::TerminalIO,
+        mcp_registry::registry::{McpRegistry, McpToolsExt},
+        recovery::tool_recovery::ToolRecoveryHook,
+        response::invalid_response::InvalidResponseHook,
+        terminal::terminal_io::TerminalIO,
         tool_permissions::{ToolPermissionCatalog, ToolPermissionHook},
     },
     tools::{
@@ -36,6 +40,21 @@ use crate::{
 const MAX_AGENT_TURNS: usize = 12;
 
 pub(crate) struct Agent;
+
+pub(crate) struct ConfiguredAgent<M: CompletionModelTrait> {
+    pub(crate) agent: RigAgent<M>,
+    pub(crate) max_context_tokens: Option<u64>,
+}
+
+impl<M: CompletionModelTrait> ConfiguredAgent<M> {
+    #[cfg(test)]
+    pub(crate) fn from_agent(agent: RigAgent<M>) -> Self {
+        Self {
+            agent,
+            max_context_tokens: None,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct AgentDependencies {
@@ -77,7 +96,7 @@ impl Agent {
         config: AgentConfig,
         chat_history: Arc<ChatHistory<NonPersistentHistory>>,
         deps: Arc<AgentDependencies>,
-    ) -> anyhow::Result<RigAgent<CompletionModel>> {
+    ) -> anyhow::Result<ConfiguredAgent<CompletionModel>> {
         Self::build_agent(
             config.with_tool_set(AgentToolSet::Subagent),
             chat_history,
@@ -91,7 +110,7 @@ impl Agent {
         config: AgentConfig,
         chat_history: Arc<ChatHistory<Arc<History>>>,
         deps: Arc<AgentDependencies>,
-    ) -> anyhow::Result<RigAgent<CompletionModel>> {
+    ) -> anyhow::Result<ConfiguredAgent<CompletionModel>> {
         Self::build_agent(
             config.with_tool_set(AgentToolSet::Orchestrator),
             chat_history,
@@ -104,7 +123,7 @@ impl Agent {
         config: AgentConfig,
         chat_history: Arc<ChatHistory<Arc<History>>>,
         deps: Arc<AgentDependencies>,
-    ) -> anyhow::Result<RigAgent<CompletionModel>> {
+    ) -> anyhow::Result<ConfiguredAgent<CompletionModel>> {
         Self::build_agent(config.with_tool_set(AgentToolSet::Chat), chat_history, deps).await
     }
 
@@ -112,23 +131,24 @@ impl Agent {
         config: AgentConfig,
         chat_history: Arc<ChatHistory<P>>,
         deps: Arc<AgentDependencies>,
-    ) -> anyhow::Result<RigAgent<CompletionModel>>
+    ) -> anyhow::Result<ConfiguredAgent<CompletionModel>>
     where
         P: HistoryPersistence,
     {
         let client = Self::build_client(&config, &deps)?;
-        let model_id = match config.model_id.clone() {
-            Some(model_id) => model_id,
+        let selected_model = match config.model_id.clone() {
+            Some(model_id) => SelectedModel::new(model_id, config.model_context_length),
             None => client.select_model(deps.terminal_io.clone()).await?,
         };
-        let config = config.with_model_id(model_id.clone())?;
+        let mut config = config.with_model_id(selected_model.id.clone())?;
+        config.model_context_length = selected_model.context_length;
         let system_prompt = system_prompt().await;
 
         let mcp_tools = deps.mcp_registry.select_tools().await;
         let mut permission_catalog = ToolPermissionCatalog::default();
         let builder = client
             .completions_api()
-            .agent(model_id)
+            .agent(selected_model.id)
             .preamble(system_prompt.as_str());
         let builder = config.apply_additional_params(builder);
         let tool_context = ToolBuildContext {
@@ -145,10 +165,13 @@ impl Agent {
             ToolPermissionHook::new(deps.terminal_io.clone(), permission_catalog),
         );
 
-        Ok(builder
-            .add_hook(ToolRecoveryHook)
-            .default_max_turns(MAX_AGENT_TURNS)
-            .build())
+        Ok(ConfiguredAgent {
+            agent: builder
+                .add_hook(ToolRecoveryHook)
+                .default_max_turns(MAX_AGENT_TURNS)
+                .build(),
+            max_context_tokens: selected_model.context_length,
+        })
     }
 
     fn add_hooks<M, P>(

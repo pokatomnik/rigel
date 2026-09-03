@@ -1,1 +1,1 @@
-pub(crate) mod model_selector;
+pub mod model_selector;

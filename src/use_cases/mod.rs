@@ -1,3 +1,3 @@
-pub(crate) mod chat;
-pub(crate) mod model_selector;
-pub(crate) mod subagent;
+pub mod chat;
+pub mod model_selector;
+pub mod subagent;

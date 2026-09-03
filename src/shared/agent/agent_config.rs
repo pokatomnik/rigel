@@ -3,7 +3,7 @@ use std::sync::Arc;
 use rig::{agent::AgentBuilder, completion::CompletionModel};
 use serde_json::Value;
 
-use crate::shared::config::RigelConfig;
+use crate::shared::config::rigel_config::RigelConfig;
 
 use super::agent_tool_set::AgentToolSet;
 
@@ -13,6 +13,7 @@ pub(crate) struct AgentConfig {
     pub(super) api_key: Option<String>,
     pub(super) tool_set: AgentToolSet,
     pub(super) model_id: Option<String>,
+    pub(super) model_context_length: Option<u64>,
     pub(super) additional_params: Option<Value>,
     config: Arc<RigelConfig>,
 }
@@ -24,6 +25,7 @@ impl AgentConfig {
             api_key: config.api_key(),
             tool_set: AgentToolSet::Chat,
             model_id: None,
+            model_context_length: None,
             additional_params: None,
             config,
         }
@@ -32,6 +34,7 @@ impl AgentConfig {
     pub(crate) fn with_model_id(mut self, model_id: String) -> anyhow::Result<Self> {
         self.additional_params = self.config.model_params(model_id.as_str())?;
         self.model_id = Some(model_id);
+        self.model_context_length = None;
         Ok(self)
     }
 
@@ -58,7 +61,7 @@ mod tests {
     use rig::{AgentBuilder, completion::Prompt, test_utils::MockCompletionModel};
 
     use super::{AgentConfig, AgentToolSet};
-    use crate::shared::config::RigelConfig;
+    use crate::shared::config::rigel_config::RigelConfig;
 
     #[test]
     fn agent_config_selects_each_declared_tool_set() {

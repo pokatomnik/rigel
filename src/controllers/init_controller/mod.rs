@@ -1,1 +1,1 @@
-pub(crate) mod init_controller;
+pub mod init_controller;

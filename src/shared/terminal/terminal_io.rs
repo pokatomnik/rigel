@@ -3,7 +3,7 @@ use std::{
     io::{self, Write},
 };
 
-use crate::entities::tool_confirm_result::ToolConfirmResult;
+use crate::entities::{context_usage::ContextUsage, tool_confirm_result::ToolConfirmResult};
 
 #[derive(Default)]
 pub(crate) struct TerminalIO;
@@ -19,6 +19,11 @@ impl TerminalIO {
 
     pub fn eprintln_gray(&self, msg: &str) {
         let style = console::Style::new().black().bright().for_stderr();
+        eprintln!("{}", style.apply_to(msg));
+    }
+
+    pub fn eprintln_red(&self, msg: &str) {
+        let style = console::Style::new().red().for_stderr();
         eprintln!("{}", style.apply_to(msg));
     }
 
@@ -45,8 +50,8 @@ impl TerminalIO {
         let _ = io::stdout().flush();
     }
 
-    pub fn print_prompt_prefix(&self) {
-        self.eprint_gray("> ");
+    pub fn print_prompt_prefix(&self, context_usage: ContextUsage) {
+        self.eprint_gray(context_usage.display_prompt().as_str());
     }
 
     pub fn confirm_tool_call(&self, prompt: &str) -> ToolConfirmResult {
@@ -86,8 +91,8 @@ impl TerminalIO {
         anyhow::bail!("No item selected")
     }
 
-    pub fn readline(&self) -> anyhow::Result<String> {
-        self.print_prompt_prefix();
+    pub fn readline(&self, context_usage: ContextUsage) -> anyhow::Result<String> {
+        self.print_prompt_prefix(context_usage);
         let mut line = String::new();
         io::stdin().read_line(&mut line)?;
         Ok(line.trim().to_string())

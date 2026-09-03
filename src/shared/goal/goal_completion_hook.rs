@@ -3,7 +3,7 @@ use std::sync::Arc;
 use rig::agent::{AgentHook, CompletionCallAction, CompletionCallEvent, HookContext, RequestPatch};
 use rig::message::ToolChoice;
 
-use super::GoalState;
+use super::goal_state::GoalState;
 
 /// Prevents another tool call after the completion event in the same run.
 pub(crate) struct GoalCompletionHook {

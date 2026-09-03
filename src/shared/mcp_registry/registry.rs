@@ -16,7 +16,7 @@ use rmcp::{
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
-use crate::shared::config::RigelConfig;
+use crate::shared::config::rigel_config::RigelConfig;
 use crate::shared::tool_permissions::ToolPermissionCatalog;
 
 use super::http_config::HttpConfig;
