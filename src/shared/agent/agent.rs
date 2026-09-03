@@ -108,7 +108,6 @@ impl Agent {
         };
         let config = config.with_model_id(model_id.clone());
         let system_prompt = system_prompt().await;
-        println!("MCP tools loaded: {}", deps.mcp_registry.tools().len());
 
         let mcp_tools = deps.mcp_registry.select_tools().await;
         let mut permission_catalog = ToolPermissionCatalog::default();
