@@ -146,7 +146,7 @@ impl RigelConfig {
     fn validate_model_params(&self) -> anyhow::Result<()> {
         for (model_id, model) in &self.models {
             Self::validate_param_names(model_id, &model.params)?;
-            toml_table_to_json(&model.params)?;
+            serde_json::to_value(&model.params)?;
         }
         Ok(())
     }
@@ -171,7 +171,7 @@ impl RigelConfig {
             return Ok(None);
         }
         Self::validate_param_names(model_id, &model.params)?;
-        Ok(Some(toml_table_to_json(&model.params)?))
+        Ok(Some(serde_json::to_value(&model.params)?))
     }
 
     pub fn base_url(&self) -> &str {
@@ -201,10 +201,6 @@ impl RigelConfig {
         self.env_key = Some(env_key.into());
         self
     }
-}
-
-fn toml_table_to_json(table: &toml::Table) -> anyhow::Result<Value> {
-    Ok(serde_json::to_value(table)?)
 }
 
 #[cfg(test)]
