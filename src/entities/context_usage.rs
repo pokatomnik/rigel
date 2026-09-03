@@ -21,10 +21,6 @@ impl ContextUsage {
         Self::new(used_tokens, max_context_tokens)
     }
 
-    pub(crate) const fn used_tokens(self) -> Option<u64> {
-        self.used_tokens
-    }
-
     pub(crate) const fn max_context_tokens(self) -> Option<u64> {
         self.max_context_tokens
     }
@@ -42,13 +38,6 @@ impl ContextUsage {
     pub(crate) fn should_compact(self) -> bool {
         self.ratio()
             .is_some_and(|ratio| ratio >= COMPACTION_THRESHOLD)
-    }
-
-    pub(crate) fn display_pair(self) -> (String, String) {
-        (
-            Self::format_token_count(self.used_tokens()),
-            Self::format_token_count(self.max_context_tokens()),
-        )
     }
 
     pub(crate) fn display_prompt(self) -> String {
@@ -102,34 +91,10 @@ mod tests {
         ];
         for (value, expected) in values {
             assert_eq!(
-                ContextUsage::new(Some(value), None).display_pair().0,
-                expected
+                ContextUsage::new(Some(value), None).display_prompt(),
+                format!("{expected} > ")
             );
         }
-    }
-
-    #[test]
-    fn formats_all_known_and_unknown_combinations() {
-        assert_eq!(
-            ContextUsage::new(Some(123), Some(4_000)).display_pair(),
-            ("123".to_string(), "4K".to_string())
-        );
-        assert_eq!(
-            ContextUsage::new(Some(123_000), Some(1_000_000)).display_pair(),
-            ("123K".to_string(), "1M".to_string())
-        );
-        assert_eq!(
-            ContextUsage::new(None, Some(1_000_000)).display_pair(),
-            ("?".to_string(), "1M".to_string())
-        );
-        assert_eq!(
-            ContextUsage::new(Some(123_000), None).display_pair(),
-            ("123K".to_string(), "?".to_string())
-        );
-        assert_eq!(
-            ContextUsage::new(None, None).display_pair(),
-            ("?".to_string(), "?".to_string())
-        );
     }
 
     #[test]
@@ -168,10 +133,8 @@ mod tests {
 
     #[test]
     fn zero_total_usage_is_unknown() {
-        assert_eq!(
-            ContextUsage::from_usage(Usage::new(), Some(1_000)).used_tokens(),
-            None
-        );
+        let context_usage = ContextUsage::from_usage(Usage::new(), Some(1_000));
+        assert_eq!(context_usage.used_tokens, None);
     }
 
     #[test]
@@ -183,9 +146,7 @@ mod tests {
         usage.cached_input_tokens = 50;
         usage.cache_creation_input_tokens = 25;
 
-        assert_eq!(
-            ContextUsage::from_usage(usage, Some(1_000)).used_tokens(),
-            Some(800)
-        );
+        let context_usage = ContextUsage::from_usage(usage, Some(1_000));
+        assert_eq!(context_usage.used_tokens, Some(800));
     }
 }
