@@ -1,6 +1,6 @@
 use clap::Args;
 
-use crate::{controllers::controller::Controller, shared::config::RigelConfig};
+use crate::{controllers::controller::Controller, shared::config::rigel_config::RigelConfig};
 
 #[derive(Args, Clone, Debug)]
 #[clap(rename_all = "kebab-case")]

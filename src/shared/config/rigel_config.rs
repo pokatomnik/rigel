@@ -9,8 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::shared::{
-    config::{CONFIG_FILE_NAME, RIGEL_DIRECTORY},
-    mcp_registry::ServerConfig,
+    config::consts::{CONFIG_FILE_NAME, RIGEL_DIRECTORY},
+    mcp_registry::server_config::ServerConfig,
 };
 
 #[derive(Deserialize, Serialize, Default)]

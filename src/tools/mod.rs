@@ -1,6 +1,6 @@
-pub(crate) mod contracts;
-pub(crate) mod revision;
-pub(crate) mod tool_fetch_url;
-pub(crate) mod tool_mark_goal_complete;
-pub(crate) mod tool_run_command;
-pub(crate) mod tool_spawn_subagent;
+pub mod contracts;
+pub mod revision;
+pub mod tool_fetch_url;
+pub mod tool_mark_goal_complete;
+pub mod tool_run_command;
+pub mod tool_spawn_subagent;

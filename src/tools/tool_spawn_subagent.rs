@@ -11,13 +11,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     shared::{
-        agent::{Agent, AgentConfig, AgentDependencies},
-        history::{ChatHistory, NonPersistentHistory},
-        terminal::TerminalIO,
+        agent::{
+            agent::{Agent, AgentDependencies},
+            agent_config::AgentConfig,
+        },
+        history::{chat_history::ChatHistory, history_persistence::NonPersistentHistory},
+        terminal::terminal_io::TerminalIO,
         tool_permissions::{PermissionRequirement, ToolPermissionMetadata},
     },
     tools::contracts::error_codes,
-    use_cases::subagent::subagent::Subagent,
+    use_cases::subagent::subagent::{Subagent, SubagentContext},
 };
 
 #[derive(Deserialize)]
@@ -57,8 +60,13 @@ impl SpawnSubagent {
         config: AgentConfig,
     ) -> anyhow::Result<Subagent<CompletionModel>> {
         let chat_history = Arc::new(ChatHistory::new(Vec::new(), NonPersistentHistory));
-        let agent = Agent::new_subagent(config, chat_history.clone(), dependencies).await?;
-        Ok(Subagent::with_history(agent, terminal_io, chat_history))
+        let configured_agent =
+            Agent::new_subagent(config, chat_history.clone(), dependencies).await?;
+        Ok(Subagent::with_history_context(
+            configured_agent.agent,
+            terminal_io,
+            SubagentContext::new(chat_history, configured_agent.max_context_tokens),
+        ))
     }
 
     fn parameters_schema() -> serde_json::Value {

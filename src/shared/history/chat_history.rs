@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use rig::message::Message;
 use tokio::sync::Mutex;
 
@@ -28,6 +30,7 @@ where
 {
     messages: Mutex<Vec<Message>>,
     persistence: P,
+    compaction_in_progress: AtomicBool,
 }
 
 impl<P> ChatHistory<P>
@@ -38,7 +41,20 @@ where
         Self {
             messages: Mutex::new(messages),
             persistence,
+            compaction_in_progress: AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn begin_compaction(&self) {
+        self.compaction_in_progress.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn end_compaction(&self) {
+        self.compaction_in_progress.store(false, Ordering::SeqCst);
+    }
+
+    pub(crate) fn is_compaction_in_progress(&self) -> bool {
+        self.compaction_in_progress.load(Ordering::SeqCst)
     }
 
     pub(crate) async fn snapshot(&self) -> Vec<Message> {

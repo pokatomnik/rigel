@@ -72,6 +72,19 @@ During `rigel chat`, the following commands are available:
 - `/agent` — change agent preferences
 - `/goal <text>` — pursue the exact goal autonomously until the model calls `mark_goal_complete`
 
+After a successful provider request, Rigel automatically compacts the chat or
+subagent history when the last request used at least 80% of the selected
+model's context. It uses the provider's `total_tokens` and the selected model's
+explicit `context_length` from `/models`; if either value is unavailable, the
+automatic compaction is skipped. After compaction, the history is replaced by
+one assistant summary message and the next request starts with unknown usage
+again.
+
+The prompt displays usage as `used/limit >`, using `K`, `M`, or `B` suffixes
+for large values. If only the context limit is known, the prompt shows `?/1M >`;
+if only usage is known, it shows `123K >`; if neither is known, it shows `> `.
+`/compact` remains available for manual compaction and uses the same summary behavior.
+
 While a goal is active, Rigel does not read new user commands. After each completed model run it
 sends an internal continuation prompt containing the original goal. These follow-up runs have the
 same 12-turn limit as an ordinary run, but the number of consecutive follow-up runs is unlimited.

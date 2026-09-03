@@ -1,4 +1,4 @@
-use crate::shared::recovery::ToolRecoveryStatus;
+use crate::shared::recovery::tool_recovery::ToolRecoveryStatus;
 
 #[derive(Default)]
 pub(crate) struct StreamOutputState {
@@ -77,7 +77,7 @@ impl StreamOutputState {
 #[cfg(test)]
 mod tests {
     use super::StreamOutputState;
-    use crate::shared::recovery::ToolRecoveryStatus;
+    use crate::shared::recovery::tool_recovery::ToolRecoveryStatus;
 
     #[test]
     fn reasoning_without_answer_requires_recovery() {

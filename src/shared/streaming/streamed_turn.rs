@@ -3,27 +3,39 @@ use std::sync::Arc;
 
 use rig::{
     Agent, OneOrMany,
-    agent::{MultiTurnStreamItem, PromptResponse, StreamingError},
-    completion::CompletionModel,
+    agent::{CompletionCall, MultiTurnStreamItem, PromptResponse, StreamingError},
+    completion::{CompletionModel, Usage},
     message::{Message, UserContent},
     streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
 };
 use tokio::sync::Mutex;
 
-use crate::shared::{
-    history::{ChatHistory, HISTORY_SYNC_ERROR_PREFIX, HistoryPersistence, HistoryUpdate},
-    recovery::MAX_INVALID_TOOL_CALL_ATTEMPTS,
-    recovery::recovery_context_from_streaming_error,
-    streaming::{
-        StreamOutputState, ToolResultRecord, TurnJournal, print_reasoning, print_reasoning_block,
-        print_text, print_tool_call, print_tool_result,
+use crate::{
+    entities::context_usage::ContextUsage,
+    shared::{
+        history::{
+            chat_history::{ChatHistory, HistoryUpdate},
+            history_persistence::HistoryPersistence,
+            history_sync::HISTORY_SYNC_ERROR_PREFIX,
+        },
+        recovery::recovery_error::recovery_context_from_streaming_error,
+        recovery::tool_recovery::MAX_INVALID_TOOL_CALL_ATTEMPTS,
+        streaming::{
+            message_output::{
+                print_reasoning, print_reasoning_block, print_text, print_tool_call,
+                print_tool_result,
+            },
+            stream_output_state::StreamOutputState,
+            turn_journal::{ToolResultRecord, TurnJournal},
+        },
+        terminal::terminal_io::TerminalIO,
     },
-    terminal::TerminalIO,
 };
 
 pub(crate) struct StreamCompletion {
     output: String,
     output_state: StreamOutputState,
+    context_usage: ContextUsage,
 }
 
 impl StreamCompletion {
@@ -42,11 +54,50 @@ impl StreamCompletion {
     pub(crate) fn requires_answer_recovery(&self) -> bool {
         self.output_state.requires_answer_recovery()
     }
+
+    pub(crate) fn context_usage(&self) -> ContextUsage {
+        self.context_usage
+    }
 }
 
 pub(crate) enum StreamRunOutcome {
     Completed(StreamCompletion),
-    Failed(String),
+    Failed(StreamFailure),
+}
+
+pub(crate) struct StreamFailure {
+    error: String,
+    context_usage: ContextUsage,
+}
+
+impl StreamFailure {
+    pub(crate) fn error(&self) -> &str {
+        self.error.as_str()
+    }
+
+    pub(crate) fn context_usage(&self) -> ContextUsage {
+        self.context_usage
+    }
+}
+
+pub(crate) struct StreamedTurnContext<'a, P>
+where
+    P: HistoryPersistence,
+{
+    history: &'a ChatHistory<P>,
+    max_context_tokens: Option<u64>,
+}
+
+impl<'a, P> StreamedTurnContext<'a, P>
+where
+    P: HistoryPersistence,
+{
+    pub(crate) fn new(history: &'a ChatHistory<P>, max_context_tokens: Option<u64>) -> Self {
+        Self {
+            history,
+            max_context_tokens,
+        }
+    }
 }
 
 /// Executes one streamed model turn and commits its durable boundaries.
@@ -58,6 +109,7 @@ where
     agent: Arc<Mutex<Agent<CM>>>,
     terminal_io: &'a TerminalIO,
     history: &'a ChatHistory<P>,
+    max_context_tokens: Option<u64>,
 }
 
 impl<'a, CM, P> StreamedTurn<'a, CM, P>
@@ -65,15 +117,25 @@ where
     CM: CompletionModel + 'static,
     P: HistoryPersistence,
 {
+    #[cfg(test)]
     pub(crate) fn new(
         agent: Arc<Mutex<Agent<CM>>>,
         terminal_io: &'a TerminalIO,
         history: &'a ChatHistory<P>,
     ) -> Self {
+        Self::with_context(agent, terminal_io, StreamedTurnContext::new(history, None))
+    }
+
+    pub(crate) fn with_context(
+        agent: Arc<Mutex<Agent<CM>>>,
+        terminal_io: &'a TerminalIO,
+        context: StreamedTurnContext<'a, P>,
+    ) -> Self {
         Self {
             agent,
             terminal_io,
-            history,
+            history: context.history,
+            max_context_tokens: context.max_context_tokens,
         }
     }
 
@@ -113,23 +175,31 @@ where
 
     async fn finish(
         &self,
-        progress: StreamProgress,
+        mut progress: StreamProgress,
         base: Vec<Message>,
     ) -> anyhow::Result<StreamRunOutcome> {
-        if let Some(error) = progress.stream_error {
-            return self.finish_error(error).await;
+        if let Some(error) = progress.stream_error.take() {
+            return self
+                .finish_error(error, progress.context_usage(self.max_context_tokens))
+                .await;
         }
-        let Some(response) = progress.final_response else {
-            return Ok(StreamRunOutcome::Failed(
-                "model stream ended without a final response".to_string(),
-            ));
+        let Some(response) = progress.final_response.take() else {
+            return Ok(StreamRunOutcome::Failed(StreamFailure {
+                error: "model stream ended without a final response".to_string(),
+                context_usage: progress.context_usage(self.max_context_tokens),
+            }));
         };
 
-        self.finish_response(response, progress.output_state, base)
+        let context_usage = progress.context_usage(self.max_context_tokens);
+        self.finish_response(response, progress.output_state, context_usage, base)
             .await
     }
 
-    async fn finish_error(&self, error: StreamingError) -> anyhow::Result<StreamRunOutcome> {
+    async fn finish_error(
+        &self,
+        error: StreamingError,
+        context_usage: ContextUsage,
+    ) -> anyhow::Result<StreamRunOutcome> {
         let context = recovery_context_from_streaming_error(error);
         if context.message.contains(HISTORY_SYNC_ERROR_PREFIX) {
             anyhow::bail!("{}", context.message);
@@ -139,20 +209,25 @@ where
                 .update(HistoryUpdate::Replace(messages))
                 .await?;
         }
-        Ok(StreamRunOutcome::Failed(context.message))
+        Ok(StreamRunOutcome::Failed(StreamFailure {
+            error: context.message,
+            context_usage,
+        }))
     }
 
     async fn finish_response(
         &self,
         response: PromptResponse,
         output_state: StreamOutputState,
+        context_usage: ContextUsage,
         mut base: Vec<Message>,
     ) -> anyhow::Result<StreamRunOutcome> {
         let output = response.output().to_string();
         let Some(streamed) = response.messages else {
-            return Ok(StreamRunOutcome::Failed(
-                "model final response omitted canonical chat history".to_string(),
-            ));
+            return Ok(StreamRunOutcome::Failed(StreamFailure {
+                error: "model final response omitted canonical chat history".to_string(),
+                context_usage,
+            }));
         };
         if !streamed.is_empty() {
             base.extend(streamed);
@@ -162,6 +237,7 @@ where
         Ok(StreamRunOutcome::Completed(StreamCompletion {
             output,
             output_state,
+            context_usage,
         }))
     }
 }
@@ -171,6 +247,7 @@ struct StreamProgress {
     output_state: StreamOutputState,
     final_response: Option<PromptResponse>,
     stream_error: Option<StreamingError>,
+    last_usage: Option<Usage>,
     journal: TurnJournal,
 }
 
@@ -180,8 +257,13 @@ impl StreamProgress {
             output_state: StreamOutputState::default(),
             final_response: None,
             stream_error: None,
+            last_usage: None,
             journal: TurnJournal::new(base, prompt),
         }
+    }
+
+    fn context_usage(&self, max_context_tokens: Option<u64>) -> ContextUsage {
+        ContextUsage::from_usage(self.last_usage.unwrap_or_default(), max_context_tokens)
     }
 
     async fn accept<R, P>(
@@ -220,7 +302,8 @@ impl StreamProgress {
             MultiTurnStreamItem::StreamUserItem(content) => {
                 self.handle_user(content, terminal_io, history).await?;
             }
-            MultiTurnStreamItem::CompletionCall(_) => {
+            MultiTurnStreamItem::CompletionCall(CompletionCall { usage, .. }) => {
+                self.last_usage = Some(usage);
                 self.journal.rebase(history.snapshot().await);
             }
             MultiTurnStreamItem::ModelTurnRetried { .. } => self.output_state.retry_answer(),
@@ -310,18 +393,23 @@ mod tests {
     use rig::{
         AgentBuilder,
         agent::{AgentHook, HookContext, ModelTurnAction, ModelTurnFinished},
+        completion::Usage,
         message::{AssistantContent, Message, UserContent},
         test_utils::{MockAddTool, MockCompletionModel, MockStreamEvent},
     };
     use tokio::sync::Mutex;
 
-    use super::{StreamRunOutcome, StreamedTurn};
+    use super::{StreamRunOutcome, StreamedTurn, StreamedTurnContext};
     use crate::{
-        shared::terminal::TerminalIO,
+        entities::context_usage::ContextUsage,
+        shared::terminal::terminal_io::TerminalIO,
         shared::{
-            history::{ChatHistory, HistoryPersistence, HistorySyncHook},
-            recovery::ToolRecoveryHook,
-            response::InvalidResponseHook,
+            history::{
+                chat_history::ChatHistory, history_persistence::HistoryPersistence,
+                history_sync::HistorySyncHook,
+            },
+            recovery::tool_recovery::ToolRecoveryHook,
+            response::invalid_response::InvalidResponseHook,
         },
     };
 
@@ -377,6 +465,50 @@ mod tests {
         let outcome = turn.run("prompt".to_string(), Vec::new()).await?;
         ensure!(matches!(outcome, StreamRunOutcome::Completed(_)));
         ensure!(snapshots.lock().await.len() == 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn completion_uses_the_last_provider_call_usage() -> Result<()> {
+        let mut first_usage = Usage::new();
+        first_usage.total_tokens = 300;
+        let mut last_usage = Usage::new();
+        last_usage.total_tokens = 800;
+        let model = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::tool_call("call-1", "add", serde_json::json!({"x": 1, "y": 2})),
+                MockStreamEvent::final_response(first_usage),
+            ],
+            vec![
+                MockStreamEvent::text("answer"),
+                MockStreamEvent::final_response(last_usage),
+            ],
+        ]);
+        let history = ChatHistory::new(
+            Vec::new(),
+            crate::shared::history::history_persistence::NonPersistentHistory,
+        );
+        let agent = AgentBuilder::new(model)
+            .tool(MockAddTool)
+            .default_max_turns(3)
+            .build();
+        let turn = StreamedTurn::with_context(
+            Arc::new(Mutex::new(agent)),
+            &TerminalIO,
+            StreamedTurnContext::new(&history, Some(1_000)),
+        );
+
+        let outcome = turn.run("prompt".to_string(), Vec::new()).await?;
+        let StreamRunOutcome::Completed(completion) = outcome else {
+            let StreamRunOutcome::Failed(failure) = outcome else {
+                anyhow::bail!("expected a completed stream")
+            };
+            anyhow::bail!("expected a completed stream: {}", failure.error())
+        };
+        ensure!(
+            completion.context_usage() == ContextUsage::new(Some(800), Some(1_000)),
+            "aggregated or first-call usage was used"
+        );
         Ok(())
     }
 

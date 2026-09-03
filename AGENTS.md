@@ -8,6 +8,7 @@ Rigel is a Rust 2024 CLI for OpenAI-compatible model APIs. Entry point: `src/mai
 - `src/controllers/` — request orchestration
 - `src/use_cases/` — application workflows
 - `src/shared/` — shared terminal behavior
+- `src/entities/` — domain entities and value objects
 - `src/prompts/` — LLM prompts and text
 - `src/tools/` — agent-callable tools
 
@@ -17,10 +18,20 @@ on composition, interpolation, and prompt behavior.
 
 Each module exports via its nearest `mod.rs`. Dependencies in `Cargo.toml`, reproducible versions in `Cargo.lock`.
 
+Declare every production submodule in its nearest `mod.rs` using `pub mod`.
+The crate root (`main.rs`) is the only exception for top-level module declarations.
+Do not declare production submodules from implementation files. Do not re-export
+types with `pub use` or `pub(crate) use`; import them through their declaring
+module path, such as `use crate::entities::selected_model::SelectedModel`.
+
 - Keep every directory to at most seven files, excluding `mod.rs` from the count.
   Before creating an eighth file, reconsider the decomposition: move a coherent
   group of related files into a subdirectory and export only the required items
   from that subdirectory's `mod.rs`.
+
+Domain entities and value objects must live in `src/entities/`. Do not place
+domain entities in `src/shared/`; that directory is reserved for cross-cutting
+technical infrastructure and shared application mechanisms.
 
 ## Chat Run Loop Architecture
 

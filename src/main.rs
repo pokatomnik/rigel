@@ -6,16 +6,19 @@ use reqwest::Client;
 use crate::{
     cmd::{cli::Cli, commands::Commands},
     controllers::{chat_controller::chat_controller::IndexControllerDeps, controller::Controller},
-    shared::{config::RigelConfig, mcp_registry::McpRegistry, terminal::TerminalIO},
+    shared::{
+        config::rigel_config::RigelConfig, mcp_registry::registry::McpRegistry,
+        terminal::terminal_io::TerminalIO,
+    },
 };
 
-mod cmd;
-mod controllers;
-mod entities;
-mod prompts;
-mod shared;
-mod tools;
-mod use_cases;
+pub mod cmd;
+pub mod controllers;
+pub mod entities;
+pub mod prompts;
+pub mod shared;
+pub mod tools;
+pub mod use_cases;
 
 const GLOBAL_TOOL_TIMEOUT: Duration = Duration::from_secs(5);
 
