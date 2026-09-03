@@ -9,6 +9,7 @@ use crate::{
     shared::{
         agent::{Agent, AgentConfig, AgentDependencies},
         config::RigelConfig,
+        goal::GoalState,
         history::{ChatHistory, History},
         mcp_registry::McpRegistry,
         terminal::TerminalIO,
@@ -21,6 +22,7 @@ pub(crate) struct IndexControllerDeps {
     terminal_io: Arc<TerminalIO>,
     http_client: Arc<Client>,
     mcp_registry: Arc<McpRegistry>,
+    goal_state: Arc<GoalState>,
 }
 
 impl IndexControllerDeps {
@@ -33,6 +35,7 @@ impl IndexControllerDeps {
             terminal_io,
             http_client,
             mcp_registry,
+            goal_state: Arc::new(GoalState::new()),
         }
     }
 
@@ -42,10 +45,15 @@ impl IndexControllerDeps {
             self.http_client.clone(),
             self.mcp_registry.clone(),
         )
+        .with_goal_state(self.goal_state.clone())
     }
 
     fn terminal_io(&self) -> Arc<TerminalIO> {
         self.terminal_io.clone()
+    }
+
+    fn goal_state(&self) -> Arc<GoalState> {
+        self.goal_state.clone()
     }
 }
 
@@ -99,7 +107,8 @@ impl Controller<IndexControllerDeps> for ChatController {
             controller
                 .create_agent(chat_history_clone.clone(), deps_clone.clone(), true)
                 .await
-        });
+        })
+        .with_goal_state(deps.goal_state());
 
         deps.terminal_io()
             .eprintln(include_str!("./welcome_message.txt"));

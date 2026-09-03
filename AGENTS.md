@@ -11,6 +11,10 @@ Rigel is a Rust 2024 CLI for OpenAI-compatible model APIs. Entry point: `src/mai
 - `src/prompts/` — LLM prompts and text
 - `src/tools/` — agent-callable tools
 
+Keep static model-facing prompt text in Markdown files under `src/prompts/` and
+include it at compile time with `include_str!`. Keep Rust prompt modules focused
+on composition, interpolation, and prompt behavior.
+
 Each module exports via its nearest `mod.rs`. Dependencies in `Cargo.toml`, reproducible versions in `Cargo.lock`.
 
 - Keep every directory to at most seven files, excluding `mod.rs` from the count.

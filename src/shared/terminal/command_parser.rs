@@ -25,6 +25,9 @@ pub(crate) enum CommandParserResult {
     /// Model change request
     AgentConfig,
 
+    /// Start pursuing a goal.
+    Goal(String),
+
     /// Unknown command — user typed `/something` but no matching command exists.
     Unknown,
 }
@@ -43,6 +46,7 @@ enum KnownCommand {
     New,
     Compact,
     Agent,
+    Goal,
 }
 
 impl KnownCommand {
@@ -55,6 +59,7 @@ impl KnownCommand {
             "new" => Some(Self::New),
             "compact" => Some(Self::Compact),
             "agent" => Some(Self::Agent),
+            "goal" => Some(Self::Goal),
             _ => None,
         }
     }
@@ -75,6 +80,8 @@ impl CommandParser {
             .eprintln("/compact - compact dialog context");
         self.terminal_io
             .eprintln("/agent - change agent preferences");
+        self.terminal_io
+            .eprintln("/goal <text> - pursue a goal until it is completed");
 
         CommandParserResult::CommandContinue
     }
@@ -117,15 +124,33 @@ impl CommandParser {
 
     pub async fn parse(&self, raw_input: String) -> CommandParserResult {
         let command_input = raw_input.trim_start();
-        let Some(command_name) = Self::command_name(command_input) else {
+        let Some((command_name, arguments)) = Self::command_parts(command_input) else {
             return CommandParserResult::Prompt(raw_input, false);
         };
-        self.handle_command(KnownCommand::from_name(command_name.as_str()))
-            .await
+        let command = KnownCommand::from_name(command_name.as_str());
+        match command {
+            Some(KnownCommand::Goal) => self.handle_goal(arguments),
+            Some(_) if arguments.is_some() => CommandParserResult::Unknown,
+            _ => self.handle_command(command).await,
+        }
     }
 
-    fn command_name(input: &str) -> Option<String> {
-        Some(input.strip_prefix('/')?.to_ascii_lowercase())
+    fn command_parts(input: &str) -> Option<(String, Option<&str>)> {
+        let command = input.strip_prefix('/')?;
+        let Some(separator) = command.find(char::is_whitespace) else {
+            return Some((command.to_ascii_lowercase(), None));
+        };
+        let (name, arguments) = command.split_at(separator);
+        Some((name.to_ascii_lowercase(), Some(arguments.trim_start())))
+    }
+
+    fn handle_goal(&self, arguments: Option<&str>) -> CommandParserResult {
+        let Some(goal) = arguments.filter(|goal| !goal.trim().is_empty()) else {
+            self.terminal_io
+                .eprintln("Usage: /goal <text> (the goal text is required)");
+            return CommandParserResult::CommandContinue;
+        };
+        CommandParserResult::Goal(goal.to_string())
     }
 
     async fn handle_command(&self, command: Option<KnownCommand>) -> CommandParserResult {
@@ -139,6 +164,7 @@ impl CommandParser {
                 CommandParserResult::Compact(summarization().to_string())
             }
             Some(KnownCommand::Agent) => CommandParserResult::AgentConfig,
+            Some(KnownCommand::Goal) => self.handle_goal(None),
             None => CommandParserResult::Unknown,
         }
     }
@@ -194,6 +220,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn goal_command_keeps_the_text_after_its_name() {
+        let result = parser()
+            .parse("/goal inspect  the repository carefully".to_string())
+            .await;
+
+        assert!(matches!(
+            result,
+            CommandParserResult::Goal(goal) if goal == "inspect  the repository carefully"
+        ));
+    }
+
+    #[tokio::test]
+    async fn goal_command_accepts_leading_whitespace_and_case_variants() {
+        for input in [
+            " /GOAL inspect the repository",
+            "\t/GoAl inspect the repository",
+        ] {
+            let result = parser().parse(input.to_string()).await;
+
+            assert!(
+                matches!(result, CommandParserResult::Goal(goal) if goal == "inspect the repository")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_goal_stays_in_the_command_loop() {
+        for input in ["/goal", "/goal   ", "/goal\t"] {
+            let result = parser().parse(input.to_string()).await;
+
+            assert!(matches!(result, CommandParserResult::CommandContinue));
+        }
+    }
+
+    #[tokio::test]
     async fn help_command_accepts_leading_whitespace() {
         for input in ["/help", "\t/help", " /help", "\t /help"] {
             let result = parser().parse(input.to_string()).await;
@@ -224,7 +285,7 @@ mod tests {
     #[test]
     fn command_names_are_case_insensitive() {
         for command in ["/SKILLS", "/SkIlLs"] {
-            let Some(name) = CommandParser::command_name(command) else {
+            let Some((name, _)) = CommandParser::command_parts(command) else {
                 panic!("expected a valid command name");
             };
 
@@ -237,10 +298,10 @@ mod tests {
 
     #[test]
     fn skills_alias_uses_the_same_command_path() {
-        let Some(skills) = CommandParser::command_name("/skills") else {
+        let Some((skills, _)) = CommandParser::command_parts("/skills") else {
             panic!("expected a valid command name");
         };
-        let Some(skill) = CommandParser::command_name("/skill") else {
+        let Some((skill, _)) = CommandParser::command_parts("/skill") else {
             panic!("expected a valid command name");
         };
 
@@ -282,6 +343,15 @@ mod tests {
         let result = parser().parse("/nonexistent foo".to_string()).await;
 
         assert!(matches!(result, CommandParserResult::Unknown));
+    }
+
+    #[tokio::test]
+    async fn existing_commands_with_arguments_remain_unknown() {
+        for input in ["/help extra", "/new extra", "/agent extra"] {
+            let result = parser().parse(input.to_string()).await;
+
+            assert!(matches!(result, CommandParserResult::Unknown), "{input}");
+        }
     }
 
     #[tokio::test]

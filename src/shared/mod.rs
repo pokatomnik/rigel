@@ -1,5 +1,6 @@
 pub(crate) mod agent;
 pub(crate) mod config;
+pub(crate) mod goal;
 pub(crate) mod history;
 pub(crate) mod mcp_registry;
 pub(crate) mod recovery;

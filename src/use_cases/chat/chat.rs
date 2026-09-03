@@ -8,6 +8,7 @@ use rig::{
 use tokio::sync::Mutex;
 
 use crate::shared::{
+    goal::{GoalState, Report},
     history::{ChatHistory, HistoryPersistence, HistoryUpdate},
     recovery::{RecoveryRequest, TurnRecoverer, TurnStatus, format_recovery_stopped_notice},
     streaming::{StreamOutputState, StreamRunOutcome, StreamedTurn, display_message},
@@ -26,6 +27,7 @@ where
     history: Arc<ChatHistory<P>>,
     command_parser: CommandParser,
     change_model: GM,
+    goal_state: Option<Arc<GoalState>>,
 }
 
 impl<CM, P, GM> Chat<CM, P, GM>
@@ -47,7 +49,13 @@ where
             history,
             command_parser,
             change_model,
+            goal_state: None,
         }
+    }
+
+    pub(crate) fn with_goal_state(mut self, goal_state: Arc<GoalState>) -> Self {
+        self.goal_state = Some(goal_state);
+        self
     }
 
     fn streamed_turn(&self) -> StreamedTurn<'_, CM, P> {
@@ -58,7 +66,7 @@ where
         )
     }
 
-    async fn run_prompt(&self, prompt: String, echo: bool) -> anyhow::Result<()> {
+    async fn run_prompt(&self, prompt: String, echo: bool) -> anyhow::Result<Option<Report>> {
         self.echo_prompt(prompt.as_str(), echo);
         let base = self.history.snapshot().await;
         let streamed_turn = self.streamed_turn();
@@ -66,7 +74,49 @@ where
         let status = self.complete_user_turn(streamed_turn, outcome).await?;
         self.report_turn_status(status);
         self.terminal_io.eprintln("");
+        Ok(self.take_goal_report())
+    }
+
+    fn take_goal_report(&self) -> Option<Report> {
+        self.goal_state
+            .as_ref()
+            .and_then(|goal_state| goal_state.take_report())
+    }
+
+    fn activate_goal(&self, goal: String) -> anyhow::Result<()> {
+        let goal_state = self
+            .goal_state
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("goal state was not configured for the chat"))?;
+        goal_state.start(goal)?;
         Ok(())
+    }
+
+    fn next_goal_prompt(&self) -> anyhow::Result<String> {
+        let goal_state = self
+            .goal_state
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("goal state was not configured for the chat"))?;
+        if !goal_state.is_active() {
+            return Err(anyhow::anyhow!(
+                "active goal disappeared before its completion"
+            ));
+        }
+        let goal = goal_state
+            .current_goal()
+            .ok_or_else(|| anyhow::anyhow!("active goal has no goal text"))?;
+        Ok(crate::prompts::goal::goal_follow_up(goal.as_str()))
+    }
+
+    async fn pursue_goal(&self, goal: String) -> anyhow::Result<()> {
+        self.activate_goal(goal.clone())?;
+        let mut prompt = goal;
+        loop {
+            if self.run_prompt(prompt, false).await?.is_some() {
+                return Ok(());
+            }
+            prompt = self.next_goal_prompt()?;
+        }
     }
 
     async fn complete_user_turn(
@@ -157,34 +207,59 @@ where
         Ok(())
     }
 
+    async fn handle_prompt(&self, prompt: String, echo: bool) -> anyhow::Result<bool> {
+        self.run_prompt(prompt, echo).await?;
+        Ok(true)
+    }
+
+    async fn handle_goal(&self, goal: String) -> anyhow::Result<bool> {
+        self.pursue_goal(goal).await?;
+        Ok(true)
+    }
+
+    async fn handle_new(&self) -> anyhow::Result<bool> {
+        self.history_updated(HistoryUpdate::Replace(Vec::new()))
+            .await?;
+        Ok(true)
+    }
+
+    async fn handle_compact(&self, summarization: String) -> anyhow::Result<bool> {
+        self.handle_compaction(summarization).await?;
+        Ok(true)
+    }
+
+    async fn handle_agent_config(&self) -> anyhow::Result<bool> {
+        self.handle_change_model().await?;
+        Ok(true)
+    }
+
+    fn handle_unknown(&self) -> anyhow::Result<bool> {
+        self.terminal_io
+            .eprintln_orange("Unknown command. Type /help to get a list of available commands.");
+        Ok(true)
+    }
+
+    async fn handle_command(&self, command: CommandParserResult) -> anyhow::Result<bool> {
+        match command {
+            CommandParserResult::CommandExit => Ok(false),
+            CommandParserResult::CommandContinue => Ok(true),
+            CommandParserResult::Prompt(prompt, echo) => self.handle_prompt(prompt, echo).await,
+            CommandParserResult::Goal(goal) => self.handle_goal(goal).await,
+            CommandParserResult::New => self.handle_new().await,
+            CommandParserResult::Compact(summarization) => self.handle_compact(summarization).await,
+            CommandParserResult::AgentConfig => self.handle_agent_config().await,
+            CommandParserResult::Unknown => self.handle_unknown(),
+        }
+    }
+
     /// Runs the interactive loop until `/exit` or terminal input failure.
     pub async fn run(&self) -> anyhow::Result<()> {
         self.display_history().await;
         loop {
-            match self.next_command().await? {
-                CommandParserResult::CommandExit => break,
-                CommandParserResult::CommandContinue => {}
-                CommandParserResult::Prompt(prompt, echo) => {
-                    self.run_prompt(prompt, echo).await?;
-                }
-                CommandParserResult::New => {
-                    self.history_updated(HistoryUpdate::Replace(Vec::new()))
-                        .await?;
-                }
-                CommandParserResult::Compact(summarization) => {
-                    self.handle_compaction(summarization).await?;
-                }
-                CommandParserResult::AgentConfig => {
-                    self.handle_change_model().await?;
-                }
-                CommandParserResult::Unknown => {
-                    self.terminal_io.eprintln_orange(
-                        "Unknown command. Type /help to get a list of available commands.",
-                    );
-                }
+            if !self.handle_command(self.next_command().await?).await? {
+                return Ok(());
             }
         }
-        Ok(())
     }
 }
 
@@ -202,15 +277,19 @@ mod tests {
     use anyhow::{Result, ensure};
     use rig::{
         Agent, AgentBuilder,
-        message::Message,
-        test_utils::{MockCompletionModel, MockTurn},
+        message::{Message, ToolChoice, UserContent},
+        test_utils::{MockCompletionModel, MockStreamEvent, MockTurn},
     };
 
     use super::{Chat, compacted_history};
     use crate::{
         prompts::summarization::summarization,
-        shared::history::{ChatHistory, HistoryPersistence},
-        shared::terminal::TerminalIO,
+        shared::{
+            goal::{GoalCompletionHook, GoalState},
+            history::{ChatHistory, HistoryPersistence, HistorySyncHook},
+            terminal::TerminalIO,
+        },
+        tools::tool_mark_goal_complete::MarkGoalComplete,
     };
 
     #[derive(Clone, Copy)]
@@ -346,5 +425,83 @@ mod tests {
             "failed model change replaced the current agent"
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn pursue_goal_follows_up_and_allows_the_next_goal() -> Result<()> {
+        let model = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::text("progress"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                MockStreamEvent::tool_call(
+                    "complete-a",
+                    "mark_goal_complete",
+                    serde_json::json!({"report": "goal A report"}),
+                ),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                MockStreamEvent::text("final A"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                MockStreamEvent::tool_call(
+                    "complete-b",
+                    "mark_goal_complete",
+                    serde_json::json!({"report": "goal B report"}),
+                ),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                MockStreamEvent::text("final B"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+        ]);
+        let state = Arc::new(GoalState::new());
+        let history = Arc::new(ChatHistory::new(Vec::new(), NoopPersistence));
+        let agent = AgentBuilder::new(model.clone())
+            .tool(MarkGoalComplete::new(state.clone()))
+            .add_hook(GoalCompletionHook::new(state.clone()))
+            .add_hook(HistorySyncHook::new(history.clone()))
+            .default_max_turns(12)
+            .build();
+        let chat = Chat::from_history(agent, Arc::new(TerminalIO), history, async || {
+            Ok(AgentBuilder::new(MockCompletionModel::text("replacement")).build())
+        })
+        .with_goal_state(state.clone());
+
+        chat.pursue_goal("goal A".to_string()).await?;
+        assert!(!state.is_active());
+        assert!(!state.has_pending_report());
+        assert_eq!(model.request_count(), 3);
+        assert!(request_contains_user_text(
+            &model.requests()[1],
+            "Original goal:\ngoal A"
+        ));
+        assert_eq!(model.requests()[2].tool_choice, Some(ToolChoice::None));
+
+        chat.pursue_goal("goal B".to_string()).await?;
+        assert!(!state.is_active());
+        assert_eq!(model.request_count(), 5);
+        assert!(request_contains_user_text(&model.requests()[3], "goal B"));
+        Ok(())
+    }
+
+    fn request_contains_user_text(
+        request: &rig::completion::CompletionRequest,
+        expected: &str,
+    ) -> bool {
+        request.chat_history.iter().any(|message| {
+            matches!(
+                message,
+                Message::User { content }
+                    if content.iter().any(|content| matches!(
+                        content,
+                        UserContent::Text(text) if text.text().contains(expected)
+                    ))
+            )
+        })
     }
 }
