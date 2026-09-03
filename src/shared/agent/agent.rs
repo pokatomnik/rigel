@@ -106,7 +106,7 @@ impl Agent {
             Some(model_id) => model_id,
             None => client.select_model(deps.terminal_io.clone()).await?,
         };
-        let config = config.with_model_id(model_id.clone());
+        let config = config.with_model_id(model_id.clone())?;
         let system_prompt = system_prompt().await;
 
         let mcp_tools = deps.mcp_registry.select_tools().await;
@@ -115,6 +115,7 @@ impl Agent {
             .completions_api()
             .agent(model_id)
             .preamble(system_prompt.as_str());
+        let builder = config.apply_additional_params(builder);
         let tool_context = ToolBuildContext {
             config: config.clone(),
             dependencies: deps.clone(),
