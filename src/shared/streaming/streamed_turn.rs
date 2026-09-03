@@ -5,18 +5,19 @@ use rig::{
     Agent, OneOrMany,
     agent::{MultiTurnStreamItem, PromptResponse, StreamingError},
     completion::CompletionModel,
-    message::{Message, Reasoning, Text, ToolCall, ToolResult, ToolResultContent, UserContent},
+    message::{Message, UserContent},
     streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
 };
 use tokio::sync::Mutex;
 
 use crate::shared::{
     history::{ChatHistory, HISTORY_SYNC_ERROR_PREFIX, HistoryPersistence, HistoryUpdate},
+    recovery::MAX_INVALID_TOOL_CALL_ATTEMPTS,
     recovery::recovery_context_from_streaming_error,
-    recovery::{MAX_INVALID_TOOL_CALL_ATTEMPTS, tool_recovery_status},
-    streaming::StreamOutputState,
-    streaming::{ToolResultRecord, TurnJournal},
-    string::string_ext::StringShort,
+    streaming::{
+        StreamOutputState, ToolResultRecord, TurnJournal, print_reasoning, print_reasoning_block,
+        print_text, print_tool_call, print_tool_result,
+    },
     terminal::TerminalIO,
 };
 
@@ -295,74 +296,6 @@ impl StreamProgress {
             ToolResultRecord::Ignored => return Ok(()),
         };
         history.update(update).await
-    }
-}
-
-fn print_reasoning(terminal_io: &TerminalIO, state: &mut StreamOutputState, reasoning: &str) {
-    if reasoning.is_empty() {
-        return;
-    }
-    if !reasoning.trim().is_empty() {
-        state.set_received_reasoning(true);
-        if !state.showing_reasoning() {
-            terminal_io.eprintln_gray("[thinking]");
-            state.set_showing_reasoning(true);
-        }
-    }
-    terminal_io.eprint_gray(reasoning);
-    terminal_io.flush_stderr();
-}
-
-fn print_reasoning_block(
-    terminal_io: &TerminalIO,
-    state: &mut StreamOutputState,
-    reasoning: &Reasoning,
-) {
-    print_reasoning(terminal_io, state, reasoning.display_text().as_str());
-}
-
-fn print_text(terminal_io: &TerminalIO, state: &mut StreamOutputState, text: &Text) {
-    if text.text().is_empty() {
-        return;
-    }
-    if !text.text().trim().is_empty() {
-        state.set_received_answer(true);
-        if state.showing_reasoning() {
-            terminal_io.eprintln("\n[answer]");
-            state.set_showing_reasoning(false);
-        }
-    }
-    terminal_io.print(text.text());
-    terminal_io.flush_stdout();
-}
-
-fn print_tool_call(terminal_io: &TerminalIO, tool_call: &ToolCall) {
-    let args_str = tool_call.function.arguments.to_string().short(30);
-    terminal_io.eprintln_orange(
-        format!("\n[tool call: {}({})]", tool_call.function.name, args_str).as_str(),
-    );
-}
-
-fn print_tool_result(
-    terminal_io: &TerminalIO,
-    state: &mut StreamOutputState,
-    tool_result: &ToolResult,
-) {
-    state.record_tool_result(tool_recovery_status(tool_result));
-    let output = tool_result
-        .content
-        .iter()
-        .map(format_tool_result_content)
-        .collect::<Vec<_>>()
-        .join("\n");
-    terminal_io.eprintln_blue(format!("[tool result: {}]", output.short(30)).as_str());
-}
-
-fn format_tool_result_content(content: &ToolResultContent) -> String {
-    match content {
-        ToolResultContent::Text(text) => text.text.clone(),
-        ToolResultContent::Json { value } => value.to_string(),
-        ToolResultContent::Image(_) => "<image>".to_string(),
     }
 }
 
