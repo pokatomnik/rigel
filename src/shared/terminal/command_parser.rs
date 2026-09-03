@@ -1,20 +1,9 @@
-use std::{fmt, path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
-use crate::{prompts::summarization::summarization, shared::terminal::TerminalIO};
-
-const SKILLS_DIRECTORY: &str = ".agents/skills";
-const SKILL_MANIFEST: &str = "SKILL.md";
-
-struct SkillOption {
-    name: String,
-    manifest_path: PathBuf,
-}
-
-impl fmt::Display for SkillOption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.name)
-    }
-}
+use crate::{
+    prompts::summarization::summarization,
+    shared::{skills::SkillCatalog, terminal::TerminalIO},
+};
 
 #[derive(Debug)]
 pub(crate) enum CommandParserResult {
@@ -42,6 +31,33 @@ pub(crate) enum CommandParserResult {
 
 pub(crate) struct CommandParser {
     terminal_io: Arc<TerminalIO>,
+    skill_catalog: SkillCatalog,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum KnownCommand {
+    Exit,
+    Skills,
+    Help,
+    Editor,
+    New,
+    Compact,
+    Agent,
+}
+
+impl KnownCommand {
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "exit" => Some(Self::Exit),
+            "skills" | "skill" => Some(Self::Skills),
+            "help" => Some(Self::Help),
+            "editor" => Some(Self::Editor),
+            "new" => Some(Self::New),
+            "compact" => Some(Self::Compact),
+            "agent" => Some(Self::Agent),
+            _ => None,
+        }
+    }
 }
 
 impl CommandParser {
@@ -49,7 +65,7 @@ impl CommandParser {
         self.terminal_io.eprintln("Available commands:");
         self.terminal_io.eprintln("/exit - Exit the chat");
         self.terminal_io
-            .eprintln("/skill - Get a skill's instructions");
+            .eprintln("/skills - Get a skill's instructions (/skill is an alias)");
         self.terminal_io.eprintln("/help - Show this help message");
         self.terminal_io
             .eprintln("/new - forget everything and start from the beginning");
@@ -63,63 +79,35 @@ impl CommandParser {
         CommandParserResult::CommandContinue
     }
 
-    /// Discovers current directory skills, lets the user select one, and returns its instructions.
-    ///
-    /// Only direct subdirectories of `.agents/skills` containing a regular `SKILL.md` file are
-    /// offered. When no skills are found or anything fails, `No skills found` is printed and the
-    /// chat waits for the next command.
+    /// Discovers skills, lets the user select one, and returns its instructions.
     pub async fn get_skill(&self) -> CommandParserResult {
-        match self.select_skill().await {
-            Some(prompt) => CommandParserResult::Prompt(prompt, false),
-            None => {
+        let skills = self.skill_catalog.discover().await;
+        if skills.is_empty() {
+            self.terminal_io.eprintln("No skills found");
+            return CommandParserResult::CommandContinue;
+        }
+        let Some(selected) = self
+            .terminal_io
+            .fuzzy_select("Select skill", skills.as_slice())
+            .ok()
+        else {
+            self.terminal_io.eprintln("No skills found");
+            return CommandParserResult::CommandContinue;
+        };
+        match selected.instructions().await {
+            Ok(prompt) => CommandParserResult::Prompt(prompt, false),
+            Err(_) => {
                 self.terminal_io.eprintln("No skills found");
                 CommandParserResult::CommandContinue
             }
         }
     }
 
-    /// Returns the manifest contents of a user-selected skill, or `None` when no skill can be
-    /// discovered, selected, or read.
-    async fn select_skill(&self) -> Option<String> {
-        let current_dir = std::env::current_dir().ok()?;
-        let skills_dir = current_dir.join(SKILLS_DIRECTORY);
-        let mut entries = tokio::fs::read_dir(&skills_dir).await.ok()?;
-
-        let mut skills = Vec::new();
-        loop {
-            let Some(entry) = entries.next_entry().await.ok()? else {
-                break;
-            };
-            if !entry.file_type().await.ok()?.is_dir() {
-                continue;
-            }
-
-            let manifest_path = entry.path().join(SKILL_MANIFEST);
-            match tokio::fs::metadata(&manifest_path).await {
-                Ok(metadata) if metadata.is_file() => skills.push(SkillOption {
-                    name: entry.file_name().to_string_lossy().into_owned(),
-                    manifest_path,
-                }),
-                _ => {}
-            }
-        }
-
-        skills.sort_by(|left, right| left.name.cmp(&right.name));
-        if skills.is_empty() {
-            return None;
-        }
-
-        let selected = self
-            .terminal_io
-            .fuzzy_select("Select skill", &skills)
-            .ok()?;
-        tokio::fs::read_to_string(&selected.manifest_path)
-            .await
-            .ok()
-    }
-
     pub fn new(terminal_io: Arc<TerminalIO>) -> Self {
-        Self { terminal_io }
+        Self {
+            terminal_io,
+            skill_catalog: SkillCatalog::from_environment(),
+        }
     }
 
     pub fn handle_editor(&self) -> CommandParserResult {
@@ -128,18 +116,30 @@ impl CommandParser {
     }
 
     pub async fn parse(&self, raw_input: String) -> CommandParserResult {
-        match raw_input {
-            _ if raw_input.starts_with("/exit") => CommandParserResult::CommandExit,
-            _ if raw_input.starts_with("/skill") => self.get_skill().await,
-            _ if raw_input.starts_with("/help") => self.handle_help(),
-            _ if raw_input.starts_with("/editor") => self.handle_editor(),
-            _ if raw_input.starts_with("/new") => CommandParserResult::New,
-            _ if raw_input.starts_with("/compact") => {
+        let command_input = raw_input.trim_start();
+        let Some(command_name) = Self::command_name(command_input) else {
+            return CommandParserResult::Prompt(raw_input, false);
+        };
+        self.handle_command(KnownCommand::from_name(command_name.as_str()))
+            .await
+    }
+
+    fn command_name(input: &str) -> Option<String> {
+        Some(input.strip_prefix('/')?.to_ascii_lowercase())
+    }
+
+    async fn handle_command(&self, command: Option<KnownCommand>) -> CommandParserResult {
+        match command {
+            Some(KnownCommand::Exit) => CommandParserResult::CommandExit,
+            Some(KnownCommand::Skills) => self.get_skill().await,
+            Some(KnownCommand::Help) => self.handle_help(),
+            Some(KnownCommand::Editor) => self.handle_editor(),
+            Some(KnownCommand::New) => CommandParserResult::New,
+            Some(KnownCommand::Compact) => {
                 CommandParserResult::Compact(summarization().to_string())
             }
-            _ if raw_input.starts_with("/agent") => CommandParserResult::AgentConfig,
-            _ if raw_input.starts_with("/") => CommandParserResult::Unknown,
-            _ => CommandParserResult::Prompt(raw_input, false),
+            Some(KnownCommand::Agent) => CommandParserResult::AgentConfig,
+            None => CommandParserResult::Unknown,
         }
     }
 }
@@ -166,7 +166,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_input_stays_a_prompt_without_echo() {
+    async fn plain_text_stays_a_prompt_without_echo() {
         let result = parser().parse("hello".to_string()).await;
 
         assert!(matches!(result, CommandParserResult::Prompt(_, false)));
@@ -194,36 +194,100 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_command_returns_unknown_instead_of_leaking_as_prompt() {
+    async fn help_command_accepts_leading_whitespace() {
+        for input in ["/help", "\t/help", " /help", "\t /help"] {
+            let result = parser().parse(input.to_string()).await;
+
+            assert!(
+                matches!(result, CommandParserResult::CommandContinue),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn input_starting_with_exclamation_before_slash_stays_a_prompt() {
+        let result = parser().parse("\t!/help".to_string()).await;
+
+        assert!(matches!(result, CommandParserResult::Prompt(_, false)));
+    }
+
+    #[tokio::test]
+    async fn unknown_command_accepts_leading_space_but_is_not_a_prompt() {
+        for input in ["/unknown", " /unknown"] {
+            let result = parser().parse(input.to_string()).await;
+
+            assert!(matches!(result, CommandParserResult::Unknown), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn command_names_are_case_insensitive() {
+        for command in ["/SKILLS", "/SkIlLs"] {
+            let Some(name) = CommandParser::command_name(command) else {
+                panic!("expected a valid command name");
+            };
+
+            assert_eq!(
+                super::KnownCommand::from_name(name.as_str()),
+                Some(super::KnownCommand::Skills)
+            );
+        }
+    }
+
+    #[test]
+    fn skills_alias_uses_the_same_command_path() {
+        let Some(skills) = CommandParser::command_name("/skills") else {
+            panic!("expected a valid command name");
+        };
+        let Some(skill) = CommandParser::command_name("/skill") else {
+            panic!("expected a valid command name");
+        };
+
+        assert_eq!(
+            super::KnownCommand::from_name(skills.as_str()),
+            super::KnownCommand::from_name(skill.as_str())
+        );
+        assert_eq!(
+            super::KnownCommand::from_name(skills.as_str()),
+            Some(super::KnownCommand::Skills)
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_prefixed_input_returns_unknown() {
+        for input in [
+            "/skill-other extra",
+            "/",
+            "/name_2",
+            "/name__two",
+            "/name--two",
+            "/helps!",
+        ] {
+            let result = parser().parse(input.to_string()).await;
+
+            assert!(matches!(result, CommandParserResult::Unknown), "{input}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_command_returns_unknown() {
         let result = parser().parse("/nonexistent".to_string()).await;
 
         assert!(matches!(result, CommandParserResult::Unknown));
     }
 
     #[tokio::test]
-    async fn unknown_command_multiple_patterns_returns_unknown() {
+    async fn unknown_slash_input_with_text_returns_unknown() {
         let result = parser().parse("/nonexistent foo".to_string()).await;
 
         assert!(matches!(result, CommandParserResult::Unknown));
     }
 
     #[tokio::test]
-    async fn bare_slash_returns_unknown() {
-        let result = parser().parse("/".to_string()).await;
+    async fn leading_spaces_do_not_hide_command_intent() {
+        let result = parser().parse("  /helps!".to_string()).await;
 
         assert!(matches!(result, CommandParserResult::Unknown));
-    }
-
-    #[tokio::test]
-    async fn plain_non_slash_input_returns_prompt() {
-        let result = parser().parse("write hello.rs".to_string()).await;
-
-        match result {
-            CommandParserResult::Prompt(text, echo) => {
-                assert_eq!(text, "write hello.rs");
-                assert!(!echo);
-            }
-            other => panic!("expected a Prompt variant, got: {other:#?}"),
-        }
     }
 }

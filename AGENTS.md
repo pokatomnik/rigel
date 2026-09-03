@@ -49,11 +49,17 @@ Recovery handles weak models where malformed and unnecessary tool calls are expe
 ## Build, Test, and Development Commands
 
 - `cargo run -- --help` — CLI options
-- `cargo run -- --base-url http://localhost:8000/v1` — start Rigel against local server; use `--api-key` only when required
+- `cargo run -- init --base-url http://localhost:8000/v1` — configure Rigel for a local server
+- `cargo run -- chat` — start Rigel; use `--profile <PATH>` for an explicit TOML file
 - `cargo build` — debug binary at `target/debug/rigel`
 - `cargo test --all-targets` — complete test suite
 - `cargo fmt --all -- --check` — standard Rust formatting
 - `cargo clippy --all-targets --all-features` — correctness and maintainability issues
+
+## Documentation Contract
+
+- Document every CLI or interactive command and every built-in skill in `README.md`.
+- When the Rigel configuration contract changes, update the corresponding built-in skills in the same change.
 
 ## Coding Style & Naming Conventions
 

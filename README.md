@@ -55,7 +55,30 @@ Each server entry declares its transport with the `type` key:
 - `"stdio"` — launch a local process: `command` (required), `args` and `env` (optional)
 - `"http"` — connect to a remote endpoint: `url` (required)
 
-If the file is missing, Rigel refuses to start and instructs you to run `rigel init` for basic initialization. If the file cannot be parsed, Rigel starts with no MCP servers.
+If the default file is missing or cannot be read or parsed, Rigel uses its
+defaults. An explicitly supplied `--profile` path must exist and contain valid
+TOML; errors are returned to the caller.
+
+### Interactive commands
+
+During `rigel chat`, the following commands are available:
+
+- `/exit` — exit the chat
+- `/skills` — choose a skill and send its instructions to the agent; `/skill` is an alias
+- `/help` — show the command list
+- `/editor` — write a prompt in the default editor
+- `/new` — clear the conversation history
+- `/compact` — compact the conversation context
+- `/agent` — change agent preferences
+
+### Built-in skills
+
+`configure-rigel` is always available in `/skills`. It documents the TOML
+configuration file, model parameters, MCP servers, and project and global skill
+directories. It is compiled into Rigel and does not require a file in the
+current project or home directory. When selected, it provides this context to
+the agent and asks how it can help configure Rigel instead of asking the agent
+to summarize the skill.
 
 ## Quick Start
 
@@ -76,14 +99,17 @@ cargo run -- --help
 ### Configuration Options
 
 ```bash
-# Connect to an OpenAI-compatible API (base URL is required)
-cargo run -- -b <api-base-url>
+# Create ~/.rigel/config.toml with the default API URL
+cargo run -- init
 
-# Optionally provide API key for authenticated endpoints
-cargo run -- -b <api-base-url> -k <api-key>
+# Configure the API URL and the environment variable containing the API key
+cargo run -- init --base-url <api-base-url> --api-key-env OPENAI_API_KEY
 
-# Start Rigel with a local OpenAI-compatible server
-cargo run -- -b http://localhost:8000/v1
+# Start an interactive chat
+cargo run -- chat
+
+# Start with an explicit TOML profile
+cargo run -- chat --profile ./config.toml
 
 # Run tests
 cargo test --all-targets
@@ -107,8 +133,8 @@ cd rigel
 # Run help command
 cargo run -- --help
 
-# Start Rigel with a local OpenAI-compatible server
-cargo run -- --base-url http://localhost:8000/v1
+# Start Rigel with the default configuration
+cargo run -- chat
 
 # Build the project
 cargo build
@@ -144,13 +170,14 @@ rigel/
 
 ### Command-Line Interface
 
-The CLI entry point is defined in `src/cmd/cli.rs`. It provides:
+The CLI entry point is defined in `src/cmd/cli.rs`. It provides the `init`
+and `chat` subcommands:
 
-- **Base URL**: Required OpenAI-compatible API base URL; Rigel calls `/models` and `/chat/completions` below it
-- **API Key**: Optional bearer authentication for API endpoints
+- `rigel init [--base-url <URL>] [--api-key-env <NAME>]` — create the default configuration
+- `rigel chat [--profile <PATH>]` — start a chat, optionally with an explicit configuration
 
 ```bash
-cargo run -- -b <api-base-url> -k <api-key>
+cargo run -- chat --profile ./config.toml
 ```
 
 ### Agent Controller
