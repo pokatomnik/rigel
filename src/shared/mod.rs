@@ -4,6 +4,7 @@ pub(crate) mod history;
 pub(crate) mod mcp_registry;
 pub(crate) mod recovery;
 pub(crate) mod response;
+pub(crate) mod skills;
 pub(crate) mod streaming;
 pub(crate) mod string;
 pub(crate) mod terminal;
