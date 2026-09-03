@@ -24,6 +24,32 @@ type = "http"
 url = "https://example.com/mcp"
 ```
 
+Model-specific provider parameters can be configured under `models`. The model
+key must exactly match the ID returned by `/models` (including letter case):
+
+```toml
+[models."gpt-5.5".params]
+reasoning_effort = "high"
+
+[models."qwen3".params]
+think = true
+
+[models."router-model".params.reasoning]
+effort = "high"
+```
+
+Values may be strings, booleans, numbers, arrays, or nested tables. Rigel does
+not determine provider or model capabilities and does not normalize these
+values; it forwards them as additional top-level request fields. If the model
+is not listed, or its `params` table is empty, provider defaults are used.
+Transport-owned fields such as `model`, `messages`, `tools`, `tool_choice`,
+`temperature`, `max_tokens`, and `stream` cannot be configured here.
+
+For an unknown model, consult the provider's API documentation for its supported
+fields and add the exact model ID from `/models` to `config.toml`. Unsupported
+parameters are reported by the provider as request errors; Rigel does not retry
+the request without them.
+
 Each server entry declares its transport with the `type` key:
 
 - `"stdio"` — launch a local process: `command` (required), `args` and `env` (optional)
