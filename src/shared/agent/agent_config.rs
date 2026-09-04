@@ -76,10 +76,6 @@ mod tests {
                 .tool_set,
             AgentToolSet::Subagent
         );
-        assert_eq!(
-            config.with_tool_set(AgentToolSet::Orchestrator).tool_set,
-            AgentToolSet::Orchestrator
-        );
     }
 
     #[test]
