@@ -15,7 +15,7 @@ use tokio::{
     task::{self, JoinHandle},
 };
 
-use crate::shared::tool_permissions::{PermissionRequirement, ToolPermissionMetadata};
+use crate::shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata};
 
 use super::contracts::{Action, error_codes};
 

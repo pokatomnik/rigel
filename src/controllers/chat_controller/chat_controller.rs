@@ -1,4 +1,7 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use clap::Args;
 use reqwest::Client;
@@ -8,10 +11,11 @@ use crate::{
     controllers::controller::Controller,
     shared::{
         agent::{
-            agent::{Agent, AgentDependencies, ConfiguredAgent},
+            agent::Agent,
             agent_config::AgentConfig,
+            dependencies::{AgentDependencies, ConfiguredAgent},
         },
-        config::rigel_config::RigelConfig,
+        config::rigel_config::ToolPermissionPaths,
         goal::goal_state::GoalState,
         history::{chat_history::ChatHistory, history::History},
         mcp_registry::registry::McpRegistry,
@@ -26,6 +30,7 @@ pub(crate) struct IndexControllerDeps {
     http_client: Arc<Client>,
     mcp_registry: Arc<McpRegistry>,
     goal_state: Arc<GoalState>,
+    tool_permission_paths: Option<ToolPermissionPaths>,
 }
 
 impl IndexControllerDeps {
@@ -39,16 +44,26 @@ impl IndexControllerDeps {
             http_client,
             mcp_registry,
             goal_state: Arc::new(GoalState::new()),
+            tool_permission_paths: None,
         }
     }
 
+    pub(crate) fn with_tool_permission_paths(mut self, paths: ToolPermissionPaths) -> Self {
+        self.tool_permission_paths = Some(paths);
+        self
+    }
+
     fn agent_dependencies(&self) -> AgentDependencies {
-        AgentDependencies::new(
+        let dependencies = AgentDependencies::new(
             self.terminal_io.clone(),
             self.http_client.clone(),
             self.mcp_registry.clone(),
         )
-        .with_goal_state(self.goal_state.clone())
+        .with_goal_state(self.goal_state.clone());
+        match &self.tool_permission_paths {
+            Some(paths) => dependencies.with_tool_permission_paths(paths.clone()),
+            None => dependencies,
+        }
     }
 
     fn terminal_io(&self) -> Arc<TerminalIO> {
@@ -73,11 +88,8 @@ pub struct ChatController {
 }
 
 impl ChatController {
-    pub(crate) async fn read_config(&self) -> anyhow::Result<RigelConfig> {
-        match &self.profile {
-            Some(path) => RigelConfig::from_path(path).await,
-            None => Ok(RigelConfig::from_default_path().await),
-        }
+    pub(crate) fn profile_path(&self) -> Option<&Path> {
+        self.profile.as_deref()
     }
 
     async fn create_agent(

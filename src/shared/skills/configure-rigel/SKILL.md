@@ -26,8 +26,10 @@ profile is supplied. Run `rigel init` to create or overwrite that file. Use
 contains the API key. The key itself is not stored in TOML.
 
 Use `rigel chat --profile <PATH>` (or `-p <PATH>`) to load a specific TOML
-file. Errors loading an explicit profile are returned to the caller. Errors
-loading the default configuration fall back to Rigel's defaults.
+file as the global layer. The project layer at
+`<current-dir>/.rigel/config.toml` is still read and overrides it. Errors
+loading an explicit profile are returned to the caller. Errors loading the
+default configuration fall back to Rigel's defaults.
 
 ## TOML fields
 
@@ -51,10 +53,31 @@ RUST_LOG = "debug"
 [mcpServers.remote]
 type = "http"
 url = "https://example.com/mcp"
+
+[policies."run_command"]
+allow = true
 ```
 
 `envKey` is the name of the environment variable from which Rigel reads the
 API key. Keep the secret in the environment rather than in `config.toml`.
+
+## Tool permissions
+
+Policies are keyed by the runtime tool name. The project policy takes
+precedence over the global policy, and `allow = false` is an explicit denial:
+
+```toml
+[policies."run_command"]
+allow = false
+```
+
+Without a policy, automatic tools run without confirmation while other tools
+ask. The confirmation choices are deny, allow once, allow for project, allow
+for session, and allow forever. Project choices are written to
+`<current-dir>/.rigel/config.toml`; forever choices are written to the
+`--profile` file or to `~/.rigel/config.toml` when no profile is supplied.
+Session choices last until the current agent is rebuilt. Deny and allow-once
+choices are never saved. `rigel init` does not add policies.
 
 ## Model parameters
 

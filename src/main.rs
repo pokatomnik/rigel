@@ -30,11 +30,14 @@ async fn main() -> anyhow::Result<()> {
     let result = match cli.command {
         Commands::Init(init_controller) => init_controller.handle(()).await,
         Commands::Chat(chat_controller) => {
-            let config = Arc::new(chat_controller.read_config().await?);
+            let profile_path = chat_controller.profile_path();
+            let tool_permission_paths = RigelConfig::config_paths(profile_path)?;
+            let config = Arc::new(RigelConfig::from_profile(profile_path).await?);
             let http_client = get_http_client().await?;
             let mcp_registry = get_mcp_registry(config).await?;
             let chat_deps =
-                IndexControllerDeps::new(terminal_io.clone(), http_client, mcp_registry);
+                IndexControllerDeps::new(terminal_io.clone(), http_client, mcp_registry)
+                    .with_tool_permission_paths(tool_permission_paths);
             chat_controller.handle(chat_deps).await
         }
     };

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::{agent::AgentDependencies, agent_config::AgentConfig};
+use super::{agent_config::AgentConfig, dependencies::AgentDependencies};
 
 #[derive(Clone)]
 pub(super) struct ToolBuildContext {

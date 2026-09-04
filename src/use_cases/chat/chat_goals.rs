@@ -2,7 +2,10 @@ use std::sync::Arc;
 
 use rig::completion::CompletionModel;
 
-use crate::shared::goal::goal_state::{GoalState, Report};
+use crate::shared::{
+    agent::dependencies::ConfiguredAgent,
+    goal::goal_state::{GoalState, Report},
+};
 
 use super::chat::Chat;
 
@@ -10,7 +13,7 @@ impl<CM, P, GM> Chat<CM, P, GM>
 where
     CM: CompletionModel + 'static,
     P: crate::shared::history::history_persistence::HistoryPersistence,
-    GM: AsyncFn() -> anyhow::Result<crate::shared::agent::agent::ConfiguredAgent<CM>> + 'static,
+    GM: AsyncFn() -> anyhow::Result<ConfiguredAgent<CM>> + 'static,
 {
     pub(crate) fn with_goal_state(mut self, goal_state: Arc<GoalState>) -> Self {
         self.goal_state = Some(goal_state);

@@ -6,7 +6,7 @@ use reqwest::{Client, Response, Url};
 use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::Serialize;
 
-use crate::shared::tool_permissions::{PermissionRequirement, ToolPermissionMetadata};
+use crate::shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata};
 
 use super::contracts::{Action, error_codes};
 

@@ -3,6 +3,7 @@ use rig::completion::CompletionModel;
 use crate::{
     entities::context_usage::ContextUsage,
     shared::{
+        agent::dependencies::ConfiguredAgent,
         compaction::context_compactor::{CompactionKind, CompactionResult, ContextCompactor},
         history::{chat_history::HistoryUpdate, history_persistence::HistoryPersistence},
         recovery::turn_recovery::TurnStatus,
@@ -15,7 +16,7 @@ impl<CM, P, GM> Chat<CM, P, GM>
 where
     CM: CompletionModel + 'static,
     P: HistoryPersistence,
-    GM: AsyncFn() -> anyhow::Result<crate::shared::agent::agent::ConfiguredAgent<CM>> + 'static,
+    GM: AsyncFn() -> anyhow::Result<ConfiguredAgent<CM>> + 'static,
 {
     pub(super) async fn history_updated(&self, update: HistoryUpdate) -> anyhow::Result<()> {
         self.history.update(update).await
