@@ -1,6 +1,6 @@
 use rig::completion::CompletionModel;
 
-use crate::entities::context_usage::ContextUsage;
+use crate::{entities::context_usage::ContextUsage, shared::agent::dependencies::ConfiguredAgent};
 
 use super::chat::Chat;
 
@@ -8,7 +8,7 @@ impl<CM, P, GM> Chat<CM, P, GM>
 where
     CM: CompletionModel + 'static,
     P: crate::shared::history::history_persistence::HistoryPersistence,
-    GM: AsyncFn() -> anyhow::Result<crate::shared::agent::agent::ConfiguredAgent<CM>> + 'static,
+    GM: AsyncFn() -> anyhow::Result<ConfiguredAgent<CM>> + 'static,
 {
     pub(super) async fn handle_change_model(&self) -> anyhow::Result<()> {
         let new_agent = (self.change_model)().await?;

@@ -1,6 +1,7 @@
 use rig::completion::CompletionModel;
 
 use crate::shared::{
+    agent::dependencies::ConfiguredAgent,
     recovery::recovery_error::format_recovery_stopped_notice,
     streaming::{message_output::display_message, stream_output_state::StreamOutputState},
 };
@@ -11,7 +12,7 @@ impl<CM, P, GM> Chat<CM, P, GM>
 where
     CM: CompletionModel + 'static,
     P: crate::shared::history::history_persistence::HistoryPersistence,
-    GM: AsyncFn() -> anyhow::Result<crate::shared::agent::agent::ConfiguredAgent<CM>> + 'static,
+    GM: AsyncFn() -> anyhow::Result<ConfiguredAgent<CM>> + 'static,
 {
     pub(super) fn echo_prompt(&self, prompt: &str, echo: bool) {
         if echo {

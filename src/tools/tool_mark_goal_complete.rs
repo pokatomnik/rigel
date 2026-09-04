@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::shared::{
     goal::goal_state::{GoalState, GoalStateError, Report},
-    tool_permissions::{PermissionRequirement, ToolPermissionMetadata},
+    tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata},
 };
 
 use super::contracts::error_codes;
@@ -123,7 +123,7 @@ mod tests {
     use crate::{
         shared::{
             goal::goal_state::GoalState,
-            tool_permissions::{PermissionRequirement, ToolPermissionMetadata},
+            tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata},
         },
         tools::contracts::error_codes,
     };

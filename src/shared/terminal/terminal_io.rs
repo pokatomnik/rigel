@@ -55,8 +55,13 @@ impl TerminalIO {
     }
 
     pub fn confirm_tool_call(&self, prompt: &str) -> ToolConfirmResult {
-        let items: &'static [ToolConfirmResult] =
-            &[ToolConfirmResult::No, ToolConfirmResult::AllowOnce];
+        let items: &'static [ToolConfirmResult] = &[
+            ToolConfirmResult::Deny,
+            ToolConfirmResult::AllowOnce,
+            ToolConfirmResult::AllowForProject,
+            ToolConfirmResult::AllowForSession,
+            ToolConfirmResult::AllowForever,
+        ];
         let answer_idx = dialoguer::Select::new()
             .with_prompt(prompt)
             .items(items)

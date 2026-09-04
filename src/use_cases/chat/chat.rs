@@ -6,7 +6,7 @@ use tokio::sync::Mutex;
 use crate::{
     entities::context_usage::ContextUsage,
     shared::{
-        agent::agent::ConfiguredAgent,
+        agent::dependencies::ConfiguredAgent,
         goal::goal_state::GoalState,
         history::{chat_history::ChatHistory, history_persistence::HistoryPersistence},
         terminal::{command_parser::CommandParser, terminal_io::TerminalIO},
@@ -88,7 +88,7 @@ mod tests {
         entities::context_usage::ContextUsage,
         prompts::summarization::summarization,
         shared::{
-            agent::agent::ConfiguredAgent,
+            agent::dependencies::ConfiguredAgent,
             goal::{goal_completion_hook::GoalCompletionHook, goal_state::GoalState},
             history::{
                 chat_history::ChatHistory, history_persistence::HistoryPersistence,

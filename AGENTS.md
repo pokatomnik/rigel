@@ -108,8 +108,9 @@ Treat the following as mandatory contribution rules:
 - Justify every new struct by domain or a business rule. No structs as mere implementation conveniences.
 - Shallow control flow: no more than two nested `if`/`match` levels. Extract named operations for deeper branching.
 - At most 30 lines of code per function/method. Decompose into named operations rather than compressing.
-- At most 500 lines of non-test code per file. Test modules excluded (may exceed 1,000 lines even if total exceeds 500).
+- At most 300 lines of non-test Rust code per file, including imports. `#[cfg(test)]` test modules are excluded from this limit regardless of their size.
 - At most 300 characters combined for logic/structs/enums/constants in a file. Test code excluded.
+- Every newly written public struct field or method must have an immediately preceding `///` doc comment. The comment must explain the field or method's purpose, responsibility boundary, usage, and relevant edge cases. Documentation comments count toward the 300-line production-code limit.
 
 ## Testing Guidelines
 

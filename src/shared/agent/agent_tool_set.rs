@@ -3,7 +3,7 @@ use rig::{
     completion::CompletionModel as CompletionModelTrait,
 };
 
-use crate::shared::tool_permissions::ToolPermissionCatalog;
+use crate::shared::tool_permissions::catalog::ToolPermissionCatalog;
 
 use super::{agent::Agent, tool_build_context::ToolBuildContext};
 

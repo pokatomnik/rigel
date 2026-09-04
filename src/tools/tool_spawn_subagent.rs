@@ -11,13 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     shared::{
-        agent::{
-            agent::{Agent, AgentDependencies},
-            agent_config::AgentConfig,
-        },
+        agent::{agent::Agent, agent_config::AgentConfig, dependencies::AgentDependencies},
         history::{chat_history::ChatHistory, history_persistence::NonPersistentHistory},
         terminal::terminal_io::TerminalIO,
-        tool_permissions::{PermissionRequirement, ToolPermissionMetadata},
+        tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata},
     },
     tools::contracts::error_codes,
     use_cases::subagent::subagent::{Subagent, SubagentContext},

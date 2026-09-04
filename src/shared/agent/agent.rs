@@ -1,38 +1,35 @@
 use std::sync::Arc;
 
-use reqwest::Client;
 use rig::{
-    Agent as RigAgent,
     agent::{AgentBuilder, WithBuilderTools},
     client::AgentClientExt,
     completion::CompletionModel as CompletionModelTrait,
-    providers::openai::{self, CompletionModel},
+    providers::openai::CompletionModel,
 };
 
 use super::{
-    agent_config::AgentConfig, agent_tool_set::AgentToolSet, tool_build_context::ToolBuildContext,
+    agent_config::AgentConfig,
+    agent_tool_set::AgentToolSet,
+    dependencies::{AgentDependencies, ConfiguredAgent},
+    tool_build_context::ToolBuildContext,
 };
-
 use crate::{
     entities::selected_model::SelectedModel,
     prompts::system::system_prompt,
     shared::{
-        goal::{goal_completion_hook::GoalCompletionHook, goal_state::GoalState},
         history::{
             chat_history::ChatHistory,
             history::History,
             history_persistence::{HistoryPersistence, NonPersistentHistory},
             history_sync::HistorySyncHook,
         },
-        mcp_registry::registry::{McpRegistry, McpToolsExt},
+        mcp_registry::registry::McpToolsExt,
         recovery::tool_recovery::ToolRecoveryHook,
         response::invalid_response::InvalidResponseHook,
-        terminal::terminal_io::TerminalIO,
-        tool_permissions::{ToolPermissionCatalog, ToolPermissionHook},
-    },
-    tools::{
-        tool_fetch_url::FetchUrl, tool_mark_goal_complete::MarkGoalComplete,
-        tool_run_command::RunCommand, tool_spawn_subagent::SpawnSubagent,
+        tool_permissions::{
+            catalog::ToolPermissionCatalog, hook::ToolPermissionHook,
+            manager::ToolPermissionManager,
+        },
     },
     use_cases::model_selector::model_selector::ModelSelector,
 };
@@ -40,55 +37,6 @@ use crate::{
 const MAX_AGENT_TURNS: usize = 12;
 
 pub(crate) struct Agent;
-
-pub(crate) struct ConfiguredAgent<M: CompletionModelTrait> {
-    pub(crate) agent: RigAgent<M>,
-    pub(crate) max_context_tokens: Option<u64>,
-}
-
-impl<M: CompletionModelTrait> ConfiguredAgent<M> {
-    #[cfg(test)]
-    pub(crate) fn from_agent(agent: RigAgent<M>) -> Self {
-        Self {
-            agent,
-            max_context_tokens: None,
-        }
-    }
-}
-
-#[derive(Clone)]
-pub(crate) struct AgentDependencies {
-    terminal_io: Arc<TerminalIO>,
-    http_client: Arc<Client>,
-    mcp_registry: Arc<McpRegistry>,
-    goal_state: Option<Arc<GoalState>>,
-}
-
-impl AgentDependencies {
-    pub(crate) fn new(
-        terminal_io: Arc<TerminalIO>,
-        http_client: Arc<Client>,
-        mcp_registry: Arc<McpRegistry>,
-    ) -> Self {
-        Self {
-            terminal_io,
-            http_client,
-            mcp_registry,
-            goal_state: None,
-        }
-    }
-
-    pub(crate) fn with_goal_state(mut self, goal_state: Arc<GoalState>) -> Self {
-        self.goal_state = Some(goal_state);
-        self
-    }
-
-    pub(crate) fn goal_state(&self) -> anyhow::Result<Arc<GoalState>> {
-        self.goal_state
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("goal state was not configured for the chat agent"))
-    }
-}
 
 impl Agent {
     #[allow(dead_code)]
@@ -135,43 +83,73 @@ impl Agent {
     where
         P: HistoryPersistence,
     {
+        let permission_paths = deps.tool_permission_paths()?;
         let client = Self::build_client(&config, &deps)?;
-        let selected_model = match config.model_id.clone() {
-            Some(model_id) => SelectedModel::new(model_id, config.model_context_length),
-            None => client.select_model(deps.terminal_io.clone()).await?,
-        };
+        let selected_model = Self::select_model(&config, &client, &deps).await?;
+        let config = Self::configure_model(config, &selected_model)?;
+        let builder = Self::build_builder(&client, &config, selected_model.id.clone()).await;
+        let (builder, catalog) = Self::register_tools(builder, &config, deps.clone()).await?;
+        let manager = ToolPermissionManager::new(permission_paths);
+        let builder = Self::add_hooks(builder, chat_history, deps.clone()).add_hook(
+            ToolPermissionHook::new(deps.terminal_io.clone(), catalog, manager),
+        );
+        Ok(Self::finish_agent(builder, selected_model.context_length))
+    }
+
+    fn configure_model(
+        config: AgentConfig,
+        selected_model: &SelectedModel,
+    ) -> anyhow::Result<AgentConfig> {
         let mut config = config.with_model_id(selected_model.id.clone())?;
         config.model_context_length = selected_model.context_length;
-        let system_prompt = system_prompt().await;
+        Ok(config)
+    }
 
-        let mcp_tools = deps.mcp_registry.select_tools().await;
-        let mut permission_catalog = ToolPermissionCatalog::default();
+    async fn build_builder(
+        client: &rig::providers::openai::Client,
+        config: &AgentConfig,
+        model_id: String,
+    ) -> AgentBuilder<CompletionModel> {
+        let system_prompt = system_prompt().await;
         let builder = client
+            .clone()
             .completions_api()
-            .agent(selected_model.id)
+            .agent(model_id)
             .preamble(system_prompt.as_str());
-        let builder = config.apply_additional_params(builder);
-        let tool_context = ToolBuildContext {
+        config.apply_additional_params(builder)
+    }
+
+    async fn register_tools(
+        builder: AgentBuilder<CompletionModel>,
+        config: &AgentConfig,
+        deps: Arc<AgentDependencies>,
+    ) -> anyhow::Result<(
+        AgentBuilder<CompletionModel, WithBuilderTools>,
+        ToolPermissionCatalog,
+    )> {
+        let mcp_tools = deps.mcp_registry.select_tools().await;
+        let mut catalog = ToolPermissionCatalog::default();
+        let context = ToolBuildContext {
             config: config.clone(),
-            dependencies: deps.clone(),
+            dependencies: deps,
         };
         let builder = config
             .tool_set
-            .add_tools(builder, &mut permission_catalog, tool_context)
+            .add_tools(builder, &mut catalog, context)
             .await?
-            .mcp_tools(&mcp_tools, &mut permission_catalog);
+            .mcp_tools(&mcp_tools, &mut catalog);
+        Ok((builder, catalog))
+    }
 
-        let builder = Self::add_hooks(builder, chat_history, deps.clone()).add_hook(
-            ToolPermissionHook::new(deps.terminal_io.clone(), permission_catalog),
-        );
-
-        Ok(ConfiguredAgent {
-            agent: builder
-                .add_hook(ToolRecoveryHook)
-                .default_max_turns(MAX_AGENT_TURNS)
-                .build(),
-            max_context_tokens: selected_model.context_length,
-        })
+    async fn select_model(
+        config: &AgentConfig,
+        client: &rig::providers::openai::Client,
+        deps: &AgentDependencies,
+    ) -> anyhow::Result<SelectedModel> {
+        match config.model_id.clone() {
+            Some(model_id) => Ok(SelectedModel::new(model_id, config.model_context_length)),
+            None => Ok(client.select_model(deps.terminal_io.clone()).await?),
+        }
     }
 
     fn add_hooks<M, P>(
@@ -188,92 +166,16 @@ impl Agent {
             .add_hook(HistorySyncHook::new(chat_history))
     }
 
-    fn build_client(
-        config: &AgentConfig,
-        deps: &AgentDependencies,
-    ) -> anyhow::Result<openai::Client> {
-        let api_key = match &config.api_key {
-            Some(key) => key.clone(),
-            None => String::new(),
-        };
-        Ok(openai::Client::builder()
-            .api_key(api_key)
-            .base_url(config.base_url.clone())
-            .http_client(deps.http_client.as_ref().clone())
-            .build()?)
-    }
-
-    pub(super) async fn add_chat_tools<M>(
-        builder: AgentBuilder<M>,
-        catalog: &mut ToolPermissionCatalog,
-        context: ToolBuildContext,
-    ) -> anyhow::Result<AgentBuilder<M, WithBuilderTools>>
-    where
-        M: CompletionModelTrait,
-    {
-        let goal_state = context.dependencies.goal_state()?;
-        let builder = builder
-            .tool(catalog.register_builtin_tool(RunCommand::new().await?))
-            .tool(
-                catalog
-                    .register_builtin_tool(FetchUrl::new(context.dependencies.http_client.clone())),
-            )
-            .tool(
-                catalog.register_builtin_tool(
-                    SpawnSubagent::new(
-                        context.dependencies.terminal_io.clone(),
-                        context.dependencies.clone(),
-                        context.config,
-                    )
-                    .await?,
-                ),
-            )
-            .tool(catalog.register_builtin_tool(MarkGoalComplete::new(goal_state.clone())))
-            .add_hook(GoalCompletionHook::new(goal_state));
-        Ok(builder)
-    }
-
-    pub(super) async fn add_subagent_tools<M>(
-        builder: AgentBuilder<M>,
-        catalog: &mut ToolPermissionCatalog,
-        context: ToolBuildContext,
-    ) -> anyhow::Result<AgentBuilder<M, WithBuilderTools>>
-    where
-        M: CompletionModelTrait,
-    {
-        let builder = builder
-            .tool(catalog.register_builtin_tool(RunCommand::new().await?))
-            .tool(
-                catalog
-                    .register_builtin_tool(FetchUrl::new(context.dependencies.http_client.clone())),
-            );
-        Ok(builder)
-    }
-
-    pub(super) async fn add_orchestrator_tools<M>(
-        builder: AgentBuilder<M>,
-        catalog: &mut ToolPermissionCatalog,
-        context: ToolBuildContext,
-    ) -> anyhow::Result<AgentBuilder<M, WithBuilderTools>>
-    where
-        M: CompletionModelTrait,
-    {
-        let builder = builder
-            .tool(catalog.register_builtin_tool(RunCommand::new().await?))
-            .tool(
-                catalog
-                    .register_builtin_tool(FetchUrl::new(context.dependencies.http_client.clone())),
-            )
-            .tool(
-                catalog.register_builtin_tool(
-                    SpawnSubagent::new(
-                        context.dependencies.terminal_io.clone(),
-                        context.dependencies.clone(),
-                        context.config,
-                    )
-                    .await?,
-                ),
-            );
-        Ok(builder)
+    fn finish_agent(
+        builder: AgentBuilder<CompletionModel, WithBuilderTools>,
+        max_context_tokens: Option<u64>,
+    ) -> ConfiguredAgent<CompletionModel> {
+        ConfiguredAgent {
+            agent: builder
+                .add_hook(ToolRecoveryHook)
+                .default_max_turns(MAX_AGENT_TURNS)
+                .build(),
+            max_context_tokens,
+        }
     }
 }

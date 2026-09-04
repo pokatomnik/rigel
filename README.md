@@ -8,7 +8,12 @@ Rigel is a conversational LLM agent that integrates shell and network tools into
 
 ## Configuration
 
-Rigel reads a TOML configuration file from `~/.rigel/config.toml` that declares the MCP servers whose tools are exposed to the agent:
+Rigel reads the global TOML configuration from `~/.rigel/config.toml` by
+default. `rigel chat --profile <PATH>` uses `<PATH>` as the global file. In
+both cases Rigel also reads `<current-dir>/.rigel/config.toml` and overlays it
+on the global configuration.
+
+The MCP servers whose tools are exposed to the agent are declared in TOML:
 
 ```toml
 [mcpServers.local]
@@ -23,6 +28,23 @@ RUST_LOG = "debug"
 type = "http"
 url = "https://example.com/mcp"
 ```
+
+Tool permissions use one policy per runtime tool name:
+
+```toml
+[policies."run_command"]
+allow = true
+```
+
+Project policies take precedence over global policies. `allow = false` denies
+the tool without showing a confirmation. When no policy exists, automatic
+tools run without confirmation and other tools ask. A confirmation can deny a
+call, allow it once, allow it for the project, allow it for the current agent
+session, or allow it forever. Project allowances are stored in
+`<current-dir>/.rigel/config.toml`; forever allowances are stored in the
+`--profile` file or, without `--profile`, `~/.rigel/config.toml`. Session
+allowances last until that agent is rebuilt, and deny/once decisions are not
+stored. `rigel init` creates the global file without any policies.
 
 Model-specific provider parameters can be configured under `models`. The model
 key must exactly match the ID returned by `/models` (including letter case):

@@ -1,6 +1,8 @@
 use rig::completion::CompletionModel;
 
-use crate::shared::terminal::command_parser::CommandParserResult;
+use crate::shared::{
+    agent::dependencies::ConfiguredAgent, terminal::command_parser::CommandParserResult,
+};
 
 use super::chat::Chat;
 
@@ -8,7 +10,7 @@ impl<CM, P, GM> Chat<CM, P, GM>
 where
     CM: CompletionModel + 'static,
     P: crate::shared::history::history_persistence::HistoryPersistence,
-    GM: AsyncFn() -> anyhow::Result<crate::shared::agent::agent::ConfiguredAgent<CM>> + 'static,
+    GM: AsyncFn() -> anyhow::Result<ConfiguredAgent<CM>> + 'static,
 {
     pub(super) async fn next_command(&self) -> anyhow::Result<CommandParserResult> {
         let context_usage = *self.context_usage.lock().await;

@@ -1,6 +1,7 @@
 use rig::completion::CompletionModel;
 
 use crate::shared::{
+    agent::dependencies::ConfiguredAgent,
     recovery::turn_recovery::{RecoveryRequest, TurnRecoverer, TurnStatus},
     streaming::streamed_turn::{StreamRunOutcome, StreamedTurn, StreamedTurnContext},
 };
@@ -11,7 +12,7 @@ impl<CM, P, GM> Chat<CM, P, GM>
 where
     CM: CompletionModel + 'static,
     P: crate::shared::history::history_persistence::HistoryPersistence,
-    GM: AsyncFn() -> anyhow::Result<crate::shared::agent::agent::ConfiguredAgent<CM>> + 'static,
+    GM: AsyncFn() -> anyhow::Result<ConfiguredAgent<CM>> + 'static,
 {
     pub(super) async fn streamed_turn(&self) -> StreamedTurn<'_, CM, P> {
         let max_context_tokens = self.context_usage.lock().await.max_context_tokens();

@@ -1,19 +1,23 @@
 use std::{
     collections::HashMap,
-    io::ErrorKind,
     path::{Path, PathBuf},
 };
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::shared::{
-    config::consts::{CONFIG_FILE_NAME, RIGEL_DIRECTORY},
+    config::{model_config::ModelConfig, policies::PolicyConfig},
     mcp_registry::server_config::ServerConfig,
 };
 
-#[derive(Deserialize, Serialize, Default)]
+#[derive(Clone)]
+pub(crate) struct ToolPermissionPaths {
+    pub(crate) global_config_path: PathBuf,
+    pub(crate) project_config_path: PathBuf,
+}
+
+#[derive(Deserialize, Serialize)]
 pub(crate) struct RigelConfig {
     #[serde(rename = "baseUrl")]
     #[serde(default = "RigelConfig::default_base_url")]
@@ -28,66 +32,85 @@ pub(crate) struct RigelConfig {
 
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     models: HashMap<String, ModelConfig>,
+
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    policies: HashMap<String, PolicyConfig>,
 }
 
-#[derive(Deserialize, Serialize, Default)]
-struct ModelConfig {
-    #[serde(default)]
-    params: toml::Table,
+impl Default for RigelConfig {
+    fn default() -> Self {
+        Self {
+            base_url: Self::default_base_url(),
+            env_key: None,
+            servers: HashMap::new(),
+            models: HashMap::new(),
+            policies: HashMap::new(),
+        }
+    }
 }
-
-const TRANSPORT_OWNED_PARAMS: [&str; 7] = [
-    "model",
-    "messages",
-    "tools",
-    "tool_choice",
-    "temperature",
-    "max_tokens",
-    "stream",
-];
 
 impl RigelConfig {
     fn default_base_url() -> String {
         "http://127.0.0.1:1234/v1".to_owned()
     }
 
-    /// Loads the configuration from the default path, falling back to defaults on any error.
+    pub(crate) async fn from_profile(profile: Option<&Path>) -> anyhow::Result<RigelConfig> {
+        let paths = Self::config_paths(profile)?;
+        Self::from_layer_paths(
+            paths.global_config_path,
+            paths.project_config_path,
+            profile.is_some(),
+        )
+        .await
+    }
+
+    #[allow(dead_code)]
     pub(crate) async fn from_default_path() -> RigelConfig {
-        let Ok(default_path) = Self::default_config_path() else {
-            return Self::default();
+        Self::from_profile(None).await.unwrap_or_default()
+    }
+
+    pub(crate) fn config_paths(profile: Option<&Path>) -> anyhow::Result<ToolPermissionPaths> {
+        let global_path = match profile {
+            Some(path) => path.to_path_buf(),
+            None => Self::default_config_path()?,
         };
-        Self::from_path(default_path).await.unwrap_or_default()
+        let project_path = Self::project_config_path()?;
+        Ok(ToolPermissionPaths {
+            global_config_path: global_path,
+            project_config_path: project_path,
+        })
     }
 
-    /// Loads and parses the configuration from the given path, returning errors to the caller.
-    pub(crate) async fn from_path(path: impl Into<PathBuf>) -> anyhow::Result<RigelConfig> {
-        let path = path.into();
-        match tokio::fs::read_to_string(path.as_path()).await {
-            Ok(content) => Self::parse_config(content.as_str()),
-            Err(error) if error.kind() == ErrorKind::NotFound => {
-                Err(Self::missing_file_error(path.as_path()))
-            }
-            Err(error) => Err(error).with_context(|| {
-                format!(
-                    "failed to read Rigel configuration file '{}'",
-                    path.display()
-                )
-            }),
-        }
-    }
-
-    /// Serializes the configuration and writes it to the default path.
     pub(crate) async fn write_default_path(&self, confirm_override: bool) -> anyhow::Result<()> {
-        if !Self::should_write_default_path(confirm_override).await? {
+        let path = Self::default_config_path()?;
+        if !Self::should_write_path(path.as_path(), confirm_override).await? {
             return Ok(());
         }
-        let path = Self::default_config_path()?;
-        let content =
-            toml::to_string_pretty(self).context("failed to serialize Rigel configuration")?;
+        let content = Self::serialize(self)?;
+        Self::write_path(path, content).await
+    }
+
+    async fn should_write_path(path: &Path, confirm_override: bool) -> anyhow::Result<bool> {
+        if !confirm_override || !tokio::fs::try_exists(path).await? {
+            return Ok(true);
+        }
+        Ok(dialoguer::Confirm::new()
+            .with_prompt(format!(
+                "Overwrite Rigel configuration file '{}'?",
+                path.display()
+            ))
+            .report(false)
+            .interact()?)
+    }
+
+    fn serialize(config: &RigelConfig) -> anyhow::Result<String> {
+        toml::to_string_pretty(config).context("failed to serialize Rigel configuration")
+    }
+
+    async fn write_path(path: PathBuf, content: String) -> anyhow::Result<()> {
         let directory = path
             .parent()
-            .context("Rigel configuration path has no parent directory")?;
-
+            .ok_or_else(|| anyhow::anyhow!("Rigel configuration path has no parent directory"))?;
         tokio::fs::create_dir_all(directory)
             .await
             .with_context(|| {
@@ -106,19 +129,30 @@ impl RigelConfig {
             })
     }
 
-    async fn should_write_default_path(confirm_override: bool) -> anyhow::Result<bool> {
-        let path = Self::default_config_path()?;
-        if !confirm_override || !tokio::fs::try_exists(path.as_path()).await? {
-            return Ok(true);
-        }
+    async fn from_layer_paths(
+        global_path: PathBuf,
+        project_path: PathBuf,
+        explicit_global: bool,
+    ) -> anyhow::Result<RigelConfig> {
+        let global = Self::read_layer(global_path, explicit_global).await?;
+        let project = Self::read_layer(project_path, false).await.ok().flatten();
+        Ok(Self::merge_optional(global, project))
+    }
 
-        Ok(dialoguer::Confirm::new()
-            .with_prompt(format!(
-                "Overwrite Rigel configuration file '{}'?",
-                path.as_path().display()
-            ))
-            .report(false)
-            .interact()?)
+    pub(crate) async fn from_path(path: impl Into<PathBuf>) -> anyhow::Result<RigelConfig> {
+        let path = path.into();
+        match tokio::fs::read_to_string(path.as_path()).await {
+            Ok(content) => Self::parse_config(content.as_str()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Err(Self::missing_file_error(path.as_path()))
+            }
+            Err(error) => Err(error).with_context(|| {
+                format!(
+                    "failed to read Rigel configuration file '{}'",
+                    path.display()
+                )
+            }),
+        }
     }
 
     fn default_config_path() -> anyhow::Result<PathBuf> {
@@ -127,7 +161,15 @@ impl RigelConfig {
                 "Rigel configuration file could not be located because the user home directory is unavailable. Run `rigel init` to perform basic initialization."
             )
         })?;
-        Ok(home_path.join(RIGEL_DIRECTORY).join(CONFIG_FILE_NAME))
+        Ok(home_path
+            .join(crate::shared::config::consts::RIGEL_DIRECTORY)
+            .join(crate::shared::config::consts::CONFIG_FILE_NAME))
+    }
+
+    fn project_config_path() -> anyhow::Result<PathBuf> {
+        Ok(std::env::current_dir()?
+            .join(crate::shared::config::consts::RIGEL_DIRECTORY)
+            .join(crate::shared::config::consts::CONFIG_FILE_NAME))
     }
 
     fn missing_file_error(path: &Path) -> anyhow::Error {
@@ -137,41 +179,69 @@ impl RigelConfig {
         )
     }
 
-    fn parse_config(content: &str) -> anyhow::Result<RigelConfig> {
+    pub(super) fn parse_config(content: &str) -> anyhow::Result<RigelConfig> {
         let config: RigelConfig = toml::from_str(content)?;
         config.validate_model_params()?;
         Ok(config)
     }
 
-    fn validate_model_params(&self) -> anyhow::Result<()> {
-        for (model_id, model) in &self.models {
-            Self::validate_param_names(model_id, &model.params)?;
-            serde_json::to_value(&model.params)?;
+    pub(super) async fn read_layer(
+        path: PathBuf,
+        required: bool,
+    ) -> anyhow::Result<Option<RigelConfig>> {
+        match Self::from_path(path).await {
+            Ok(config) => Ok(Some(config)),
+            Err(error) if required => Err(error),
+            Err(_) => Ok(None),
         }
-        Ok(())
     }
 
-    fn validate_param_names(model_id: &str, params: &toml::Table) -> anyhow::Result<()> {
-        if let Some(name) = params
-            .keys()
-            .find(|name| TRANSPORT_OWNED_PARAMS.contains(&name.as_str()))
-        {
-            anyhow::bail!(
-                "model `{model_id}` params cannot override transport-owned field `{name}`"
-            );
+    pub(super) fn merge_optional(
+        global: Option<RigelConfig>,
+        project: Option<RigelConfig>,
+    ) -> RigelConfig {
+        match (global, project) {
+            (Some(global), Some(project)) => Self::merge(global, project),
+            (Some(global), None) => global,
+            (None, Some(project)) => project,
+            (None, None) => Self::default(),
         }
-        Ok(())
     }
 
-    pub(crate) fn model_params(&self, model_id: &str) -> anyhow::Result<Option<Value>> {
-        let Some(model) = self.models.get(model_id) else {
-            return Ok(None);
-        };
-        if model.params.is_empty() {
-            return Ok(None);
+    fn merge(global: RigelConfig, project: RigelConfig) -> RigelConfig {
+        let RigelConfig {
+            servers: global_servers,
+            models: global_models,
+            policies: global_policies,
+            ..
+        } = global;
+        let RigelConfig {
+            base_url,
+            env_key,
+            servers: project_servers,
+            models: project_models,
+            policies: project_policies,
+            ..
+        } = project;
+        RigelConfig {
+            base_url,
+            env_key,
+            servers: Self::merge_servers(global_servers, project_servers),
+            models: Self::merge_models(global_models, project_models),
+            policies: Self::merge_policies(global_policies, project_policies),
         }
-        Self::validate_param_names(model_id, &model.params)?;
-        Ok(Some(serde_json::to_value(&model.params)?))
+    }
+
+    pub(super) fn servers_ref(&self) -> &HashMap<String, ServerConfig> {
+        &self.servers
+    }
+
+    pub(super) fn models_ref(&self) -> &HashMap<String, ModelConfig> {
+        &self.models
+    }
+
+    pub(super) fn policies_ref(&self) -> &HashMap<String, PolicyConfig> {
+        &self.policies
     }
 
     pub fn base_url(&self) -> &str {
@@ -179,17 +249,11 @@ impl RigelConfig {
     }
 
     pub fn api_key(&self) -> Option<String> {
-        let Some(ref api_env_key) = self.env_key else {
-            return None;
-        };
+        let api_env_key = self.env_key.as_ref()?;
         let Ok(api_key) = std::env::var(api_env_key.as_str()) else {
             return None;
         };
         Some(api_key)
-    }
-
-    pub fn mcp_servers(&self) -> &HashMap<String, ServerConfig> {
-        &self.servers
     }
 
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
@@ -205,86 +269,152 @@ impl RigelConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::RigelConfig;
+    use crate::shared::mcp_registry::server_config::ServerConfig;
 
     #[test]
     fn uses_default_base_url_when_missing() -> anyhow::Result<()> {
         let config = RigelConfig::parse_config("")?;
 
         assert_eq!(config.base_url, "http://127.0.0.1:1234/v1");
-        assert_eq!(config.model_params("model-a")?, None);
         Ok(())
     }
 
     #[test]
-    fn exact_model_id_returns_provider_parameters_without_conversion() -> anyhow::Result<()> {
-        let config = RigelConfig::parse_config(
+    fn available_config_layer_is_used_when_the_other_is_missing() -> anyhow::Result<()> {
+        let project = RigelConfig::parse_config(
             r#"
-[models."gpt-5.5".params]
-reasoning_effort = "high"
-temperature_hint = 0.25
-stop = ["END", "DONE"]
+baseUrl = "https://project.example/v1"
 
-[models."gpt-5.5".params.reasoning]
-effort = "high"
-enabled = true
+[policies.run_command]
+allow = true
 "#,
         )?;
 
+        let merged = RigelConfig::merge_optional(None, Some(project));
+
+        assert_eq!(merged.base_url(), "https://project.example/v1");
+        assert_eq!(merged.policy_for("run_command"), Some(true));
+        Ok(())
+    }
+
+    #[test]
+    fn global_config_layer_is_kept_when_project_is_missing() -> anyhow::Result<()> {
+        let global = RigelConfig::parse_config(
+            r#"
+baseUrl = "https://global.example/v1"
+
+[policies.run_command]
+allow = false
+"#,
+        )?;
+
+        let merged = RigelConfig::merge_optional(Some(global), None);
+
+        assert_eq!(merged.base_url(), "https://global.example/v1");
+        assert_eq!(merged.policy_for("run_command"), Some(false));
+        Ok(())
+    }
+
+    #[test]
+    fn no_available_config_layer_keeps_default_behavior() {
+        let merged = RigelConfig::merge_optional(None, None);
+
+        assert_eq!(merged.base_url(), "http://127.0.0.1:1234/v1");
+        assert_eq!(merged.policy_for("run_command"), None);
+    }
+
+    #[test]
+    fn default_config_serialization_omits_empty_policies() -> anyhow::Result<()> {
+        let content = toml::to_string_pretty(&RigelConfig::default())?;
+
+        assert!(!content.contains("policies"));
+        Ok(())
+    }
+
+    #[test]
+    fn project_layer_merges_maps_and_nested_arrays() -> anyhow::Result<()> {
+        let global = RigelConfig::parse_config(
+            r#"
+baseUrl = "https://global.example/v1"
+envKey = "GLOBAL_KEY"
+
+[models.shared.params]
+stop = ["global"]
+[models.shared.params.reasoning]
+effort = "low"
+global_only = true
+
+[policies.run_command]
+allow = false
+[policies.fetch_url]
+allow = true
+
+[mcpServers.local]
+type = "stdio"
+command = "global-command"
+args = ["global-arg"]
+[mcpServers.local.env]
+SHARED = "global"
+GLOBAL_ONLY = "yes"
+"#,
+        )?;
+        let project = RigelConfig::parse_config(
+            r#"
+[models.shared.params]
+stop = ["project"]
+project_only = 7
+[models.shared.params.reasoning]
+effort = "high"
+
+[policies.run_command]
+allow = true
+
+[mcpServers.local]
+type = "stdio"
+command = "project-command"
+args = ["project-arg"]
+[mcpServers.local.env]
+SHARED = "project"
+PROJECT_ONLY = "yes"
+"#,
+        )?;
+
+        let merged = RigelConfig::merge_optional(Some(global), Some(project));
+
+        assert_eq!(merged.base_url(), "http://127.0.0.1:1234/v1");
+        assert_eq!(merged.api_key(), None);
+        assert_eq!(merged.policy_for("run_command"), Some(true));
+        assert_eq!(merged.policy_for("fetch_url"), Some(true));
         assert_eq!(
-            config.model_params("gpt-5.5")?,
+            merged.model_params("shared")?,
             Some(serde_json::json!({
-                "reasoning_effort": "high",
-                "temperature_hint": 0.25,
-                "stop": ["END", "DONE"],
-                "reasoning": {"effort": "high", "enabled": true}
+                "stop": ["global", "project"],
+                "project_only": 7,
+                "reasoning": {
+                    "effort": "high",
+                    "global_only": true
+                }
             }))
         );
+
+        let Some(ServerConfig::Stdio(server)) = merged.mcp_servers().get("local") else {
+            anyhow::bail!("merged MCP server is not stdio")
+        };
+        assert_eq!(server.command, "project-command");
+        assert_eq!(server.args, ["global-arg", "project-arg"]);
+        assert_eq!(
+            server.env.get("SHARED").map(String::as_str),
+            Some("project")
+        );
+        assert_eq!(
+            server.env.get("GLOBAL_ONLY").map(String::as_str),
+            Some("yes")
+        );
+        assert_eq!(
+            server.env.get("PROJECT_ONLY").map(String::as_str),
+            Some("yes")
+        );
         Ok(())
-    }
-
-    #[test]
-    fn model_lookup_is_exact_and_case_sensitive() -> anyhow::Result<()> {
-        let config = RigelConfig::parse_config(
-            r#"
-[models."Model-A".params]
-think = true
-"#,
-        )?;
-
-        assert!(config.model_params("model-a")?.is_none());
-        assert!(config.model_params("Model-A")?.is_some());
-        assert!(config.model_params("Model-A-extra")?.is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn missing_and_empty_parameters_do_not_add_request_parameters() -> anyhow::Result<()> {
-        let config = RigelConfig::parse_config(
-            r#"
-[models."empty".params]
-"#,
-        )?;
-
-        assert!(config.model_params("empty")?.is_none());
-        assert!(config.model_params("missing")?.is_none());
-        Ok(())
-    }
-
-    #[test]
-    fn transport_owned_parameters_are_rejected() {
-        for name in TRANSPORT_OWNED_PARAMS {
-            let source = format!("[models.unsafe.params]\n{name} = \"configured\"\n");
-            assert!(
-                RigelConfig::parse_config(source.as_str()).is_err(),
-                "{name}"
-            );
-        }
-    }
-
-    #[test]
-    fn models_and_params_must_be_tables() {
-        assert!(RigelConfig::parse_config("models = []").is_err());
-        assert!(RigelConfig::parse_config("[models.test]\nparams = true").is_err());
     }
 }
