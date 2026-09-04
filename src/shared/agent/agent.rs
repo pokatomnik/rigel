@@ -53,20 +53,6 @@ impl Agent {
         .await
     }
 
-    #[allow(dead_code)]
-    pub(crate) async fn new_orchestrator_agent(
-        config: AgentConfig,
-        chat_history: Arc<ChatHistory<Arc<History>>>,
-        deps: Arc<AgentDependencies>,
-    ) -> anyhow::Result<ConfiguredAgent<CompletionModel>> {
-        Self::build_agent(
-            config.with_tool_set(AgentToolSet::Orchestrator),
-            chat_history,
-            deps,
-        )
-        .await
-    }
-
     pub(crate) async fn new_chat_agent(
         config: AgentConfig,
         chat_history: Arc<ChatHistory<Arc<History>>>,

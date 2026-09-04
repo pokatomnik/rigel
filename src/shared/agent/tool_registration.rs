@@ -62,31 +62,4 @@ impl Agent {
             );
         Ok(builder)
     }
-
-    pub(super) async fn add_orchestrator_tools<M>(
-        builder: AgentBuilder<M>,
-        catalog: &mut ToolPermissionCatalog,
-        context: ToolBuildContext,
-    ) -> anyhow::Result<AgentBuilder<M, WithBuilderTools>>
-    where
-        M: CompletionModelTrait,
-    {
-        let builder = builder
-            .tool(catalog.register_builtin_tool(RunCommand::new().await?))
-            .tool(
-                catalog
-                    .register_builtin_tool(FetchUrl::new(context.dependencies.http_client.clone())),
-            )
-            .tool(
-                catalog.register_builtin_tool(
-                    SpawnSubagent::new(
-                        context.dependencies.terminal_io.clone(),
-                        context.dependencies.clone(),
-                        context.config,
-                    )
-                    .await?,
-                ),
-            );
-        Ok(builder)
-    }
 }

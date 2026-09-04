@@ -10,7 +10,6 @@ use super::{agent::Agent, tool_build_context::ToolBuildContext};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AgentToolSet {
     Subagent,
-    Orchestrator,
     Chat,
 }
 
@@ -26,7 +25,6 @@ impl AgentToolSet {
     {
         match self {
             Self::Subagent => Agent::add_subagent_tools(builder, catalog, context).await,
-            Self::Orchestrator => Agent::add_orchestrator_tools(builder, catalog, context).await,
             Self::Chat => Agent::add_chat_tools(builder, catalog, context).await,
         }
     }
