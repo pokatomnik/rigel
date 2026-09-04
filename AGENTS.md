@@ -88,6 +88,17 @@ Use `rustfmt` defaults (four spaces, trailing commas). Follow Rust conventions: 
 - State that belongs to a structure must be stored with that structure rather than in a parallel procedural helper or unrelated registry.
 - When the structure belongs to an external crate and cannot be changed, use a local wrapper or extension trait to keep the behavior at the structure boundary.
 
+## API Design
+
+1. When designing a struct API, its constructor must accept no more than three arguments (excluding `self`). If more context is required, split responsibilities or use a dedicated context object.
+2. If a constructor field is optional, it must not be a constructor argument. Add it through a builder-pattern method instead.
+
+## Domain Terminology
+
+### Session
+
+Session is one run of one agent created by a single `Agent::build_agent` call. Rebuilding an agent starts a new session and resets state that is held only in memory for the previous agent run.
+
 ## Design and Complexity Constraints
 
 Treat the following as mandatory contribution rules:
