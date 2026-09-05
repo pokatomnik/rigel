@@ -11,7 +11,7 @@ use crate::{
     },
     tools::{
         tool_fetch_url::FetchUrl, tool_mark_goal_complete::MarkGoalComplete,
-        tool_run_command::RunCommand, tool_spawn_subagent::SpawnSubagent,
+        tool_read_file::ReadFile, tool_run_command::RunCommand, tool_spawn_subagent::SpawnSubagent,
     },
 };
 
@@ -27,6 +27,7 @@ impl Agent {
         let goal_state = context.dependencies.goal_state()?;
         let builder = builder
             .tool(catalog.register_builtin_tool(RunCommand::new().await?))
+            .tool(catalog.register_builtin_tool(ReadFile::new().await?))
             .tool(
                 catalog
                     .register_builtin_tool(FetchUrl::new(context.dependencies.http_client.clone())),
@@ -56,6 +57,7 @@ impl Agent {
     {
         let builder = builder
             .tool(catalog.register_builtin_tool(RunCommand::new().await?))
+            .tool(catalog.register_builtin_tool(ReadFile::new().await?))
             .tool(
                 catalog
                     .register_builtin_tool(FetchUrl::new(context.dependencies.http_client.clone())),

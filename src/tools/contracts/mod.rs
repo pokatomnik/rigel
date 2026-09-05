@@ -13,6 +13,7 @@ pub mod error_codes;
 pub(crate) enum Action {
     Completed,
     Fetched,
+    Read,
 }
 
 #[cfg(test)]
@@ -21,7 +22,7 @@ mod tests {
 
     #[test]
     fn action_values_are_stable_snake_case_strings() {
-        let actions = [Action::Completed, Action::Fetched];
+        let actions = [Action::Completed, Action::Fetched, Action::Read];
         let values = actions
             .iter()
             .map(serde_json::to_string)
@@ -30,7 +31,7 @@ mod tests {
         assert_eq!(
             values.ok(),
             Some(
-                vec!["\"completed\"", "\"fetched\""]
+                vec!["\"completed\"", "\"fetched\"", "\"read\""]
                     .into_iter()
                     .map(String::from)
                     .collect()
