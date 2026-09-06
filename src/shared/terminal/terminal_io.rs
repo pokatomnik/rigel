@@ -5,6 +5,17 @@ use std::{
 
 use crate::entities::{context_usage::ContextUsage, tool_confirm_result::ToolConfirmResult};
 
+/// Describes the non-error outcomes of one line read from the terminal.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ReadlineOutcome {
+    /// A line was read, with the existing prompt whitespace removed.
+    Text(String),
+    /// The input stream reached EOF before a line was read.
+    Eof,
+    /// The user interrupted the line read.
+    Cancelled,
+}
+
 #[derive(Default)]
 pub(crate) struct TerminalIO;
 
@@ -96,11 +107,17 @@ impl TerminalIO {
         anyhow::bail!("No item selected")
     }
 
-    pub fn readline(&self, context_usage: ContextUsage) -> anyhow::Result<String> {
+    pub fn readline(&self, context_usage: ContextUsage) -> anyhow::Result<ReadlineOutcome> {
         self.print_prompt_prefix(context_usage);
         let mut line = String::new();
-        io::stdin().read_line(&mut line)?;
-        Ok(line.trim().to_string())
+        match io::stdin().read_line(&mut line) {
+            Ok(0) => Ok(ReadlineOutcome::Eof),
+            Ok(_) => Ok(ReadlineOutcome::Text(line.trim().to_string())),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+                Ok(ReadlineOutcome::Cancelled)
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub fn editor(&self) -> anyhow::Result<String> {

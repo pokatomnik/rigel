@@ -10,6 +10,7 @@ use crate::{
         config::rigel_config::RigelConfig, mcp_registry::registry::McpRegistry,
         terminal::terminal_io::TerminalIO,
     },
+    tools::tool_fetch_url::policy::is_allowed_network_target,
 };
 
 pub mod cmd;
@@ -21,6 +22,7 @@ pub mod tools;
 pub mod use_cases;
 
 const GLOBAL_TOOL_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_REDIRECTS: usize = 10;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -59,6 +61,15 @@ async fn get_http_client() -> anyhow::Result<Arc<Client>> {
         .gzip(true)
         .brotli(true)
         .connect_timeout(GLOBAL_TOOL_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= MAX_REDIRECTS
+                || !is_allowed_network_target(attempt.url())
+            {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        }))
         .user_agent(include_str!("./user_agents.txt"))
         .build()?;
     Ok(Arc::new(config))

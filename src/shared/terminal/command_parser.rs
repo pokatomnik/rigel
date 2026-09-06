@@ -10,6 +10,12 @@ pub(crate) enum CommandParserResult {
     /// Continue requesting a command / prompt from the user.
     CommandContinue,
 
+    /// Stop because the terminal input reached EOF.
+    InputEof,
+
+    /// Stop because the user cancelled terminal input.
+    InputCancelled,
+
     /// A prompt was parsed from the user.
     Prompt(String, bool),
 
@@ -114,15 +120,29 @@ impl CommandParser {
         }
     }
 
-    pub fn handle_editor(&self) -> CommandParserResult {
+    pub async fn handle_editor(&self) -> CommandParserResult {
         let result = self.terminal_io.editor().unwrap_or_default();
-        CommandParserResult::Prompt(result, true)
+        if Self::command_parts(result.trim_start()).is_some() {
+            self.terminal_io.print(format!("{result}\n").as_str());
+        }
+        self.parse_editor_input(result).await
     }
 
     pub async fn parse(&self, raw_input: String) -> CommandParserResult {
+        self.parse_input(raw_input, false).await
+    }
+
+    async fn parse_editor_input(&self, raw_input: String) -> CommandParserResult {
+        Box::pin(self.parse_input(raw_input, true)).await
+    }
+
+    async fn parse_input(&self, raw_input: String, prompt_echo: bool) -> CommandParserResult {
+        if raw_input.trim().is_empty() {
+            return CommandParserResult::CommandContinue;
+        }
         let command_input = raw_input.trim_start();
         let Some((command_name, arguments)) = Self::command_parts(command_input) else {
-            return CommandParserResult::Prompt(raw_input, false);
+            return CommandParserResult::Prompt(raw_input, prompt_echo);
         };
         let command = KnownCommand::from_name(command_name.as_str());
         match command {
@@ -155,7 +175,7 @@ impl CommandParser {
             Some(KnownCommand::Exit) => CommandParserResult::CommandExit,
             Some(KnownCommand::Skills) => self.get_skill().await,
             Some(KnownCommand::Help) => self.handle_help(),
-            Some(KnownCommand::Editor) => self.handle_editor(),
+            Some(KnownCommand::Editor) => self.handle_editor().await,
             Some(KnownCommand::New) => CommandParserResult::New,
             Some(KnownCommand::Compact) => CommandParserResult::Compact,
             Some(KnownCommand::Agent) => CommandParserResult::AgentConfig,
@@ -188,6 +208,39 @@ mod tests {
         let result = parser().parse("hello".to_string()).await;
 
         assert!(matches!(result, CommandParserResult::Prompt(_, false)));
+    }
+
+    #[tokio::test]
+    async fn editor_goal_input_uses_the_regular_command_parser() {
+        let result = parser()
+            .parse_editor_input("/goal inspect  the repository carefully".to_string())
+            .await;
+
+        assert!(matches!(
+            result,
+            CommandParserResult::Goal(goal) if goal == "inspect  the repository carefully"
+        ));
+    }
+
+    #[tokio::test]
+    async fn editor_plain_text_remains_an_echoed_prompt() {
+        let result = parser()
+            .parse_editor_input("describe the repository".to_string())
+            .await;
+
+        assert!(matches!(result, CommandParserResult::Prompt(_, true)));
+    }
+
+    #[tokio::test]
+    async fn blank_input_stays_in_the_loop_without_becoming_a_prompt() {
+        for input in ["", " ", "\n", "\t\n"] {
+            let result = parser().parse(input.to_string()).await;
+
+            assert!(
+                matches!(result, CommandParserResult::CommandContinue),
+                "{input:?}"
+            );
+        }
     }
 
     #[tokio::test]

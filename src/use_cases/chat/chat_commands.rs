@@ -1,7 +1,8 @@
 use rig::completion::CompletionModel;
 
 use crate::shared::{
-    agent::dependencies::ConfiguredAgent, terminal::command_parser::CommandParserResult,
+    agent::dependencies::ConfiguredAgent,
+    terminal::{command_parser::CommandParserResult, terminal_io::ReadlineOutcome},
 };
 
 use super::chat::Chat;
@@ -14,8 +15,11 @@ where
 {
     pub(super) async fn next_command(&self) -> anyhow::Result<CommandParserResult> {
         let context_usage = *self.context_usage.lock().await;
-        let input = self.terminal_io.readline(context_usage)?;
-        Ok(self.command_parser.parse(input).await)
+        match self.terminal_io.readline(context_usage)? {
+            ReadlineOutcome::Text(input) => Ok(self.command_parser.parse(input).await),
+            ReadlineOutcome::Eof => Ok(CommandParserResult::InputEof),
+            ReadlineOutcome::Cancelled => Ok(CommandParserResult::InputCancelled),
+        }
     }
 
     async fn handle_prompt(&self, prompt: String, echo: bool) -> anyhow::Result<bool> {
@@ -48,7 +52,9 @@ where
         command: CommandParserResult,
     ) -> anyhow::Result<bool> {
         match command {
-            CommandParserResult::CommandExit => Ok(false),
+            CommandParserResult::CommandExit
+            | CommandParserResult::InputEof
+            | CommandParserResult::InputCancelled => Ok(false),
             CommandParserResult::CommandContinue => Ok(true),
             CommandParserResult::Prompt(prompt, echo) => self.handle_prompt(prompt, echo).await,
             CommandParserResult::Goal(goal) => self.handle_goal(goal).await,

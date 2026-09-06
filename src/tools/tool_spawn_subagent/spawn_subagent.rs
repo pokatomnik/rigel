@@ -16,7 +16,7 @@ use crate::{
         terminal::terminal_io::TerminalIO,
         tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata},
     },
-    tools::contracts::error_codes,
+    tools::error_codes,
     use_cases::subagent::subagent::{Subagent, SubagentContext},
 };
 
@@ -157,7 +157,7 @@ mod tests {
         if let Err(error) = error {
             assert_eq!(
                 error.code(),
-                Some(crate::tools::contracts::error_codes::INVALID_ARGUMENT)
+                Some(crate::tools::error_codes::INVALID_ARGUMENT)
             );
             assert!(error.message().contains("task"));
         }
@@ -169,7 +169,7 @@ mod tests {
 
         assert_eq!(
             error.code(),
-            Some(crate::tools::contracts::error_codes::SUBAGENT_ERROR)
+            Some(crate::tools::error_codes::SUBAGENT_ERROR)
         );
         assert!(error.message().contains("provider unavailable"));
     }

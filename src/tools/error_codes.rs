@@ -1,0 +1,17 @@
+pub(crate) const INVALID_ARGUMENT: &str = "INVALID_ARGUMENT";
+pub(crate) const USER_CANCELLED: &str = "USER_CANCELLED";
+pub(crate) const INTERACTION_UNAVAILABLE: &str = "INTERACTION_UNAVAILABLE";
+pub(crate) const IO_ERROR: &str = "IO_ERROR";
+pub(crate) const NETWORK_ERROR: &str = "NETWORK_ERROR";
+pub(crate) const TIMEOUT: &str = "TIMEOUT";
+pub(crate) const SUBAGENT_ERROR: &str = "SUBAGENT_ERROR";
+pub(crate) const GOAL_NOT_ACTIVE: &str = "GOAL_NOT_ACTIVE";
+pub(crate) const NOT_FOUND: &str = "NOT_FOUND";
+pub(crate) const NO_MATCH: &str = "NO_MATCH";
+pub(crate) const AMBIGUOUS_MATCH: &str = "AMBIGUOUS_MATCH";
+pub(crate) const STALE_CONTENT: &str = "STALE_CONTENT";
+pub(crate) const PATH_OUTSIDE_WORKSPACE: &str = "PATH_OUTSIDE_WORKSPACE";
+pub(crate) const PARENT_ERROR: &str = "PARENT_ERROR";
+pub(crate) const PERMISSION_DENIED: &str = "PERMISSION_DENIED";
+pub(crate) const UNSUPPORTED_FILE: &str = "UNSUPPORTED_FILE";
+pub(crate) const HTTP_STATUS_ERROR_KIND: &str = "http_status";

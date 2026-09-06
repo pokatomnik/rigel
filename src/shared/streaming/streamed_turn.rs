@@ -7,6 +7,7 @@ use rig::{
     completion::{CompletionModel, Usage},
     message::{Message, UserContent},
     streaming::{StreamedAssistantContent, StreamedUserContent, StreamingChat},
+    tool::ToolContext,
 };
 use tokio::sync::Mutex;
 
@@ -85,17 +86,17 @@ where
     P: HistoryPersistence,
 {
     history: &'a ChatHistory<P>,
-    max_context_tokens: Option<u64>,
+    context_usage: ContextUsage,
 }
 
 impl<'a, P> StreamedTurnContext<'a, P>
 where
     P: HistoryPersistence,
 {
-    pub(crate) fn new(history: &'a ChatHistory<P>, max_context_tokens: Option<u64>) -> Self {
+    pub(crate) fn new(history: &'a ChatHistory<P>, context_usage: ContextUsage) -> Self {
         Self {
             history,
-            max_context_tokens,
+            context_usage,
         }
     }
 }
@@ -110,6 +111,7 @@ where
     terminal_io: &'a TerminalIO,
     history: &'a ChatHistory<P>,
     max_context_tokens: Option<u64>,
+    context_usage: ContextUsage,
 }
 
 impl<'a, CM, P> StreamedTurn<'a, CM, P>
@@ -123,7 +125,11 @@ where
         terminal_io: &'a TerminalIO,
         history: &'a ChatHistory<P>,
     ) -> Self {
-        Self::with_context(agent, terminal_io, StreamedTurnContext::new(history, None))
+        Self::with_context(
+            agent,
+            terminal_io,
+            StreamedTurnContext::new(history, ContextUsage::new(None, None)),
+        )
     }
 
     pub(crate) fn with_context(
@@ -135,8 +141,15 @@ where
             agent,
             terminal_io,
             history: context.history,
-            max_context_tokens: context.max_context_tokens,
+            max_context_tokens: context.context_usage.max_context_tokens(),
+            context_usage: context.context_usage,
         }
+    }
+
+    fn tool_context(&self) -> ToolContext {
+        let mut context = ToolContext::new();
+        context.insert(self.context_usage);
+        context
     }
 
     pub(crate) async fn run_latest(&self, prompt: String) -> anyhow::Result<StreamRunOutcome> {
@@ -157,6 +170,7 @@ where
             let agent = self.agent.lock().await;
             agent
                 .stream_chat(prompt, base.clone())
+                .tool_context(self.tool_context())
                 .max_invalid_tool_call_retries(MAX_INVALID_TOOL_CALL_ATTEMPTS)
         };
         let mut stream = request.await;
@@ -396,6 +410,7 @@ mod tests {
         completion::Usage,
         message::{AssistantContent, Message, UserContent},
         test_utils::{MockAddTool, MockCompletionModel, MockStreamEvent},
+        tool::{Tool, ToolContext, ToolExecutionError},
     };
     use tokio::sync::Mutex;
 
@@ -427,6 +442,35 @@ mod tests {
                 self.snapshots.lock().await.push(messages.to_vec());
                 Ok(())
             })
+        }
+    }
+
+    #[derive(Clone)]
+    struct ContextProbe {
+        seen: Arc<Mutex<Option<ContextUsage>>>,
+    }
+
+    impl Tool for ContextProbe {
+        const NAME: &'static str = "context_probe";
+        type Args = serde_json::Value;
+        type Output = String;
+        type Error = ToolExecutionError;
+
+        fn description(&self) -> String {
+            "Records the context usage supplied to tool execution".to_string()
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn call(
+            &self,
+            context: &mut ToolContext,
+            _args: Self::Args,
+        ) -> Result<Self::Output, Self::Error> {
+            *self.seen.lock().await = context.get::<ContextUsage>().copied();
+            Ok("observed".to_string())
         }
     }
 
@@ -469,6 +513,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn streamed_turn_provides_current_context_usage_to_tools() -> Result<()> {
+        let model = MockCompletionModel::from_stream_turns([
+            vec![
+                MockStreamEvent::tool_call("call-1", "context_probe", serde_json::json!({})),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+            vec![
+                MockStreamEvent::text("done"),
+                MockStreamEvent::final_response_with_total_tokens(1),
+            ],
+        ]);
+        let seen = Arc::new(Mutex::new(None));
+        let usage = ContextUsage::new(Some(800), Some(1_000));
+        let agent = AgentBuilder::new(model)
+            .tool(ContextProbe { seen: seen.clone() })
+            .default_max_turns(3)
+            .build();
+        let history = ChatHistory::new(
+            Vec::new(),
+            crate::shared::history::history_persistence::NonPersistentHistory,
+        );
+        let turn = StreamedTurn::with_context(
+            Arc::new(Mutex::new(agent)),
+            &TerminalIO,
+            StreamedTurnContext::new(&history, usage),
+        );
+
+        let outcome = turn.run("prompt".to_string(), Vec::new()).await?;
+
+        ensure!(matches!(outcome, StreamRunOutcome::Completed(_)));
+        ensure!(*seen.lock().await == Some(usage));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn completion_uses_the_last_provider_call_usage() -> Result<()> {
         let mut first_usage = Usage::new();
         first_usage.total_tokens = 300;
@@ -495,7 +574,7 @@ mod tests {
         let turn = StreamedTurn::with_context(
             Arc::new(Mutex::new(agent)),
             &TerminalIO,
-            StreamedTurnContext::new(&history, Some(1_000)),
+            StreamedTurnContext::new(&history, ContextUsage::new(None, Some(1_000))),
         );
 
         let outcome = turn.run("prompt".to_string(), Vec::new()).await?;

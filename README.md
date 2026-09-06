@@ -235,16 +235,21 @@ Located in `src/controllers/chat_controller.rs`, the IndexController orchestrate
 
 ### Built-in Tools
 
-Rigel provides four built-in tools:
+Rigel provides nine built-in tools:
 
-| Tool             | Description                                         |
-| ---------------- | --------------------------------------------------- |
-| `run_command`    | Run shell commands, including filesystem operations |
-| `fetch_url`      | Fetch readable text from an HTTP or HTTPS URL       |
-| `spawn_subagent` | Run an autonomous subagent for a delegated task     |
-| `mark_goal_complete` | End the active `/goal` mode with a truthful work report |
+| Tool                 | Description                                                                     |
+| -------------------- | ------------------------------------------------------------------------------- |
+| `run_command`        | Run shell commands for builds, tests, git, programs, and uncovered capabilities |
+| `read_file`          | Read bounded UTF-8 text with numbered lines                                     |
+| `search_files`       | Search bounded file contents for literal text                                   |
+| `edit_file`          | Replace one exact unique fragment with a bounded diff                           |
+| `write_file`         | Create or fully replace a UTF-8 text file                                       |
+| `fetch_url`          | Fetch bounded text from a known HTTP or HTTPS URL                               |
+| `spawn_subagent`     | Run an autonomous subagent for a delegated task                                 |
+| `ask_user`           | Ask one question with selectable answers or required free-form input            |
+| `mark_goal_complete` | End the active `/goal` mode with a truthful work report                         |
 
-Filesystem changes are performed through `run_command` in the startup directory and remain subject to the existing tool permission mechanism.
+`read_file` reads only bounded, ordinary UTF-8 text from relative paths inside the startup workspace and runs automatically; `search_files` performs bounded, literal, case-sensitive content searches in files or directories inside that workspace and also runs automatically; use them instead of shell commands or pipelines for ordinary file reading and content searches. Prefer `read_file` for inspecting a matching file. After reading or searching, use `edit_file` for one exact unique replacement in an existing UTF-8 file; it requires confirmation, verifies the file was not changed between reads, writes the result directly, and returns only a bounded diff. Use `write_file` for a consciously complete new file or full replacement; it requires confirmation, creates missing parent directories inside the workspace, never appends, and rejects content above its server limit. `ask_user` is automatic and is available only to the main chat agent: it presents the model's ordered answers plus `Something else`; choosing the latter keeps the same tool call open until the user enters non-empty free text. It does not add a separate user turn and is available during `/goal` when the model needs the user's choice. Its automatic permission avoids a confirmation dialog; an explicit `allow = false` policy can still deny it without prompting. `run_command` remains the fallback for builds, tests, git, programs, and capabilities not covered by these dedicated tools; it keeps the existing shell, startup directory, 30-second timeout, output cap, and permission confirmation policy. Other filesystem changes remain subject to the existing tool permission mechanism.
 
 ### Use Cases
 

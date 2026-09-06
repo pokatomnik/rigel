@@ -1,7 +1,7 @@
 const AGENTS_MD_NAME: &str = "AGENTS.md";
 
-pub(crate) async fn system_prompt() -> String {
-    let system_builin = include_str!("./system_prompt.md");
+pub(crate) async fn chat_system_prompt() -> String {
+    let system_builin = include_str!("./chat_system_prompt.md");
 
     let cwd = std::env::current_dir();
     let Ok(cwd) = cwd else {
@@ -16,7 +16,7 @@ pub(crate) async fn system_prompt() -> String {
         return system_builin.to_string();
     };
 
-    return format!(
+    format!(
         r#"
         ## System prompt
         {system_builin}
@@ -32,5 +32,17 @@ pub(crate) async fn system_prompt() -> String {
 
         {agents_md_contents}
     "#
-    );
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn chat_prompt_contains_chat_workflows() {
+        let prompt = include_str!("./chat_system_prompt.md");
+
+        assert!(prompt.contains("/goal"));
+        assert!(prompt.contains("ask_user"));
+        assert!(prompt.contains("mark_goal_complete"));
+    }
 }
