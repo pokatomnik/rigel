@@ -4,6 +4,7 @@ use serde::Serialize;
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Action {
     Completed,
+    Edited,
     Fetched,
     Read,
     Searched,
@@ -17,6 +18,7 @@ mod tests {
     fn action_values_are_stable_snake_case_strings() {
         let actions = [
             Action::Completed,
+            Action::Edited,
             Action::Fetched,
             Action::Read,
             Action::Searched,
@@ -29,10 +31,16 @@ mod tests {
         assert_eq!(
             values.ok(),
             Some(
-                vec!["\"completed\"", "\"fetched\"", "\"read\"", "\"searched\""]
-                    .into_iter()
-                    .map(String::from)
-                    .collect()
+                vec![
+                    "\"completed\"",
+                    "\"edited\"",
+                    "\"fetched\"",
+                    "\"read\"",
+                    "\"searched\"",
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect()
             )
         );
     }

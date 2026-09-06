@@ -1,6 +1,7 @@
 pub mod action;
 pub mod error_codes;
 pub mod revision;
+pub mod tool_edit_file;
 pub mod tool_fetch_url;
 pub mod tool_mark_goal_complete;
 pub mod tool_read_file;
