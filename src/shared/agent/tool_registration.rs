@@ -11,6 +11,7 @@ use crate::{
     },
     tools::{
         tool_edit_file::edit_file::EditFile, tool_fetch_url::fetch_url::FetchUrl,
+        tool_glob_files::glob_files::GlobFiles,
         tool_mark_goal_complete::mark_goal_complete::MarkGoalComplete,
         tool_read_file::read_file::ReadFile, tool_run_command::run_command::RunCommand,
         tool_search_files::search_files::SearchFiles,
@@ -34,6 +35,7 @@ impl Agent {
         let edit_file = EditFile::new().await?;
         let write_file = WriteFile::new().await?;
         let search_files = SearchFiles::new().await?;
+        let glob_files = GlobFiles::new().await?;
         let fetch_url = FetchUrl::new(context.dependencies.http_client.clone());
         let spawn_subagent = SpawnSubagent::new(
             context.dependencies.terminal_io.clone(),
@@ -51,6 +53,7 @@ impl Agent {
             .tool(catalog.register_builtin_tool(edit_file))
             .tool(catalog.register_builtin_tool(write_file))
             .tool(catalog.register_builtin_tool(search_files))
+            .tool(catalog.register_builtin_tool(glob_files))
             .tool(catalog.register_builtin_tool(fetch_url))
             .tool(catalog.register_builtin_tool(spawn_subagent))
             .tool(catalog.register_builtin_tool(mark_goal_complete))
@@ -71,6 +74,7 @@ impl Agent {
         let edit_file = EditFile::new().await?;
         let write_file = WriteFile::new().await?;
         let search_files = SearchFiles::new().await?;
+        let glob_files = GlobFiles::new().await?;
         let search_url = FetchUrl::new(context.dependencies.http_client.clone());
 
         let builder = builder
@@ -79,6 +83,7 @@ impl Agent {
             .tool(catalog.register_builtin_tool(edit_file))
             .tool(catalog.register_builtin_tool(write_file))
             .tool(catalog.register_builtin_tool(search_files))
+            .tool(catalog.register_builtin_tool(glob_files))
             .tool(catalog.register_builtin_tool(search_url));
         Ok(builder)
     }
