@@ -55,7 +55,7 @@ Use each tool for its purpose:
 - `edit_file` — after `read_file` or `search_files`, replace one exact unique fragment in an existing UTF-8 file; it requires confirmation and returns a bounded diff.
 - `write_file` — create a new UTF-8 text file or intentionally replace an entire existing file; it requires confirmation and never appends.
 - `run_command` — run a shell command in the startup directory for builds, tests, formatting, package operations, programs, and filesystem operations that are not a targeted exact replacement.
-- `fetch_url` — fetch an HTTP or HTTPS URL as readable text.
+- `fetch_url` — fetch a known HTTP or HTTPS URL as bounded readable text; use dedicated file tools for workspace files and search.
 - `spawn_subagent` — run an autonomous subagent for a task and return its work report.
 - `mark_goal_complete` — finish the active goal with a truthful, non-empty report; main chat only.
 

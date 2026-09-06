@@ -244,7 +244,7 @@ Rigel provides eight built-in tools:
 | `search_files`       | Search bounded file contents for literal text           |
 | `edit_file`          | Replace one exact unique fragment with a bounded diff   |
 | `write_file`         | Create or fully replace a UTF-8 text file               |
-| `fetch_url`          | Fetch readable text from an HTTP or HTTPS URL           |
+| `fetch_url`          | Fetch bounded text from a known HTTP or HTTPS URL       |
 | `spawn_subagent`     | Run an autonomous subagent for a delegated task         |
 | `mark_goal_complete` | End the active `/goal` mode with a truthful work report |
 

@@ -12,3 +12,4 @@ pub(crate) const PATH_OUTSIDE_WORKSPACE: &str = "PATH_OUTSIDE_WORKSPACE";
 pub(crate) const PARENT_ERROR: &str = "PARENT_ERROR";
 pub(crate) const PERMISSION_DENIED: &str = "PERMISSION_DENIED";
 pub(crate) const UNSUPPORTED_FILE: &str = "UNSUPPORTED_FILE";
+pub(crate) const HTTP_STATUS_ERROR_KIND: &str = "http_status";
