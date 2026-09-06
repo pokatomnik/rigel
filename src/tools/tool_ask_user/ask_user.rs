@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use crate::{
     entities::context_usage::ContextUsage,
     shared::{
-        goal::goal_state::GoalState,
         terminal::terminal_io::{ReadlineOutcome, TerminalIO},
         tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata},
     },
@@ -40,25 +39,22 @@ pub(crate) struct AskUserOutput {
 /// Asks the user one model-authored question without entering a new chat turn.
 pub(crate) struct AskUser {
     interaction: Arc<dyn UserInteraction>,
-    goal_state: Arc<GoalState>,
     permission: PermissionRequirement,
 }
 
 impl AskUser {
     /// Creates the production user-question tool for the current chat session.
-    pub(crate) fn new(terminal_io: Arc<TerminalIO>, goal_state: Arc<GoalState>) -> Self {
+    pub(crate) fn new(terminal_io: Arc<TerminalIO>) -> Self {
         Self {
             interaction: Arc::new(TerminalInteraction::new(terminal_io)),
-            goal_state,
             permission: PermissionRequirement::Automatic,
         }
     }
 
     #[cfg(test)]
-    fn with_interaction(interaction: Arc<dyn UserInteraction>, goal_state: Arc<GoalState>) -> Self {
+    fn with_interaction(interaction: Arc<dyn UserInteraction>) -> Self {
         Self {
             interaction,
-            goal_state,
             permission: PermissionRequirement::Automatic,
         }
     }
@@ -90,11 +86,6 @@ impl AskUser {
         args: &AskUserArgs,
         context: &ToolContext,
     ) -> Result<String, ToolExecutionError> {
-        if self.goal_state.is_active() {
-            return Err(interaction_unavailable(
-                "ask_user is unavailable while an autonomous goal is active.",
-            ));
-        }
         let items = menu_items(&args.answers);
         let selection = self
             .interaction
@@ -182,7 +173,7 @@ impl Tool for AskUser {
     type Error = ToolExecutionError;
 
     fn description(&self) -> String {
-        "Ask the user one concise question with one selectable candidate answer or a Something else free-form answer. Use only when an important choice cannot be made reliably from context; the tool waits for the answer inside this call and is unavailable during /goal.".to_string()
+        "Ask the user one concise question with one selectable candidate answer or a Something else free-form answer. Use only when an important choice cannot be made reliably from context; the tool waits for the answer inside this call, including during /goal, and does not start a new chat turn.".to_string()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -264,10 +255,7 @@ mod tests {
     use crate::shared::terminal::terminal_io::ReadlineOutcome;
     use crate::{
         entities::context_usage::ContextUsage,
-        shared::{
-            goal::goal_state::GoalState,
-            tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata},
-        },
+        shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata},
         tools::error_codes,
     };
 
@@ -342,7 +330,7 @@ mod tests {
     }
 
     fn tool(interaction: Arc<StubInteraction>) -> AskUser {
-        AskUser::with_interaction(interaction, Arc::new(GoalState::new()))
+        AskUser::with_interaction(interaction)
     }
 
     fn args(question: &str, answers: &[&str]) -> AskUserArgs {
@@ -519,20 +507,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn active_goal_rejects_user_input_before_opening_the_ui() {
+    async fn user_input_is_available_during_goal_execution() -> anyhow::Result<()> {
         let interaction = Arc::new(StubInteraction::new(Ok(Some(0)), Vec::new()));
-        let state = Arc::new(GoalState::new());
-        assert!(state.start("work autonomously".to_string()).is_ok());
-        let tool = AskUser::with_interaction(interaction.clone(), state);
+        let tool = tool(interaction.clone());
         let mut context = ToolContext::new();
 
-        let result = tool.call(&mut context, args("Choose", &["first"])).await;
+        let output = tool.call(&mut context, args("Choose", &["first"])).await?;
 
-        assert!(result.is_err());
-        if let Err(error) = result {
-            assert_eq!(error.code(), Some(error_codes::INTERACTION_UNAVAILABLE));
-        }
-        assert_eq!(interaction.items(), Some(Vec::new()));
+        assert_eq!(output.answer, "first");
+        assert_eq!(output.action, crate::tools::action::Action::Answered);
+        assert!(output.ok);
         assert_eq!(interaction.input_count(), Some(0));
+        Ok(())
     }
 }

@@ -29,7 +29,7 @@ impl Agent {
         M: CompletionModelTrait,
     {
         let goal_state = context.dependencies.goal_state()?;
-        let ask_user = AskUser::new(context.dependencies.terminal_io.clone(), goal_state.clone());
+        let ask_user = AskUser::new(context.dependencies.terminal_io.clone());
 
         let run_command = RunCommand::new().await?;
         let read_file = ReadFile::new().await?;
