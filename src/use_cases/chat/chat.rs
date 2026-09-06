@@ -95,6 +95,7 @@ mod tests {
                 history_sync::HistorySyncHook,
             },
             recovery::turn_recovery::TurnStatus,
+            terminal::command_parser::CommandParserResult,
             terminal::terminal_io::TerminalIO,
         },
         tools::tool_mark_goal_complete::mark_goal_complete::MarkGoalComplete,
@@ -110,6 +111,29 @@ mod tests {
         ) -> futures::future::BoxFuture<'a, anyhow::Result<()>> {
             Box::pin(async { Ok(()) })
         }
+    }
+
+    #[tokio::test]
+    async fn blank_prompt_does_not_request_model_or_update_history() -> Result<()> {
+        let model = MockCompletionModel::text("should not be requested");
+        let history = Arc::new(ChatHistory::new(Vec::new(), NoopPersistence));
+        let chat = Chat::from_history(
+            configured_agent(AgentBuilder::new(model.clone()).build()),
+            Arc::new(TerminalIO),
+            history.clone(),
+            async || {
+                Ok(configured_agent(
+                    AgentBuilder::new(MockCompletionModel::text("replacement")).build(),
+                ))
+            },
+        );
+
+        let command = chat.command_parser.parse(" \t".to_string()).await;
+        ensure!(matches!(&command, CommandParserResult::CommandContinue));
+        ensure!(chat.handle_command(command).await?);
+        assert_eq!(model.request_count(), 0);
+        assert!(history.snapshot().await.is_empty());
+        Ok(())
     }
 
     #[tokio::test]

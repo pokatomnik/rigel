@@ -1,4 +1,6 @@
 pub(crate) const INVALID_ARGUMENT: &str = "INVALID_ARGUMENT";
+pub(crate) const USER_CANCELLED: &str = "USER_CANCELLED";
+pub(crate) const INTERACTION_UNAVAILABLE: &str = "INTERACTION_UNAVAILABLE";
 pub(crate) const IO_ERROR: &str = "IO_ERROR";
 pub(crate) const NETWORK_ERROR: &str = "NETWORK_ERROR";
 pub(crate) const TIMEOUT: &str = "TIMEOUT";

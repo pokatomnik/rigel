@@ -25,7 +25,6 @@ where
     agent: Arc<Mutex<Agent<CM>>>,
     terminal_io: Arc<TerminalIO>,
     history: Arc<ChatHistory<NonPersistentHistory>>,
-    max_context_tokens: Option<u64>,
     context_usage: Mutex<ContextUsage>,
 }
 
@@ -72,16 +71,16 @@ where
             agent: Arc::new(Mutex::new(agent)),
             terminal_io,
             history: context.history,
-            max_context_tokens: context.max_context_tokens,
             context_usage: Mutex::new(ContextUsage::new(None, context.max_context_tokens)),
         }
     }
 
-    fn streamed_turn(&self) -> StreamedTurn<'_, CM, NonPersistentHistory> {
+    async fn streamed_turn(&self) -> StreamedTurn<'_, CM, NonPersistentHistory> {
+        let context_usage = *self.context_usage.lock().await;
         StreamedTurn::with_context(
             self.agent.clone(),
             self.terminal_io.as_ref(),
-            StreamedTurnContext::new(self.history.as_ref(), self.max_context_tokens),
+            StreamedTurnContext::new(self.history.as_ref(), context_usage),
         )
     }
 
@@ -89,7 +88,7 @@ where
     pub(crate) async fn run(&self, task: String) -> anyhow::Result<String> {
         let prompt = task_prompt(task);
         let base = self.history.snapshot().await;
-        let streamed_turn = self.streamed_turn();
+        let streamed_turn = self.streamed_turn().await;
         let outcome = streamed_turn.run(prompt, base).await?;
         let status = self.complete_turn(streamed_turn, outcome).await?;
         self.update_context_usage(status.context_usage()).await;

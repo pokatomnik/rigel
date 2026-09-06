@@ -10,6 +10,12 @@ pub(crate) enum CommandParserResult {
     /// Continue requesting a command / prompt from the user.
     CommandContinue,
 
+    /// Stop because the terminal input reached EOF.
+    InputEof,
+
+    /// Stop because the user cancelled terminal input.
+    InputCancelled,
+
     /// A prompt was parsed from the user.
     Prompt(String, bool),
 
@@ -120,6 +126,9 @@ impl CommandParser {
     }
 
     pub async fn parse(&self, raw_input: String) -> CommandParserResult {
+        if raw_input.trim().is_empty() {
+            return CommandParserResult::CommandContinue;
+        }
         let command_input = raw_input.trim_start();
         let Some((command_name, arguments)) = Self::command_parts(command_input) else {
             return CommandParserResult::Prompt(raw_input, false);
@@ -188,6 +197,18 @@ mod tests {
         let result = parser().parse("hello".to_string()).await;
 
         assert!(matches!(result, CommandParserResult::Prompt(_, false)));
+    }
+
+    #[tokio::test]
+    async fn blank_input_stays_in_the_loop_without_becoming_a_prompt() {
+        for input in ["", " ", "\n", "\t\n"] {
+            let result = parser().parse(input.to_string()).await;
+
+            assert!(
+                matches!(result, CommandParserResult::CommandContinue),
+                "{input:?}"
+            );
+        }
     }
 
     #[tokio::test]

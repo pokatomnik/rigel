@@ -10,8 +10,8 @@ use crate::{
         tool_permissions::catalog::ToolPermissionCatalog,
     },
     tools::{
-        tool_edit_file::edit_file::EditFile, tool_fetch_url::fetch_url::FetchUrl,
-        tool_glob_files::glob_files::GlobFiles,
+        tool_ask_user::ask_user::AskUser, tool_edit_file::edit_file::EditFile,
+        tool_fetch_url::fetch_url::FetchUrl, tool_glob_files::glob_files::GlobFiles,
         tool_mark_goal_complete::mark_goal_complete::MarkGoalComplete,
         tool_read_file::read_file::ReadFile, tool_run_command::run_command::RunCommand,
         tool_search_files::search_files::SearchFiles,
@@ -29,6 +29,7 @@ impl Agent {
         M: CompletionModelTrait,
     {
         let goal_state = context.dependencies.goal_state()?;
+        let ask_user = AskUser::new(context.dependencies.terminal_io.clone(), goal_state.clone());
 
         let run_command = RunCommand::new().await?;
         let read_file = ReadFile::new().await?;
@@ -48,6 +49,7 @@ impl Agent {
         let goal_complete_hook = GoalCompletionHook::new(goal_state);
 
         let builder = builder
+            .tool(catalog.register_builtin_tool(ask_user))
             .tool(catalog.register_builtin_tool(run_command))
             .tool(catalog.register_builtin_tool(read_file))
             .tool(catalog.register_builtin_tool(edit_file))

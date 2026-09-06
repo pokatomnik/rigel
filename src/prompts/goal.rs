@@ -20,6 +20,7 @@ mod tests {
         assert!(prompt.contains("mark_goal_complete"));
         assert!(prompt.contains("truthful, non-empty report"));
         assert!(prompt.contains("Do not ask the user for input"));
+        assert!(prompt.contains("Do not call `ask_user`"));
         assert!(prompt.contains("unrelated tool"));
     }
 }

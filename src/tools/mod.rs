@@ -1,6 +1,7 @@
 pub mod action;
 pub mod error_codes;
 pub mod revision;
+pub mod tool_ask_user;
 pub mod tool_edit_file;
 pub mod tool_fetch_url;
 pub mod tool_glob_files;

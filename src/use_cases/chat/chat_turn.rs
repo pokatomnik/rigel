@@ -15,11 +15,11 @@ where
     GM: AsyncFn() -> anyhow::Result<ConfiguredAgent<CM>> + 'static,
 {
     pub(super) async fn streamed_turn(&self) -> StreamedTurn<'_, CM, P> {
-        let max_context_tokens = self.context_usage.lock().await.max_context_tokens();
+        let context_usage = *self.context_usage.lock().await;
         StreamedTurn::with_context(
             self.agent.clone(),
             self.terminal_io.as_ref(),
-            StreamedTurnContext::new(self.history.as_ref(), max_context_tokens),
+            StreamedTurnContext::new(self.history.as_ref(), context_usage),
         )
     }
 
