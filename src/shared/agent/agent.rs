@@ -15,7 +15,7 @@ use super::{
 };
 use crate::{
     entities::selected_model::SelectedModel,
-    prompts::system::system_prompt,
+    prompts::system::{chat_system::chat_system_prompt, subagent_system::subagent_system_prompt},
     shared::{
         history::{
             chat_history::ChatHistory,
@@ -96,7 +96,10 @@ impl Agent {
         config: &AgentConfig,
         model_id: String,
     ) -> AgentBuilder<CompletionModel> {
-        let system_prompt = system_prompt().await;
+        let system_prompt = match config.tool_set {
+            AgentToolSet::Chat => chat_system_prompt().await,
+            AgentToolSet::Subagent => subagent_system_prompt().await,
+        };
         let builder = client
             .clone()
             .completions_api()
