@@ -19,6 +19,8 @@ use crate::shared::tool_permissions::catalog::{PermissionRequirement, ToolPermis
 
 use crate::tools::{action::Action, error_codes};
 
+use super::telemetry::ShellUsageTelemetry;
+
 const SERVER_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_OUTPUT_BYTES: usize = 32 * 1024;
 const OUTPUT_TRUNCATION_SUFFIX: &str = "\n[output truncated]";
@@ -33,6 +35,7 @@ pub(crate) struct RunCommandArgs {
 #[derive(Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct RunCommandOutput {
     action: Action,
+    ok: bool,
     exit_code: i32,
     output: String,
     timed_out: bool,
@@ -152,7 +155,7 @@ impl Tool for RunCommand {
     type Error = ToolExecutionError;
 
     fn description(&self) -> String {
-        "Run a shell command in the current directory, including filesystem operations such as ls, rg, find, rm, touch, and patch.".to_string()
+        "Run a shell command from the startup directory for builds, tests, git, programs, or operations not covered by a dedicated tool. For ordinary workspace file reads, searches, creation, and targeted edits, use read_file, search_files, write_file, and edit_file instead.".to_string()
     }
 
     fn parameters(&self) -> serde_json::Value {
@@ -163,7 +166,7 @@ impl Tool for RunCommand {
                 "command": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Shell command to run for builds, tests, programs, or filesystem operations."
+                    "description": "Shell command for builds, tests, git, programs, or operations not covered by a dedicated tool."
                 }
             },
             "required": ["command"]
@@ -175,6 +178,7 @@ impl Tool for RunCommand {
         _context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
+        ShellUsageTelemetry::global().record_command(&args.command);
         Ok(self.execute_with_timeout(&args.command).await)
     }
 }
@@ -240,6 +244,7 @@ fn completed_result(result: ProcessResult) -> RunCommandOutput {
     let (output, truncated) = limit_output(result.output, result.truncated);
     RunCommandOutput {
         action: Action::Completed,
+        ok: command_succeeded(result.exit_code, false),
         exit_code: result.exit_code,
         output,
         timed_out: false,
@@ -250,9 +255,10 @@ fn completed_result(result: ProcessResult) -> RunCommandOutput {
 fn timeout_result() -> RunCommandOutput {
     RunCommandOutput {
         action: Action::Completed,
+        ok: command_succeeded(INTERNAL_FAILURE_EXIT_CODE, true),
         exit_code: INTERNAL_FAILURE_EXIT_CODE,
         output: format!(
-            "Command timed out after {} seconds.",
+            "Command timed out after {} seconds. Retry with a narrower command or check for a long-running process.",
             SERVER_TIMEOUT.as_secs()
         ),
         timed_out: true,
@@ -276,9 +282,17 @@ fn limit_output(output: String, already_truncated: bool) -> (String, bool) {
     )
 }
 
+fn command_succeeded(exit_code: i32, timed_out: bool) -> bool {
+    exit_code == 0 && !timed_out
+}
+
 fn internal_failure(message: String) -> ProcessResult {
     let mut output = String::new();
-    append_diagnostic(&mut output, &message);
+    append_diagnostic(&mut output, &format!("internal process failure: {message}"));
+    append_diagnostic(
+        &mut output,
+        "Check the configured shell and retry the command.",
+    );
     ProcessResult {
         output,
         exit_code: INTERNAL_FAILURE_EXIT_CODE,
@@ -388,6 +402,11 @@ mod tests {
         let schema = tool.parameters();
         assert_eq!(schema["required"], serde_json::json!(["command"]));
         assert_eq!(schema["additionalProperties"], serde_json::json!(false));
+        assert_eq!(schema["properties"]["command"]["minLength"], 1);
+        assert_eq!(
+            schema["properties"]["command"]["description"],
+            "Shell command for builds, tests, git, programs, or operations not covered by a dedicated tool."
+        );
         assert!(schema["properties"].get("timeout_ms").is_none());
     }
 
@@ -408,10 +427,36 @@ mod tests {
             exit_code: 2,
             truncated: false,
         });
+        let success = completed_result(ProcessResult {
+            output: "passed".to_string(),
+            exit_code: 0,
+            truncated: false,
+        });
+        let internal = completed_result(internal_failure("shell unavailable".to_string()));
 
+        assert_eq!(
+            serde_json::to_value(success)
+                .ok()
+                .and_then(|value| value.get("ok").cloned()),
+            Some(serde_json::json!(true))
+        );
+        assert!(!timeout.ok);
         assert!(timeout.timed_out);
+        assert!(!result.ok);
         assert_eq!(result.exit_code, 2);
         assert_eq!(result.action, Action::Completed);
+        assert!(!internal.ok);
+        assert!(!internal.timed_out);
+        assert_eq!(internal.exit_code, INTERNAL_FAILURE_EXIT_CODE);
+        assert!(internal.output.contains("internal process failure"));
+    }
+
+    #[test]
+    fn ok_is_true_only_for_zero_exit_without_timeout() {
+        assert!(command_succeeded(0, false));
+        assert!(!command_succeeded(7, false));
+        assert!(!command_succeeded(0, true));
+        assert!(!command_succeeded(INTERNAL_FAILURE_EXIT_CODE, false));
     }
 
     #[test]
