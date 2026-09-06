@@ -16,7 +16,7 @@ pub(crate) async fn subagent_system_prompt() -> String {
         return system_builin.to_string();
     };
 
-    return format!(
+    format!(
         r#"
         ## System prompt
         {system_builin}
@@ -32,7 +32,7 @@ pub(crate) async fn subagent_system_prompt() -> String {
 
         {agents_md_contents}
     "#
-    );
+    )
 }
 
 #[cfg(test)]
