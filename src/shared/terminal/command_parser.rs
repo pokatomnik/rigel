@@ -122,6 +122,9 @@ impl CommandParser {
 
     pub async fn handle_editor(&self) -> CommandParserResult {
         let result = self.terminal_io.editor().unwrap_or_default();
+        if Self::command_parts(result.trim_start()).is_some() {
+            self.terminal_io.print(format!("{result}\n").as_str());
+        }
         self.parse_editor_input(result).await
     }
 
