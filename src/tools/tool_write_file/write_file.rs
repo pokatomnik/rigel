@@ -1,5 +1,5 @@
 use std::{
-    env, io,
+    io,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -8,15 +8,19 @@ use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    errors::{
-        file_access_error, invalid_argument, io_error, parent_error, path_outside_workspace,
-        write_error,
-    },
+    errors::{file_access_error, parent_error, write_error},
     filesystem::{FileKind, FileSystem, TokioFileSystem},
     validation::{display_path, validate_arguments, validate_path},
 };
 use crate::shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata};
-use crate::tools::action::Action;
+use crate::tools::{
+    action::Action,
+    utils::{
+        errors::{invalid_argument, io_error, path_outside_workspace},
+        filesystem::startup_root_with,
+        path::is_inside,
+    },
+};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -46,11 +50,9 @@ impl WriteFile {
     /// Creates a write tool rooted at Rigel's canonical startup workspace.
     pub(crate) async fn new() -> Result<Self, ToolExecutionError> {
         let file_system: Arc<dyn FileSystem> = Arc::new(TokioFileSystem);
-        let current_dir = env::current_dir().map_err(|error| io_error("workspace", error))?;
-        let root = file_system
-            .canonicalize(current_dir.clone())
+        let root = startup_root_with(|path| file_system.canonicalize(path))
             .await
-            .map_err(|error| io_error(current_dir.display(), error))?;
+            .map_err(|error| io_error("workspace", error, "write"))?;
         Ok(Self {
             root,
             file_system,
@@ -165,10 +167,10 @@ impl WriteFile {
         canonical: &Path,
         requested_path: &str,
     ) -> Result<(), ToolExecutionError> {
-        if canonical.starts_with(&self.root) {
+        if is_inside(&self.root, canonical) {
             return Ok(());
         }
-        Err(path_outside_workspace(requested_path))
+        Err(path_outside_workspace(requested_path, "write"))
     }
 }
 

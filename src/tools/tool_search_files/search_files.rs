@@ -9,8 +9,6 @@ use super::search::SearchFilesOutput;
 
 #[cfg(test)]
 const MAX_PATTERN_BYTES: usize = 4 * 1024;
-#[cfg(test)]
-const MAX_PATH_BYTES: usize = 4 * 1024;
 
 /// Arguments for a literal, case-sensitive search rooted in the startup workspace.
 #[derive(Deserialize)]
@@ -79,13 +77,14 @@ mod tests {
 
     use rig::tool::Tool;
 
-    use super::{MAX_PATH_BYTES, MAX_PATTERN_BYTES, SearchFiles};
+    use super::{MAX_PATTERN_BYTES, SearchFiles};
     use crate::shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata};
     use crate::tools::{
         error_codes,
-        tool_search_files::{
-            search::{MAX_MATCHES, SearchContext, utf8_prefix},
-            workspace::validate_path,
+        tool_search_files::search::{MAX_MATCHES, SearchContext},
+        utils::{
+            path::{MAX_PATH_BYTES, validate_relative_path},
+            text::utf8_prefix,
         },
     };
 
@@ -183,11 +182,11 @@ mod tests {
     #[test]
     fn invalid_paths_are_rejected_without_filesystem_access() {
         for path in ["", " ", "../outside", "/etc/passwd", "bad\0path"] {
-            let result = validate_path(path, MAX_PATH_BYTES);
+            let result = validate_relative_path(path, MAX_PATH_BYTES, "search");
             assert!(result.is_err(), "path should be rejected: {path:?}");
         }
         assert_eq!(
-            validate_path("/etc/passwd", MAX_PATH_BYTES)
+            validate_relative_path("/etc/passwd", MAX_PATH_BYTES, "search")
                 .err()
                 .as_ref()
                 .and_then(|error| error.code()),

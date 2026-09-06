@@ -1,4 +1,4 @@
-use crate::tools::tool_search_files::search::utf8_prefix;
+use crate::tools::utils::text::utf8_prefix;
 
 const MAX_DIFF_BYTES: usize = 32 * 1024;
 const DIFF_CONTEXT_LINES: usize = 3;

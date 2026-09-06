@@ -2,20 +2,7 @@ use std::io;
 
 use rig::tool::ToolExecutionError;
 
-use crate::tools::error_codes;
-
-/// Builds an invalid-argument error with the shared tool error code.
-pub(super) fn invalid_argument(message: impl Into<String>) -> ToolExecutionError {
-    ToolExecutionError::invalid_args(message).with_code(error_codes::INVALID_ARGUMENT)
-}
-
-/// Formats a path that canonicalizes outside the startup workspace.
-pub(super) fn path_outside_workspace(path: &str) -> ToolExecutionError {
-    invalid_argument(format!(
-        "Cannot write file \"{path}\": the path resolves outside the workspace. Use a relative path inside the workspace."
-    ))
-    .with_code(error_codes::PATH_OUTSIDE_WORKSPACE)
-}
+use crate::tools::{error_codes, utils::errors::io_error};
 
 /// Classifies target metadata failures while preserving actionable recovery guidance.
 pub(super) fn file_access_error(path: &str, error: io::Error) -> ToolExecutionError {
@@ -29,7 +16,7 @@ pub(super) fn file_access_error(path: &str, error: io::Error) -> ToolExecutionEr
     if error.kind() == io::ErrorKind::PermissionDenied {
         return permission_error(path, error);
     }
-    io_error(path, error)
+    io_error(path, error, "write")
 }
 
 /// Formats a parent-directory failure with a distinct recoverable error code.
@@ -68,15 +55,6 @@ pub(super) fn write_error(path: &str, error: io::Error) -> ToolExecutionError {
     }
     ToolExecutionError::other(format!(
         "Cannot write \"{path}\": the write failed and no successful result was returned. Check the path and retry."
-    ))
-    .with_code(error_codes::IO_ERROR)
-    .with_source(error)
-}
-
-/// Formats workspace initialization and other generic filesystem failures.
-pub(super) fn io_error(path: impl std::fmt::Display, error: io::Error) -> ToolExecutionError {
-    ToolExecutionError::other(format!(
-        "Cannot access \"{path}\": filesystem access failed. Check the workspace and retry."
     ))
     .with_code(error_codes::IO_ERROR)
     .with_source(error)

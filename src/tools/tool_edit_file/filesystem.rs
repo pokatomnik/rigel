@@ -1,9 +1,9 @@
 use std::{io, path::PathBuf};
 
 use futures::future::BoxFuture;
-use tokio::io::AsyncReadExt;
 
 use super::validation::MAX_FILE_BYTES;
+use crate::tools::utils::filesystem::read_prefix;
 
 /// Abstracts workspace reads and direct writes for unit tests.
 pub(super) trait FileSystem: Send + Sync {
@@ -34,19 +34,10 @@ impl FileSystem for TokioFileSystem {
     }
 
     fn read(&self, path: PathBuf) -> BoxFuture<'static, io::Result<Vec<u8>>> {
-        Box::pin(read_bounded(path))
+        Box::pin(async move { Ok(read_prefix(&path, MAX_FILE_BYTES + 1).await?.bytes) })
     }
 
     fn write(&self, path: PathBuf, contents: Vec<u8>) -> BoxFuture<'static, io::Result<()>> {
         Box::pin(tokio::fs::write(path, contents))
     }
-}
-
-async fn read_bounded(path: PathBuf) -> io::Result<Vec<u8>> {
-    let file = tokio::fs::File::open(path).await?;
-    let mut bytes = Vec::new();
-    file.take((MAX_FILE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .await?;
-    Ok(bytes)
 }

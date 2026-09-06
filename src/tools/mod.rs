@@ -9,3 +9,4 @@ pub mod tool_run_command;
 pub mod tool_search_files;
 pub mod tool_spawn_subagent;
 pub mod tool_write_file;
+pub mod utils;

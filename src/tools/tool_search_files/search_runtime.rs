@@ -2,18 +2,23 @@ use std::path::{Path, PathBuf};
 
 use rig::tool::ToolExecutionError;
 
-use super::{
-    search::{SearchContext, SearchFilesOutput, decode_text},
-    workspace::{
-        DirectoryEntries, PathKind, canonical_path, display_path, file_access_error,
-        invalid_search_path, is_excluded_directory, path_kind, read_directory, read_prefix,
-        startup_root, validate_path,
+use super::search::{SearchContext, SearchFilesOutput};
+use crate::tools::{
+    error_codes,
+    tool_search_files::search_files::SearchFiles,
+    utils::{
+        errors::file_access_error,
+        filesystem::{
+            DirectoryEntries, PathKind, canonical_path, invalid_search_path, is_excluded_directory,
+            path_kind, read_directory, read_prefix, startup_root,
+        },
+        path::{MAX_PATH_BYTES, display_workspace_path, validate_relative_path},
+        text::decode_text,
     },
 };
-use crate::tools::{error_codes, tool_search_files::search_files::SearchFiles};
 
 const MAX_PATTERN_BYTES: usize = 4 * 1024;
-const MAX_PATH_BYTES: usize = 4 * 1024;
+
 const MAX_FILE_BYTES: usize = 1024 * 1024;
 const MAX_SCANNED_BYTES: usize = 8 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 2048;
@@ -23,7 +28,7 @@ const MAX_PENDING_DIRECTORIES: usize = 10_000;
 impl SearchFiles {
     /// Creates a read-only search tool rooted at Rigel's startup directory.
     pub(crate) async fn new() -> Result<Self, ToolExecutionError> {
-        let root = startup_root().await?;
+        let root = startup_root("search").await?;
         Ok(Self {
             root,
             permission: crate::shared::tool_permissions::catalog::PermissionRequirement::Automatic,
@@ -37,10 +42,11 @@ impl SearchFiles {
         requested_path: &str,
     ) -> Result<SearchFilesOutput, ToolExecutionError> {
         Self::validate_pattern(requested_pattern)?;
-        let relative_path = validate_path(requested_path, MAX_PATH_BYTES)?;
+        let relative_path = validate_relative_path(requested_path, MAX_PATH_BYTES, "search")?;
         let candidate = self.root.join(relative_path);
         let canonical_path = canonical_path(&self.root, &candidate, requested_path).await?;
-        let display_path = display_path(&self.root, &canonical_path, requested_path)?;
+        let display_path =
+            display_workspace_path(&self.root, &canonical_path, requested_path, "search")?;
         let mut context = SearchContext::new(canonical_path.clone(), requested_pattern);
         self.scan_root(canonical_path, &mut context).await?;
         Ok(context.output(display_path))
@@ -64,7 +70,7 @@ impl SearchFiles {
     ) -> Result<(), ToolExecutionError> {
         match path_kind(&root)
             .await
-            .map_err(|error| file_access_error(root.display(), error))?
+            .map_err(|error| file_access_error(root.display(), error, "search"))?
         {
             PathKind::File => self.scan_file(root, context).await,
             PathKind::Directory if is_excluded_directory(&root) => Ok(()),
@@ -122,7 +128,7 @@ impl SearchFiles {
         match read_directory(directory, MAX_DIRECTORY_ENTRIES).await {
             Ok(entries) => Ok(entries),
             Err(error) if directory == context.root() => {
-                Err(file_access_error(directory.display(), error))
+                Err(file_access_error(directory.display(), error, "search"))
             }
             Err(_) => {
                 context.warning(format!(
@@ -237,7 +243,7 @@ impl SearchFiles {
         let limit = remaining.min(MAX_FILE_BYTES);
         let read = read_prefix(&path, limit)
             .await
-            .map_err(|error| file_access_error(path.display(), error))?;
+            .map_err(|error| file_access_error(path.display(), error, "search"))?;
         context.consume_bytes(read.bytes.len());
         if read.truncated {
             context.mark_scan_limit();
@@ -249,7 +255,7 @@ impl SearchFiles {
             ));
             return Ok(());
         };
-        let display = display_path(&self.root, &path, &path.to_string_lossy())?;
+        let display = display_workspace_path(&self.root, &path, &path.to_string_lossy(), "search")?;
         context.record_matches(&display, &text);
         Ok(())
     }

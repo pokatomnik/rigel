@@ -1,5 +1,4 @@
 use std::{
-    env,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -9,15 +8,23 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     diff::bounded_diff,
-    errors::{file_access_error, io_error, stale_content_error, write_error},
+    errors::{stale_content_error, write_error},
     filesystem::{FileSystem, TokioFileSystem},
     validation::{
-        MAX_FILE_BYTES, file_too_large_error, path_outside_workspace, replaced_text, unique_match,
-        unsupported_file_error, validate_arguments, validate_path, validate_result_size,
+        MAX_FILE_BYTES, file_too_large_error, replaced_text, unique_match, unsupported_file_error,
+        validate_arguments, validate_path, validate_result_size,
     },
 };
 use crate::shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata};
-use crate::tools::action::Action;
+use crate::tools::{
+    action::Action,
+    utils::{
+        errors::{file_access_error, io_error, path_outside_workspace},
+        filesystem::startup_root_with,
+        path::{display_workspace_path, is_inside},
+        text::decode_text,
+    },
+};
 
 #[cfg(test)]
 use super::diff::{TEST_MAX_DIFF_BYTES, changed_line_count};
@@ -52,11 +59,9 @@ impl EditFile {
     /// Creates an edit tool rooted at Rigel's canonical startup workspace.
     pub(crate) async fn new() -> Result<Self, ToolExecutionError> {
         let file_system: Arc<dyn FileSystem> = Arc::new(TokioFileSystem);
-        let current_dir = env::current_dir().map_err(|error| io_error("workspace", error))?;
-        let root = file_system
-            .canonicalize(current_dir.clone())
+        let root = startup_root_with(|path| file_system.canonicalize(path))
             .await
-            .map_err(|error| io_error(current_dir.display(), error))?;
+            .map_err(|error| io_error("workspace", error, "edit"))?;
         Ok(Self {
             root,
             file_system,
@@ -82,11 +87,7 @@ impl EditFile {
         }
         let updated = replaced_text(&original, start, end, new_text);
         validate_result_size(updated.len())?;
-        let path = crate::tools::tool_search_files::workspace::display_path(
-            &self.root,
-            &canonical,
-            requested_path,
-        )?;
+        let path = display_workspace_path(&self.root, &canonical, requested_path, "edit")?;
         let diff = bounded_diff(&path, &original, &updated, start, old_text, new_text);
         self.file_system
             .write(canonical, updated.into_bytes())
@@ -112,9 +113,9 @@ impl EditFile {
             .file_system
             .canonicalize(candidate.to_path_buf())
             .await
-            .map_err(|error| file_access_error(requested_path, error))?;
-        if !canonical.starts_with(&self.root) {
-            return Err(path_outside_workspace(requested_path));
+            .map_err(|error| file_access_error(requested_path, error, "edit"))?;
+        if !is_inside(&self.root, &canonical) {
+            return Err(path_outside_workspace(requested_path, "edit"));
         }
         Ok(canonical)
     }
@@ -128,7 +129,7 @@ impl EditFile {
             .file_system
             .metadata(path.to_path_buf())
             .await
-            .map_err(|error| file_access_error(requested_path, error))?;
+            .map_err(|error| file_access_error(requested_path, error, "edit"))?;
         if !is_file {
             return Err(unsupported_file_error(requested_path));
         }
@@ -141,8 +142,7 @@ impl EditFile {
         requested_path: &str,
     ) -> Result<String, ToolExecutionError> {
         let bytes = self.read_bytes(path, requested_path).await?;
-        crate::tools::tool_search_files::search::decode_text(bytes)
-            .ok_or_else(|| unsupported_file_error(requested_path))
+        decode_text(bytes).ok_or_else(|| unsupported_file_error(requested_path))
     }
 
     async fn read_bytes(
@@ -154,7 +154,7 @@ impl EditFile {
             .file_system
             .read(path.to_path_buf())
             .await
-            .map_err(|error| file_access_error(requested_path, error))?;
+            .map_err(|error| file_access_error(requested_path, error, "edit"))?;
         if bytes.len() > MAX_FILE_BYTES {
             return Err(file_too_large_error(requested_path));
         }

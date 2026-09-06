@@ -1,5 +1,5 @@
 use std::{
-    env, io,
+    io,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -10,7 +10,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata};
 
-use crate::tools::{action::Action, error_codes};
+use crate::tools::{
+    action::Action,
+    error_codes,
+    utils::{
+        errors::{file_access_error, io_error, path_outside_workspace},
+        filesystem::startup_root_with,
+        path::{display_workspace_path, is_inside, validate_non_absolute_path},
+        text::decode_text,
+    },
+};
 const MAX_CONTENT_BYTES: usize = 32 * 1024;
 const MAX_LINES: usize = 200;
 const TRUNCATION_MESSAGE: &str = "Content is truncated. Call read_file again only with a separate bounded range tool after that tool becomes available; do not use shell pipelines for ordinary file reading.";
@@ -68,11 +77,9 @@ pub(crate) struct ReadFile {
 impl ReadFile {
     pub(crate) async fn new() -> Result<Self, ToolExecutionError> {
         let file_system: Arc<dyn FileSystem> = Arc::new(TokioFileSystem);
-        let current_dir = env::current_dir().map_err(|error| io_error("workspace", error))?;
-        let root = file_system
-            .canonicalize(current_dir.clone())
+        let root = startup_root_with(|path| file_system.canonicalize(path))
             .await
-            .map_err(|error| io_error(current_dir.display(), error))?;
+            .map_err(|error| io_error("workspace", error, "read"))?;
         Ok(Self {
             root,
             file_system,
@@ -90,24 +97,15 @@ impl ReadFile {
             .file_system
             .read(canonical_path.clone())
             .await
-            .map_err(|error| file_access_error(requested_path, error))?;
-        let text = decode_text(requested_path, bytes)?;
-        let display_path = self.display_path(&canonical_path, requested_path)?;
+            .map_err(|error| file_access_error(requested_path, error, "read"))?;
+        let text = decode_text(bytes).ok_or_else(|| unsupported_file_error(requested_path))?;
+        let display_path =
+            display_workspace_path(&self.root, &canonical_path, requested_path, "read")?;
         Ok(build_output(display_path, &text))
     }
 
     fn validate_path(path: &str) -> Result<PathBuf, ToolExecutionError> {
-        if path.trim().is_empty() || path.contains('\0') {
-            return Err(ToolExecutionError::invalid_args(
-                "Cannot read file: path must be a non-empty relative path without NUL characters.",
-            )
-            .with_code(error_codes::INVALID_ARGUMENT));
-        }
-        let path = PathBuf::from(path);
-        if path.is_absolute() {
-            return Err(path_outside_workspace(path.to_string_lossy().as_ref()));
-        }
-        Ok(path)
+        validate_non_absolute_path(path, "read")
     }
 
     async fn canonical_path(
@@ -119,9 +117,9 @@ impl ReadFile {
             .file_system
             .canonicalize(candidate.to_path_buf())
             .await
-            .map_err(|error| file_access_error(requested_path, error))?;
-        if !canonical_path.starts_with(&self.root) {
-            return Err(path_outside_workspace(requested_path));
+            .map_err(|error| file_access_error(requested_path, error, "read"))?;
+        if !is_inside(&self.root, &canonical_path) {
+            return Err(path_outside_workspace(requested_path, "read"));
         }
         Ok(canonical_path)
     }
@@ -135,7 +133,7 @@ impl ReadFile {
             .file_system
             .metadata(path.to_path_buf())
             .await
-            .map_err(|error| file_access_error(requested_path, error))?;
+            .map_err(|error| file_access_error(requested_path, error, "read"))?;
         if !metadata {
             return Err(ToolExecutionError::invalid_args(format!(
                 "Cannot read file \"{requested_path}\": the path is not a regular file. Choose a UTF-8 text file.",
@@ -143,21 +141,6 @@ impl ReadFile {
             .with_code(error_codes::INVALID_ARGUMENT));
         }
         Ok(())
-    }
-
-    fn display_path(
-        &self,
-        path: &Path,
-        requested_path: &str,
-    ) -> Result<String, ToolExecutionError> {
-        let relative_path = path
-            .strip_prefix(&self.root)
-            .map_err(|_| path_outside_workspace(requested_path))?;
-        Ok(relative_path
-            .components()
-            .map(|component| component.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/"))
     }
 }
 
@@ -199,15 +182,7 @@ impl Tool for ReadFile {
         self.read_path(&args.path).await
     }
 }
-fn decode_text(path: &str, bytes: Vec<u8>) -> Result<String, ToolExecutionError> {
-    let text = String::from_utf8(bytes).map_err(|_| unsupported_file_error(path))?;
-    if text.chars().any(|character| {
-        character.is_control() && !matches!(character, '\t' | '\n' | '\r' | '\u{c}')
-    }) {
-        return Err(unsupported_file_error(path));
-    }
-    Ok(text)
-}
+
 fn build_output(path: String, text: &str) -> ReadFileOutput {
     let bounded = bounded_content(text);
     ReadFileOutput {
@@ -263,32 +238,6 @@ fn bounded_content(text: &str) -> BoundedContent {
         next_offset: truncated.then_some(end_line + 1),
         message: truncated.then(|| TRUNCATION_MESSAGE.to_string()),
     }
-}
-
-fn file_access_error(path: &str, error: io::Error) -> ToolExecutionError {
-    if error.kind() == io::ErrorKind::NotFound {
-        return ToolExecutionError::not_found(format!(
-            "File \"{path}\" was not found. Check the relative path and retry.",
-        ))
-        .with_code(error_codes::NOT_FOUND)
-        .with_source(error);
-    }
-    io_error(path, error)
-}
-
-fn io_error(path: impl std::fmt::Display, error: io::Error) -> ToolExecutionError {
-    ToolExecutionError::other(format!(
-        "Cannot read \"{path}\": filesystem access failed. Check the path and retry.",
-    ))
-    .with_code(error_codes::IO_ERROR)
-    .with_source(error)
-}
-
-fn path_outside_workspace(path: &str) -> ToolExecutionError {
-    ToolExecutionError::invalid_args(format!(
-        "Cannot read file \"{path}\": the path resolves outside the workspace. Use a relative path inside the workspace.",
-    ))
-    .with_code(error_codes::PATH_OUTSIDE_WORKSPACE)
 }
 
 fn unsupported_file_error(path: &str) -> ToolExecutionError {

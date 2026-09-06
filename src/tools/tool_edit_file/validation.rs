@@ -1,12 +1,19 @@
-use std::path::{Component, Path, PathBuf};
+use std::path::PathBuf;
 
 use rig::tool::ToolExecutionError;
 
-use crate::tools::error_codes;
+use crate::tools::{
+    error_codes,
+    utils::{
+        errors::invalid_argument as invalid_argument_error,
+        path::{MAX_PATH_BYTES, validate_relative_path},
+        text::is_supported_text,
+    },
+};
 
 /// Maximum UTF-8 byte length accepted for either exact replacement fragment.
 pub(super) const MAX_EDIT_TEXT_BYTES: usize = 64 * 1024;
-const MAX_PATH_BYTES: usize = 4 * 1024;
+
 /// Maximum UTF-8 file size accepted for one edit transaction.
 pub(super) const MAX_FILE_BYTES: usize = 1024 * 1024;
 
@@ -35,16 +42,7 @@ pub(super) fn validate_arguments(
 
 /// Validates a relative path lexically before canonicalization.
 pub(super) fn validate_path(path: &str) -> Result<PathBuf, ToolExecutionError> {
-    if path.trim().is_empty() || path.contains('\0') || path.len() > MAX_PATH_BYTES {
-        return Err(invalid_argument_error(
-            "path must be a non-empty relative path within the server path limit; correct the path and retry.",
-        ));
-    }
-    let path = PathBuf::from(path);
-    if path.is_absolute() || escapes_workspace(&path) {
-        return Err(path_outside_workspace(path.to_string_lossy().as_ref()));
-    }
-    Ok(path)
+    validate_relative_path(path, MAX_PATH_BYTES, "edit")
 }
 
 /// Returns the byte range of the only exact match, rejecting zero or many matches.
@@ -78,38 +76,6 @@ pub(super) fn validate_result_size(size: usize) -> Result<(), ToolExecutionError
         ));
     }
     Ok(())
-}
-
-fn escapes_workspace(path: &Path) -> bool {
-    let mut depth = 0usize;
-    for component in path.components() {
-        match component {
-            Component::Normal(_) => depth += 1,
-            Component::ParentDir if depth == 0 => return true,
-            Component::ParentDir => depth -= 1,
-            Component::CurDir => {}
-            Component::RootDir | Component::Prefix(_) => return true,
-        }
-    }
-    false
-}
-
-fn is_supported_text(text: &str) -> bool {
-    !text.chars().any(|character| {
-        character.is_control() && !matches!(character, '\t' | '\n' | '\r' | '\u{c}')
-    })
-}
-
-fn invalid_argument_error(message: impl Into<String>) -> ToolExecutionError {
-    ToolExecutionError::invalid_args(message).with_code(error_codes::INVALID_ARGUMENT)
-}
-
-/// Reports an absolute, traversing, or symlink-escaped path.
-pub(super) fn path_outside_workspace(path: &str) -> ToolExecutionError {
-    invalid_argument_error(format!(
-        "Cannot edit file \"{path}\": the path resolves outside the workspace. Correct the path and retry."
-    ))
-    .with_code(error_codes::PATH_OUTSIDE_WORKSPACE)
 }
 
 /// Reports binary, control-heavy, directory, and other unsupported targets.
