@@ -235,7 +235,7 @@ Located in `src/controllers/chat_controller.rs`, the IndexController orchestrate
 
 ### Built-in Tools
 
-Rigel provides seven built-in tools:
+Rigel provides eight built-in tools:
 
 | Tool                 | Description                                             |
 | -------------------- | ------------------------------------------------------- |
@@ -243,11 +243,12 @@ Rigel provides seven built-in tools:
 | `read_file`          | Read bounded UTF-8 text with numbered lines             |
 | `search_files`       | Search bounded file contents for literal text           |
 | `edit_file`          | Replace one exact unique fragment with a bounded diff   |
+| `write_file`         | Create or fully replace a UTF-8 text file               |
 | `fetch_url`          | Fetch readable text from an HTTP or HTTPS URL           |
 | `spawn_subagent`     | Run an autonomous subagent for a delegated task         |
 | `mark_goal_complete` | End the active `/goal` mode with a truthful work report |
 
-`read_file` reads only bounded, ordinary UTF-8 text from relative paths inside the startup workspace and runs automatically. `search_files` performs bounded, literal, case-sensitive content searches in files or directories inside that workspace and also runs automatically; use it instead of shell pipelines for ordinary content searches. Prefer `read_file` for inspecting a matching file. After reading or searching, use `edit_file` for one exact unique replacement in an existing UTF-8 file; it requires confirmation, verifies the file was not changed between reads, writes the result directly, and returns only a bounded diff. Other filesystem changes remain subject to the existing tool permission mechanism.
+`read_file` reads only bounded, ordinary UTF-8 text from relative paths inside the startup workspace and runs automatically; `search_files` performs bounded, literal, case-sensitive content searches in files or directories inside that workspace and also runs automatically; use it instead of shell pipelines for ordinary content searches. Prefer `read_file` for inspecting a matching file. After reading or searching, use `edit_file` for one exact unique replacement in an existing UTF-8 file; it requires confirmation, verifies the file was not changed between reads, writes the result directly, and returns only a bounded diff. Use `write_file` for a consciously complete new file or full replacement; it requires confirmation, creates missing parent directories inside the workspace, never appends, and rejects content above its server limit. Other filesystem changes remain subject to the existing tool permission mechanism.
 
 ### Use Cases
 

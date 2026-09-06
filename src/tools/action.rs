@@ -8,6 +8,7 @@ pub(crate) enum Action {
     Fetched,
     Read,
     Searched,
+    Written,
 }
 
 #[cfg(test)]
@@ -22,6 +23,7 @@ mod tests {
             Action::Fetched,
             Action::Read,
             Action::Searched,
+            Action::Written,
         ];
         let values = actions
             .iter()
@@ -37,6 +39,7 @@ mod tests {
                     "\"fetched\"",
                     "\"read\"",
                     "\"searched\"",
+                    "\"written\"",
                 ]
                 .into_iter()
                 .map(String::from)

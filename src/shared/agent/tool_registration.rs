@@ -14,7 +14,7 @@ use crate::{
         tool_mark_goal_complete::mark_goal_complete::MarkGoalComplete,
         tool_read_file::read_file::ReadFile, tool_run_command::run_command::RunCommand,
         tool_search_files::search_files::SearchFiles,
-        tool_spawn_subagent::spawn_subagent::SpawnSubagent,
+        tool_spawn_subagent::spawn_subagent::SpawnSubagent, tool_write_file::write_file::WriteFile,
     },
 };
 
@@ -32,6 +32,7 @@ impl Agent {
         let run_command = RunCommand::new().await?;
         let read_file = ReadFile::new().await?;
         let edit_file = EditFile::new().await?;
+        let write_file = WriteFile::new().await?;
         let search_files = SearchFiles::new().await?;
         let fetch_url = FetchUrl::new(context.dependencies.http_client.clone());
         let spawn_subagent = SpawnSubagent::new(
@@ -48,6 +49,7 @@ impl Agent {
             .tool(catalog.register_builtin_tool(run_command))
             .tool(catalog.register_builtin_tool(read_file))
             .tool(catalog.register_builtin_tool(edit_file))
+            .tool(catalog.register_builtin_tool(write_file))
             .tool(catalog.register_builtin_tool(search_files))
             .tool(catalog.register_builtin_tool(fetch_url))
             .tool(catalog.register_builtin_tool(spawn_subagent))
@@ -67,6 +69,7 @@ impl Agent {
         let run_command = RunCommand::new().await?;
         let read_file = ReadFile::new().await?;
         let edit_file = EditFile::new().await?;
+        let write_file = WriteFile::new().await?;
         let search_files = SearchFiles::new().await?;
         let search_url = FetchUrl::new(context.dependencies.http_client.clone());
 
@@ -74,6 +77,7 @@ impl Agent {
             .tool(catalog.register_builtin_tool(run_command))
             .tool(catalog.register_builtin_tool(read_file))
             .tool(catalog.register_builtin_tool(edit_file))
+            .tool(catalog.register_builtin_tool(write_file))
             .tool(catalog.register_builtin_tool(search_files))
             .tool(catalog.register_builtin_tool(search_url));
         Ok(builder)

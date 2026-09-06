@@ -9,4 +9,6 @@ pub(crate) const NO_MATCH: &str = "NO_MATCH";
 pub(crate) const AMBIGUOUS_MATCH: &str = "AMBIGUOUS_MATCH";
 pub(crate) const STALE_CONTENT: &str = "STALE_CONTENT";
 pub(crate) const PATH_OUTSIDE_WORKSPACE: &str = "PATH_OUTSIDE_WORKSPACE";
+pub(crate) const PARENT_ERROR: &str = "PARENT_ERROR";
+pub(crate) const PERMISSION_DENIED: &str = "PERMISSION_DENIED";
 pub(crate) const UNSUPPORTED_FILE: &str = "UNSUPPORTED_FILE";
