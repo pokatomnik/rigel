@@ -235,17 +235,18 @@ Located in `src/controllers/chat_controller.rs`, the IndexController orchestrate
 
 ### Built-in Tools
 
-Rigel provides five built-in tools:
+Rigel provides six built-in tools:
 
 | Tool                 | Description                                             |
 | -------------------- | ------------------------------------------------------- |
 | `run_command`        | Run shell commands, including filesystem operations     |
 | `read_file`          | Read bounded UTF-8 text with numbered lines             |
+| `search_files`       | Search bounded file contents for literal text           |
 | `fetch_url`          | Fetch readable text from an HTTP or HTTPS URL           |
 | `spawn_subagent`     | Run an autonomous subagent for a delegated task         |
 | `mark_goal_complete` | End the active `/goal` mode with a truthful work report |
 
-`read_file` reads only bounded, ordinary UTF-8 text from relative paths inside the startup workspace and runs automatically. Prefer it over `run_command` for ordinary file reading. Filesystem changes are performed through `run_command` in the startup directory and remain subject to the existing tool permission mechanism.
+`read_file` reads only bounded, ordinary UTF-8 text from relative paths inside the startup workspace and runs automatically. `search_files` performs bounded, literal, case-sensitive content searches in files or directories inside that workspace and also runs automatically; use it instead of shell pipelines for ordinary content searches. Prefer `read_file` for inspecting a matching file. Filesystem changes are performed through `run_command` in the startup directory and remain subject to the existing tool permission mechanism.
 
 ### Use Cases
 

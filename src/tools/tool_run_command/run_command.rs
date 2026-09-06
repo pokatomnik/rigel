@@ -17,7 +17,7 @@ use tokio::{
 
 use crate::shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata};
 
-use super::contracts::{Action, error_codes};
+use crate::tools::{action::Action, error_codes};
 
 const SERVER_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_OUTPUT_BYTES: usize = 32 * 1024;

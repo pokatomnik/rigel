@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata};
 
-use super::contracts::{Action, error_codes};
+use crate::tools::{action::Action, error_codes};
 const MAX_CONTENT_BYTES: usize = 32 * 1024;
 const MAX_LINES: usize = 200;
 const TRUNCATION_MESSAGE: &str = "Content is truncated. Call read_file again only with a separate bounded range tool after that tool becomes available; do not use shell pipelines for ordinary file reading.";
@@ -310,7 +310,7 @@ mod tests {
     };
     use crate::{
         shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata},
-        tools::contracts::error_codes,
+        tools::error_codes,
     };
 
     #[derive(Clone)]

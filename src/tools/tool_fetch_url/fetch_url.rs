@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata};
 
-use super::contracts::{Action, error_codes};
+use crate::tools::{action::Action, error_codes};
 
 const SERVER_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_DOWNLOAD_BYTES: usize = 1024 * 1024;

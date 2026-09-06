@@ -97,7 +97,7 @@ mod tests {
             recovery::turn_recovery::TurnStatus,
             terminal::terminal_io::TerminalIO,
         },
-        tools::tool_mark_goal_complete::MarkGoalComplete,
+        tools::tool_mark_goal_complete::mark_goal_complete::MarkGoalComplete,
     };
 
     #[derive(Clone, Copy)]

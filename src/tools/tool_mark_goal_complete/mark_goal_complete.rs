@@ -8,7 +8,7 @@ use crate::shared::{
     tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata},
 };
 
-use super::contracts::error_codes;
+use crate::tools::error_codes;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -125,7 +125,7 @@ mod tests {
             goal::goal_state::GoalState,
             tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata},
         },
-        tools::contracts::error_codes,
+        tools::error_codes,
     };
 
     #[test]
