@@ -13,6 +13,7 @@ use crate::{
         chat_history::{ChatHistory, HistoryUpdate},
         history_persistence::HistoryPersistence,
     },
+    shared::terminal::loader::WithLoader,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +62,10 @@ where
         self.history.begin_compaction();
         let summarized = {
             let agent = self.agent.lock().await;
-            agent.chat(summarization().to_string(), &mut messages).await
+            agent
+                .chat(summarization().to_string(), &mut messages)
+                .with_spinner()
+                .await
         };
         self.history.end_compaction();
         let Ok(summarized) = summarized else {

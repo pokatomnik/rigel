@@ -6,7 +6,10 @@ use rig::{
 };
 use serde::Deserialize;
 
-use crate::{entities::selected_model::SelectedModel, shared::terminal::terminal_io::TerminalIO};
+use crate::{
+    entities::selected_model::SelectedModel,
+    shared::{terminal::loader::WithLoader, terminal::terminal_io::TerminalIO},
+};
 
 pub(crate) trait ModelSelector {
     async fn select_model(&self, terminal_io: Arc<TerminalIO>) -> anyhow::Result<SelectedModel>;
@@ -31,8 +34,12 @@ impl ModelSelector for openai::Client {
 impl ModelFetcher for openai::Client {
     async fn fetch_models(&self) -> anyhow::Result<Vec<SelectedModel>> {
         let request = self.get("/models")?.body(http_client::NoBody)?;
-        let response = self.send::<_, Vec<u8>>(request).await?;
-        let body = response.into_body().await?;
+        let body = async {
+            let response = self.send::<_, Vec<u8>>(request).await?;
+            response.into_body().await
+        }
+        .with_spinner()
+        .await?;
         parse_models(body.as_slice())
     }
 }

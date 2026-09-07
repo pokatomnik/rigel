@@ -147,7 +147,10 @@ impl McpConnector for StdioConfig {
         name: &str,
         tool_server: ToolServerHandle,
     ) -> anyhow::Result<McpConnection> {
-        let mut command = Command::new(&self.command);
+        let Some(command_name) = self.command.as_deref() else {
+            anyhow::bail!("MCP server `{name}` has no command");
+        };
+        let mut command = Command::new(command_name);
         command.args(&self.args).envs(&self.env);
         let (transport, _stderr) = TokioChildProcess::builder(command)
             // TODO redirect to mcp.log file
@@ -164,10 +167,13 @@ impl McpConnector for HttpConfig {
         name: &str,
         tool_server: ToolServerHandle,
     ) -> anyhow::Result<McpConnection> {
-        if self.url.trim().is_empty() {
+        let Some(url) = self.url.as_deref() else {
+            anyhow::bail!("MCP server `{name}` has no URL");
+        };
+        if url.trim().is_empty() {
             anyhow::bail!("MCP server `{name}` has an empty URL");
         }
-        let transport = StreamableHttpClientTransport::from_uri(self.url.as_str());
+        let transport = StreamableHttpClientTransport::from_uri(url);
         Self::connect_transport(name, transport, tool_server).await
     }
 }

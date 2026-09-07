@@ -29,6 +29,7 @@ use crate::{
             stream_output_state::StreamOutputState,
             turn_journal::{ToolResultRecord, TurnJournal},
         },
+        terminal::loader::SpinnerGuard,
         terminal::terminal_io::TerminalIO,
     },
 };
@@ -166,6 +167,7 @@ where
             .update(HistoryUpdate::Append(Message::user(prompt.clone())))
             .await?;
         let mut progress = StreamProgress::new(base.clone(), prompt.clone());
+        let mut loader = SpinnerGuard::start();
         let request = {
             let agent = self.agent.lock().await;
             agent
@@ -176,6 +178,13 @@ where
         let mut stream = request.await;
 
         while let Some(item) = stream.next().await {
+            if matches!(
+                &item,
+                Ok(MultiTurnStreamItem::StreamAssistantItem(_))
+                    | Ok(MultiTurnStreamItem::StreamUserItem(_))
+            ) {
+                loader.hide();
+            }
             if !progress
                 .accept(item, self.terminal_io, self.history)
                 .await?

@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use super::rigel_config::RigelConfig;
-use crate::shared::mcp_registry::{server_config::ServerConfig, stdio_config::StdioConfig};
+use crate::shared::mcp_registry::{
+    http_config::HttpConfig, server_config::ServerConfig, stdio_config::StdioConfig,
+};
 
 impl RigelConfig {
     pub fn mcp_servers(&self) -> &HashMap<String, ServerConfig> {
@@ -26,12 +28,16 @@ impl RigelConfig {
         match (global, project) {
             (ServerConfig::Stdio(global), ServerConfig::Stdio(project)) => {
                 ServerConfig::Stdio(StdioConfig {
-                    command: project.command,
+                    command: project.command.or(global.command),
                     args: Self::merge_vec(global.args, project.args),
                     env: Self::merge_string_map(global.env, project.env),
                 })
             }
-            (ServerConfig::Http(_), ServerConfig::Http(project)) => ServerConfig::Http(project),
+            (ServerConfig::Http(global), ServerConfig::Http(project)) => {
+                ServerConfig::Http(HttpConfig {
+                    url: project.url.or(global.url),
+                })
+            }
             (_, project) => project,
         }
     }

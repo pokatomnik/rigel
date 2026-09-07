@@ -11,7 +11,8 @@ use super::rigel_config::RigelConfig;
 
 #[derive(Deserialize, Serialize, Default)]
 pub(super) struct PolicyConfig {
-    allow: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allow: Option<bool>,
 }
 
 impl RigelConfig {
@@ -46,14 +47,24 @@ impl RigelConfig {
     }
 
     pub(crate) fn policy_for(&self, tool: &str) -> Option<bool> {
-        self.policies_ref().get(tool).map(|policy| policy.allow)
+        self.policies_ref()
+            .get(tool)
+            .and_then(|policy| policy.allow)
     }
 
     pub(super) fn merge_policies(
         mut global: HashMap<String, PolicyConfig>,
         project: HashMap<String, PolicyConfig>,
     ) -> HashMap<String, PolicyConfig> {
-        global.extend(project);
+        for (tool, project_policy) in project {
+            let merged = match global.remove(&tool) {
+                Some(global_policy) => PolicyConfig {
+                    allow: project_policy.allow.or(global_policy.allow),
+                },
+                None => project_policy,
+            };
+            global.insert(tool, merged);
+        }
         global
     }
 

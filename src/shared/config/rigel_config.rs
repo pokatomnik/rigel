@@ -11,6 +11,8 @@ use crate::shared::{
     mcp_registry::server_config::ServerConfig,
 };
 
+const DEFAULT_BASE_URL: &str = "http://127.0.0.1:1234/v1";
+
 #[derive(Clone)]
 pub(crate) struct ToolPermissionPaths {
     pub(crate) global_config_path: PathBuf,
@@ -19,9 +21,8 @@ pub(crate) struct ToolPermissionPaths {
 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct RigelConfig {
-    #[serde(rename = "baseUrl")]
-    #[serde(default = "RigelConfig::default_base_url")]
-    base_url: String,
+    #[serde(rename = "baseUrl", skip_serializing_if = "Option::is_none")]
+    base_url: Option<String>,
 
     #[serde(rename = "envKey")]
     env_key: Option<String>,
@@ -40,7 +41,7 @@ pub(crate) struct RigelConfig {
 impl Default for RigelConfig {
     fn default() -> Self {
         Self {
-            base_url: Self::default_base_url(),
+            base_url: Some(Self::default_base_url()),
             env_key: None,
             servers: HashMap::new(),
             models: HashMap::new(),
@@ -51,7 +52,7 @@ impl Default for RigelConfig {
 
 impl RigelConfig {
     fn default_base_url() -> String {
-        "http://127.0.0.1:1234/v1".to_owned()
+        DEFAULT_BASE_URL.to_owned()
     }
 
     pub(crate) async fn from_profile(profile: Option<&Path>) -> anyhow::Result<RigelConfig> {
@@ -210,22 +211,22 @@ impl RigelConfig {
 
     fn merge(global: RigelConfig, project: RigelConfig) -> RigelConfig {
         let RigelConfig {
+            base_url: global_base_url,
+            env_key: global_env_key,
             servers: global_servers,
             models: global_models,
             policies: global_policies,
-            ..
         } = global;
         let RigelConfig {
-            base_url,
-            env_key,
+            base_url: project_base_url,
+            env_key: project_env_key,
             servers: project_servers,
             models: project_models,
             policies: project_policies,
-            ..
         } = project;
         RigelConfig {
-            base_url,
-            env_key,
+            base_url: project_base_url.or(global_base_url),
+            env_key: project_env_key.or(global_env_key),
             servers: Self::merge_servers(global_servers, project_servers),
             models: Self::merge_models(global_models, project_models),
             policies: Self::merge_policies(global_policies, project_policies),
@@ -245,7 +246,7 @@ impl RigelConfig {
     }
 
     pub fn base_url(&self) -> &str {
-        self.base_url.as_str()
+        self.base_url.as_deref().unwrap_or(DEFAULT_BASE_URL)
     }
 
     pub fn api_key(&self) -> Option<String> {
@@ -257,7 +258,7 @@ impl RigelConfig {
     }
 
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
-        self.base_url = base_url.into();
+        self.base_url = Some(base_url.into());
         self
     }
 
@@ -276,7 +277,7 @@ mod tests {
     fn uses_default_base_url_when_missing() -> anyhow::Result<()> {
         let config = RigelConfig::parse_config("")?;
 
-        assert_eq!(config.base_url, "http://127.0.0.1:1234/v1");
+        assert_eq!(config.base_url(), "http://127.0.0.1:1234/v1");
         Ok(())
     }
 
@@ -322,6 +323,55 @@ allow = false
 
         assert_eq!(merged.base_url(), "http://127.0.0.1:1234/v1");
         assert_eq!(merged.policy_for("run_command"), None);
+    }
+
+    #[test]
+    fn missing_project_fields_inherit_global_values() -> anyhow::Result<()> {
+        let global = RigelConfig::parse_config(
+            r#"
+baseUrl = "https://global.example/v1"
+envKey = "GLOBAL_KEY"
+
+[policies.run_command]
+allow = true
+
+[mcpServers.local]
+type = "stdio"
+command = "global-command"
+
+[mcpServers.remote]
+type = "http"
+url = "https://global.example/mcp"
+"#,
+        )?;
+        let project = RigelConfig::parse_config(
+            r#"
+[policies.run_command]
+
+[mcpServers.local]
+type = "stdio"
+args = ["project-arg"]
+
+[mcpServers.remote]
+type = "http"
+"#,
+        )?;
+
+        let merged = RigelConfig::merge_optional(Some(global), Some(project));
+
+        assert_eq!(merged.base_url(), "https://global.example/v1");
+        assert_eq!(merged.env_key.as_deref(), Some("GLOBAL_KEY"));
+        assert_eq!(merged.policy_for("run_command"), Some(true));
+        let Some(ServerConfig::Stdio(local)) = merged.mcp_servers().get("local") else {
+            anyhow::bail!("merged local MCP server is not stdio")
+        };
+        assert_eq!(local.command.as_deref(), Some("global-command"));
+        assert_eq!(local.args, ["project-arg"]);
+        let Some(ServerConfig::Http(remote)) = merged.mcp_servers().get("remote") else {
+            anyhow::bail!("merged remote MCP server is not http")
+        };
+        assert_eq!(remote.url.as_deref(), Some("https://global.example/mcp"));
+        Ok(())
     }
 
     #[test]
@@ -382,7 +432,8 @@ PROJECT_ONLY = "yes"
 
         let merged = RigelConfig::merge_optional(Some(global), Some(project));
 
-        assert_eq!(merged.base_url(), "http://127.0.0.1:1234/v1");
+        assert_eq!(merged.base_url(), "https://global.example/v1");
+        assert_eq!(merged.env_key.as_deref(), Some("GLOBAL_KEY"));
         assert_eq!(merged.api_key(), None);
         assert_eq!(merged.policy_for("run_command"), Some(true));
         assert_eq!(merged.policy_for("fetch_url"), Some(true));
@@ -401,7 +452,7 @@ PROJECT_ONLY = "yes"
         let Some(ServerConfig::Stdio(server)) = merged.mcp_servers().get("local") else {
             anyhow::bail!("merged MCP server is not stdio")
         };
-        assert_eq!(server.command, "project-command");
+        assert_eq!(server.command.as_deref(), Some("project-command"));
         assert_eq!(server.args, ["global-arg", "project-arg"]);
         assert_eq!(
             server.env.get("SHARED").map(String::as_str),
