@@ -129,10 +129,7 @@ pub(crate) fn print_text(terminal_io: &TerminalIO, state: &mut StreamOutputState
 }
 
 pub(crate) fn print_tool_call(terminal_io: &TerminalIO, tool_call: &ToolCall) {
-    let args_str = tool_call.function.arguments.to_string().short(30);
-    terminal_io.eprintln_orange(
-        format!("\n[tool call: {}({})]", tool_call.function.name, args_str).as_str(),
-    );
+    terminal_io.eprintln_orange(format_tool_call(tool_call).as_str());
 }
 
 pub(crate) fn print_tool_result(
@@ -141,13 +138,24 @@ pub(crate) fn print_tool_result(
     tool_result: &ToolResult,
 ) {
     state.record_tool_result(tool_recovery_status(tool_result));
+    terminal_io.eprintln_blue(format_tool_result(tool_result).as_str());
+}
+
+fn format_tool_call(tool_call: &ToolCall) -> String {
+    format!(
+        "\n[tool call: {}({})]",
+        tool_call.function.name, tool_call.function.arguments
+    )
+}
+
+fn format_tool_result(tool_result: &ToolResult) -> String {
     let output = tool_result
         .content
         .iter()
         .map(format_tool_result_content)
         .collect::<Vec<_>>()
         .join("\n");
-    terminal_io.eprintln_blue(format!("[tool result: {}]", output.short(30)).as_str());
+    format!("[tool result: {}]", output.short(30))
 }
 
 fn format_tool_result_content(content: &ToolResultContent) -> String {
@@ -155,5 +163,97 @@ fn format_tool_result_content(content: &ToolResultContent) -> String {
         ToolResultContent::Text(text) => text.text.clone(),
         ToolResultContent::Json { value } => value.to_string(),
         ToolResultContent::Image(_) => "<image>".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rig::{OneOrMany, message::ToolFunction};
+
+    use super::{format_tool_call, format_tool_result};
+    use rig::message::{ToolCall, ToolResult, ToolResultContent};
+
+    fn tool_result(content: OneOrMany<ToolResultContent>) -> ToolResult {
+        ToolResult {
+            id: "call-1".to_string(),
+            call_id: None,
+            content,
+        }
+    }
+
+    #[test]
+    fn tool_call_arguments_are_displayed_in_full() {
+        let arguments = serde_json::json!({
+            "query": "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        });
+        let call = ToolCall::new(
+            "call-1".to_string(),
+            ToolFunction::new("search".to_string(), arguments.clone()),
+        );
+
+        let formatted = format_tool_call(&call);
+
+        assert!(formatted.contains(arguments.to_string().as_str()));
+        assert!(!formatted.contains("..."));
+    }
+
+    #[test]
+    fn short_tool_call_arguments_are_unchanged() {
+        let call = ToolCall::new(
+            "call-1".to_string(),
+            ToolFunction::new("search".to_string(), serde_json::json!({"query": "rust"})),
+        );
+
+        assert_eq!(
+            format_tool_call(&call),
+            "\n[tool call: search({\"query\":\"rust\"})]"
+        );
+    }
+
+    #[test]
+    fn long_tool_result_keeps_thirty_unicode_characters_on_each_side() {
+        let content = format!("{}middle{}", "你".repeat(30), "界".repeat(30));
+
+        let formatted = format_tool_result(&tool_result(OneOrMany::one(ToolResultContent::text(
+            content,
+        ))));
+
+        assert_eq!(
+            formatted,
+            format!("[tool result: {}...{}]", "你".repeat(30), "界".repeat(30))
+        );
+    }
+
+    #[test]
+    fn short_tool_result_is_unchanged() {
+        let result = tool_result(OneOrMany::one(ToolResultContent::text("done")));
+
+        assert_eq!(format_tool_result(&result), "[tool result: done]");
+    }
+
+    #[test]
+    fn multi_part_tool_result_is_shortened_after_joining() {
+        let mut content = OneOrMany::one(ToolResultContent::text("a".repeat(40)));
+        content.push(ToolResultContent::text("b".repeat(40)));
+
+        let formatted = format_tool_result(&tool_result(content));
+
+        assert_eq!(
+            formatted,
+            format!("[tool result: {}...{}]", "a".repeat(30), "b".repeat(30))
+        );
+    }
+
+    #[test]
+    fn json_and_image_tool_result_content_keep_their_display_forms() {
+        let mut content = OneOrMany::one(ToolResultContent::json(serde_json::json!({
+            "ok": true
+        })));
+        content.push(ToolResultContent::image_base64("encoded", None, None));
+
+        assert_eq!(
+            format_tool_result(&tool_result(content)),
+            "[tool result: {\"ok\":true}\n<image>]"
+        );
     }
 }
