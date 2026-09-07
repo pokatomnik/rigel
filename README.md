@@ -11,7 +11,9 @@ Rigel is a conversational LLM agent that integrates shell and network tools into
 Rigel reads the global TOML configuration from `~/.rigel/config.toml` by
 default. `rigel chat --profile <PATH>` uses `<PATH>` as the global file. In
 both cases Rigel also reads `<current-dir>/.rigel/config.toml` and overlays it
-on the global configuration.
+on the global configuration. Each explicitly configured project value overrides
+the global/profile value; an omitted project value is inherited. Defaults are
+used only when neither layer configures that value.
 
 The MCP servers whose tools are exposed to the agent are declared in TOML:
 
@@ -74,8 +76,13 @@ the request without them.
 
 Each server entry declares its transport with the `type` key:
 
-- `"stdio"` — launch a local process: `command` (required), `args` and `env` (optional)
-- `"http"` — connect to a remote endpoint: `url` (required)
+- `"stdio"` — launch a local process: `command` (required in the merged configuration), `args` and `env` (optional)
+- `"http"` — connect to a remote endpoint: `url` (required in the merged configuration)
+
+For a server with the same name and type in the global/profile configuration,
+project settings may omit `command` or `url` and inherit them from the global
+layer. Project `args` are appended to global `args`, while project environment
+variables override global variables with the same name.
 
 If the default file is missing or cannot be read or parsed, Rigel uses its
 defaults. An explicitly supplied `--profile` path must exist and contain valid
