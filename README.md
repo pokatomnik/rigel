@@ -6,6 +6,23 @@ A Rust 2024 CLI agent for interacting with OpenAI-compatible LLM APIs.
 
 Rigel is a conversational LLM agent that integrates shell and network tools into an interactive CLI session. It connects to OpenAI-compatible servers and runs commands from the directory where Rigel started.
 
+## Architecture
+
+Rigel keeps application workflows, domain data, runtime adapters, and composition separate:
+
+- `src/main.rs` is the composition root. It parses the CLI, creates concrete adapters and workflows, wires them through contracts, and starts the CLI controllers.
+- `src/cmd/` contains only Clap parsing and CLI DTOs.
+- `src/contracts/` contains ports shared across layers. Contracts describe application capabilities without exposing provider or terminal framework types.
+- `src/entities/` contains domain entities and value objects, including application requests, configuration, conversation state, goals, skills, and tool data.
+- `src/use_cases/` contains provider-neutral application workflows such as chat, initialization, and goal state transitions.
+- `src/adapters/` contains concrete runtime integrations: configuration and history persistence, terminal I/O, workspace access, MCP, model sessions, streaming, recovery, permissions, and subagent adapters.
+- `src/controllers/` contains only input/output boundary controllers. They receive application requests, invoke workflows through contracts, and return results without constructing runtime dependencies.
+- `src/tools/` contains the agent-callable tool implementations. Tools use contracts for application state and I/O.
+- `src/prompts/` contains static model-facing prompt text; Rust prompt modules compose it with runtime values.
+- `src/shared/` contains domain-neutral technical primitives.
+
+The composition root selects concrete adapters and use cases once, then passes them to controllers through contracts. Controllers do not depend on adapters or concrete use cases; contracts and entities keep workflows independent from runtime integrations.
+
 ## Configuration
 
 Rigel reads the global TOML configuration from `~/.rigel/config.toml` by
@@ -123,10 +140,11 @@ This completion tool is exposed only to the main chat agent, not to subagents.
 
 ### Built-in skills
 
-`configure-rigel` is always available in `/skills`. It documents the TOML
-configuration file, model parameters, MCP servers, and project and global skill
-directories. It is compiled into Rigel and does not require a file in the
-current project or home directory. When selected, it provides this context to
+`configure-rigel` is always available in `/skills`. Its static source lives under
+`src/prompts/skills/configure-rigel/SKILL.md`; it documents the TOML configuration
+file, model parameters, MCP servers, and project and global skill directories. It
+is compiled into Rigel and does not require a file in the current project or home
+directory. When selected, it provides this context to
 the agent and asks how it can help configure Rigel instead of asking the agent
 to summarize the skill.
 
@@ -173,44 +191,19 @@ cargo clippy --all-targets --all-features
 
 ## Project Structure
 
-## Quick Start
-
-```bash
-# Clone the repository
-git clone <repository-url>
-cd rigel
-
-# Run help command
-cargo run -- --help
-
-# Start Rigel with the default configuration
-cargo run -- chat
-
-# Build the project
-cargo build
-
-# Run tests
-cargo test --all-targets
-
-# Format Rust code
-cargo fmt --all -- --check
-
-# Run clippy checks
-cargo clippy --all-targets --all-features
-```
-
-## Project Structure
-
 ```
 rigel/
 ├── src/
+│   ├── main.rs        # Composition root and CLI dispatch
 │   ├── cmd/           # CLI argument parsing and options
-│   ├── controllers/   # Request orchestration layer
-│   ├── entities/      # Domain entities
-│   ├── prompts/       # System prompts for LLM interaction
-│   ├── shared/        # Terminal IO and shared utilities
-│   ├── tools/         # Agent-callable tools
-│   └── use_cases/     # Application workflows (chat, model selection)
+│   ├── contracts/     # Application ports and capability boundaries
+│   ├── adapters/      # Concrete runtime and external-system adapters
+│   ├── controllers/   # Input/output boundary controllers only
+│   ├── entities/      # Domain entities and value objects
+│   ├── prompts/       # Static model-facing prompt text
+│   ├── shared/        # Domain-neutral technical primitives
+│   ├── tools/         # Agent-callable tool implementations
+│   └── use_cases/     # Application workflows
 ├── Cargo.toml         # Rust package metadata and dependencies
 ├── Cargo.lock         # Resolved dependency versions
 └── README.md          # This file
@@ -230,38 +223,39 @@ and `chat` subcommands:
 cargo run -- chat --profile ./config.toml
 ```
 
-### Agent Controller
+### CLI Controllers and Runtime Adapters
 
-Located in `src/controllers/chat_controller.rs`, the IndexController orchestrates agent operations:
+`src/controllers/chat_controller/chat_controller.rs` contains a thin `ChatController`. It receives a `ChatRequest`, writes the welcome message through `ApplicationOutput`, and invokes the provider-neutral chat workflow through `ChatWorkflow`. `InitController` follows the same contract-only boundary for configuration initialization.
 
-- Establishes connection to an OpenAI-compatible server
-- Selects available models deterministically
-- Initializes chat with system prompt
-- Manages conversation turns (default: 12)
-- Routes built-in tools to appropriate agents
+Concrete model, history, terminal, workspace, MCP, permission, streaming, recovery, and subagent integrations live under `src/adapters/`. They are selected and wired by `src/main.rs`; controllers never construct or import them directly.
 
 ### Built-in Tools
 
-Rigel provides nine built-in tools:
+Rigel currently provides ten built-in tools. Their implementations live under `src/tools/` and are registered by the concrete agent adapter under `src/adapters/model_runtime/agent/tool_registration.rs`:
 
-| Tool                 | Description                                                                     |
-| -------------------- | ------------------------------------------------------------------------------- |
-| `run_command`        | Run shell commands for builds, tests, git, programs, and uncovered capabilities |
-| `read_file`          | Read bounded UTF-8 text with numbered lines                                     |
-| `search_files`       | Search bounded file contents for literal text                                   |
-| `edit_file`          | Replace one exact unique fragment with a bounded diff                           |
-| `write_file`         | Create or fully replace a UTF-8 text file                                       |
-| `fetch_url`          | Fetch bounded text from a known HTTP or HTTPS URL                               |
-| `spawn_subagent`     | Run an autonomous subagent for a delegated task                                 |
-| `ask_user`           | Ask one question with selectable answers or required free-form input            |
-| `mark_goal_complete` | End the active `/goal` mode with a truthful work report                         |
+| Tool                 | Implementation path                  | Description                                                                             |
+| -------------------- | ------------------------------------ | --------------------------------------------------------------------------------------- |
+| `ask_user`           | `src/tools/tool_ask_user/`           | Ask one question with selectable answers or required free-form input                    |
+| `run_command`        | `src/tools/tool_run_command/`        | Run bounded shell commands for builds, tests, git, programs, and uncovered capabilities |
+| `read_file`          | `src/tools/tool_read_file/`          | Read bounded UTF-8 text with numbered lines                                             |
+| `edit_file`          | `src/tools/tool_edit_file/`          | Replace one exact unique fragment with a bounded diff                                   |
+| `write_file`         | `src/tools/tool_write_file/`         | Create or fully replace a UTF-8 text file                                               |
+| `search_files`       | `src/tools/tool_search_files/`       | Search bounded file contents for literal text                                           |
+| `glob_files`         | `src/tools/tool_glob_files/`         | Find bounded workspace files by a relative glob pattern                                 |
+| `fetch_url`          | `src/tools/tool_fetch_url/`          | Fetch bounded text from a known HTTP or HTTPS URL                                       |
+| `spawn_subagent`     | `src/tools/tool_spawn_subagent/`     | Run an autonomous subagent for a delegated task                                         |
+| `mark_goal_complete` | `src/tools/tool_mark_goal_complete/` | End the active `/goal` mode with a truthful work report                                 |
 
-`read_file` reads only bounded, ordinary UTF-8 text from relative paths inside the startup workspace and runs automatically; `search_files` performs bounded, literal, case-sensitive content searches in files or directories inside that workspace and also runs automatically; use them instead of shell commands or pipelines for ordinary file reading and content searches. Prefer `read_file` for inspecting a matching file. After reading or searching, use `edit_file` for one exact unique replacement in an existing UTF-8 file; it requires confirmation, verifies the file was not changed between reads, writes the result directly, and returns only a bounded diff. Use `write_file` for a consciously complete new file or full replacement; it requires confirmation, creates missing parent directories inside the workspace, never appends, and rejects content above its server limit. `ask_user` is automatic and is available only to the main chat agent: it presents the model's ordered answers plus `Something else`; choosing the latter keeps the same tool call open until the user enters non-empty free text. It does not add a separate user turn and is available during `/goal` when the model needs the user's choice. Its automatic permission avoids a confirmation dialog; an explicit `allow = false` policy can still deny it without prompting. `run_command` remains the fallback for builds, tests, git, programs, and capabilities not covered by these dedicated tools; it keeps the existing shell, startup directory, 30-second timeout, output cap, and permission confirmation policy. Other filesystem changes remain subject to the existing tool permission mechanism.
+`read_file` reads only bounded, ordinary UTF-8 text from relative paths inside the startup workspace and runs automatically; `search_files` performs bounded, literal, case-sensitive content searches in files or directories inside that workspace and also runs automatically; `glob_files` performs bounded filename discovery in that workspace. Prefer these tools instead of shell commands or pipelines for ordinary file inspection and search. After reading or searching, use `edit_file` for one exact unique replacement in an existing UTF-8 file; it requires confirmation, verifies the file was not changed between reads, writes the result directly, and returns only a bounded diff. Use `write_file` for a consciously complete new file or full replacement; it requires confirmation, creates missing parent directories inside the workspace, never appends, and rejects content above its server limit. `ask_user` is automatic and is available only to the main chat agent: it presents the model's ordered answers plus `Something else`; choosing the latter keeps the same tool call open until the user enters non-empty free text. It does not add a separate user turn and is available during `/goal` when the model needs the user's choice. Its automatic permission avoids a confirmation dialog; an explicit `allow = false` policy can still deny it without prompting. `run_command` remains the fallback for builds, tests, git, programs, and capabilities not covered by these dedicated tools; it keeps the existing shell, startup directory, 30-second timeout, output cap, and permission confirmation policy. Other filesystem changes remain subject to the existing tool permission mechanism.
 
 ### Use Cases
 
-- **Chat**: Interactive conversation with LLM models
-- **Model Selection**: Deterministic model selection based on terminal output
+- **Chat boundary**: `src/use_cases/chat/` invokes one composed chat runner without knowing Rig, terminal, or filesystem types.
+- **Initialization**: `src/use_cases/init/` creates the configured profile.
+- **Model runtime**: `src/adapters/model_runtime/model_selector/` adapts provider model discovery and selection.
+- **Permissions**: `src/adapters/model_runtime/permissions/` contains the runtime hook and delegates policy decisions through contracts.
+- **Goals**: `src/use_cases/goal/` owns goal completion state.
+- **Subagents**: `src/adapters/model_runtime/subagent.rs` adapts isolated provider sessions behind the tool contract.
 
 ## Development Guidelines
 

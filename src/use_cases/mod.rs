@@ -1,3 +1,3 @@
 pub mod chat;
-pub mod model_selector;
-pub mod subagent;
+pub mod goal;
+pub mod init;

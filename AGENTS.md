@@ -2,15 +2,24 @@
 
 ## Project Structure & Module Organization
 
-Rigel is a Rust 2024 CLI for OpenAI-compatible model APIs. Entry point: `src/main.rs`. Modules:
+Rigel is a Rust 2024 CLI for OpenAI-compatible model APIs. `src/main.rs` is the
+composition root: it parses CLI input, creates concrete adapters, and dispatches
+requests to controllers. Modules:
 
 - `src/cmd/` — CLI parsing
-- `src/controllers/` — request orchestration
-- `src/use_cases/` — application workflows
-- `src/shared/` — shared terminal behavior
+- `src/contracts/` — application ports and capability boundaries
 - `src/entities/` — domain entities and value objects
-- `src/prompts/` — LLM prompts and text
+- `src/use_cases/` — application workflows
+- `src/adapters/` — concrete runtime and external-system integrations
+- `src/controllers/` — input/output boundary controllers only
+- `src/prompts/` — static model-facing prompt text
 - `src/tools/` — agent-callable tools
+- `src/shared/` — domain-neutral technical primitives, including terminal loaders
+
+Contracts describe capabilities without provider or terminal framework types;
+entities hold domain data; use cases implement workflows; adapters implement
+concrete runtime integrations; controllers receive requests and invoke workflows
+through contracts. Keep concrete wiring at `src/main.rs`.
 
 Keep static model-facing prompt text in Markdown files under `src/prompts/` and
 include it at compile time with `include_str!`. Keep Rust prompt modules focused
@@ -35,20 +44,38 @@ technical infrastructure and shared application mechanisms.
 
 ## Chat Run Loop Architecture
 
-`Chat::run` (`src/use_cases/chat/chat.rs`) is core functionality and must remain a
-simple, linear orchestration loop. This is a strict rule, not a style preference.
+`Chat::run` (`src/use_cases/chat/chat.rs`) is the provider-neutral application
+boundary and must remain a simple, linear invocation of the composed runner. The
+Rig-specific orchestration lives under `src/adapters/model_runtime/chat/`.
 
-- `Chat::run` sequences high-level steps: read input, run stream, choose completion or recovery path, report turn outcome, continue or exit.
-- Add new substantive steps as named methods on `Chat`, invoked from `run`. This includes parsing, formatting, state transitions, history mutation, recovery prep, and error handling.
-- Do not add nested workflow logic or detailed branch bodies to `run` unless strictly necessary for top-level control flow.
+- `Chat::run` delegates the application request to the composed runner and does not expose provider or terminal types.
+- Add substantive interactive steps to the runtime adapter under `src/adapters/model_runtime/chat/`, not to the provider-neutral boundary.
+- Keep the application boundary linear and easy to inspect; detailed parsing, formatting, state transitions, history mutation, recovery, and error handling belong behind contracts.
+- Controllers under `src/controllers/` must not import `src/adapters/` or construct runtime collaborators; they accept application workflows and output capabilities through contracts.
 - Refactor new logic out of `run` if it makes the loop harder to read. A reviewer must understand one user turn from `run` without reading implementation details.
 
-## Filesystem Tool Architecture
+## Built-in Tool Architecture
 
-- Filesystem interaction is performed through the `run_command` shell tool from Rigel's startup directory.
-- Use shell commands such as `ls`, `rg`, `find`, `rm`, `touch`, and `patch` for inspection and changes.
-- Keep the existing permissions mechanism unchanged; filesystem-changing `run_command` calls remain subject to permission checks.
-- Keep command output bounded and return actionable model-facing diagnostics on failures.
+Rigel currently registers ten built-in tools from
+`src/adapters/model_runtime/agent/tool_registration.rs`:
+
+- `src/tools/tool_ask_user/`
+- `src/tools/tool_run_command/`
+- `src/tools/tool_read_file/`
+- `src/tools/tool_edit_file/`
+- `src/tools/tool_write_file/`
+- `src/tools/tool_search_files/`
+- `src/tools/tool_glob_files/`
+- `src/tools/tool_fetch_url/`
+- `src/tools/tool_spawn_subagent/`
+- `src/tools/tool_mark_goal_complete/`
+
+Use the dedicated workspace tools for ordinary bounded file reads, literal
+searches, glob discovery, and exact edits. `run_command` remains the fallback
+for builds, tests, git, programs, and capabilities not covered by a dedicated
+tool. Keep tool output bounded and return actionable model-facing diagnostics on
+failures. Keep the existing permissions mechanism unchanged; filesystem-changing
+operations remain subject to permission checks.
 
 ## Tool Error Recovery
 

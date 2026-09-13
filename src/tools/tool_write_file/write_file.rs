@@ -8,18 +8,25 @@ use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    errors::{file_access_error, parent_error, write_error},
-    filesystem::{FileKind, FileSystem, TokioFileSystem},
+    errors::{parent_error, write_error},
     validation::{display_path, validate_arguments, validate_path},
 };
-use crate::shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata};
 use crate::tools::{
     action::Action,
     utils::{
-        errors::{invalid_argument, io_error, path_outside_workspace},
-        filesystem::startup_root_with,
+        errors::{
+            invalid_argument, path_outside_workspace, workspace_file_access_error,
+            workspace_io_error,
+        },
         path::is_inside,
     },
+};
+use crate::{
+    contracts::tools::{
+        permissions::ToolPermissionMetadata,
+        workspace::{WorkspacePathKind, WorkspacePathResolver, WorkspaceWriter},
+    },
+    entities::tool::tool_entities::PermissionRequirement,
 };
 
 #[derive(Deserialize)]
@@ -42,20 +49,22 @@ pub(crate) struct WriteFileOutput {
 /// Creates or completely replaces one UTF-8 text file in the startup workspace.
 pub(crate) struct WriteFile {
     root: PathBuf,
-    file_system: Arc<dyn FileSystem>,
+    path_resolver: Arc<dyn WorkspacePathResolver>,
+    writer: Arc<dyn WorkspaceWriter>,
     permission: PermissionRequirement,
 }
 
 impl WriteFile {
-    /// Creates a write tool rooted at Rigel's canonical startup workspace.
-    pub(crate) async fn new() -> Result<Self, ToolExecutionError> {
-        let file_system: Arc<dyn FileSystem> = Arc::new(TokioFileSystem);
-        let root = startup_root_with(|path| file_system.canonicalize(path))
-            .await
-            .map_err(|error| io_error("workspace", error, "write"))?;
+    /// Creates a write tool from injected path and write capabilities.
+    pub(crate) async fn new(
+        path_resolver: Arc<dyn WorkspacePathResolver>,
+        writer: Arc<dyn WorkspaceWriter>,
+    ) -> Result<Self, ToolExecutionError> {
+        let root = path_resolver.root();
         Ok(Self {
             root,
-            file_system,
+            path_resolver,
+            writer,
             permission: PermissionRequirement::ConfirmationRequired,
         })
     }
@@ -66,7 +75,10 @@ impl WriteFile {
     ) -> Result<WriteFileOutput, ToolExecutionError> {
         validate_arguments(&args.path, &args.content)?;
         let relative = validate_path(&args.path)?;
-        let candidate = self.root.join(&relative);
+        let candidate = self
+            .path_resolver
+            .resolve(&args.path)
+            .map_err(|error| workspace_file_access_error(&args.path, error, "write"))?;
         let overwritten = self.inspect_target(&candidate, &args.path).await?;
         let Some(parent) = candidate.parent() else {
             return Err(invalid_argument(
@@ -74,10 +86,10 @@ impl WriteFile {
             ));
         };
         let parent_created = self.prepare_parent(parent, &args.path).await?;
-        self.file_system
-            .write(candidate, args.content.as_bytes().to_vec())
+        self.writer
+            .write(&candidate, args.content.as_bytes())
             .await
-            .map_err(|error| write_error(&args.path, error))?;
+            .map_err(|error| write_error(&args.path, workspace_io_error(error)))?;
         Ok(WriteFileOutput {
             action: Action::Written,
             ok: true,
@@ -93,25 +105,32 @@ impl WriteFile {
         candidate: &Path,
         requested_path: &str,
     ) -> Result<bool, ToolExecutionError> {
-        let kind = match self.file_system.metadata(candidate.to_path_buf()).await {
+        let kind = match self
+            .writer
+            .metadata(candidate)
+            .await
+            .map_err(workspace_io_error)
+        {
             Ok(kind) => kind,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-            Err(error) => return Err(file_access_error(requested_path, error)),
+            Err(error) => return Err(super::errors::file_access_error(requested_path, error)),
         };
         let canonical = self
-            .file_system
-            .canonicalize(candidate.to_path_buf())
+            .path_resolver
+            .canonicalize(candidate)
             .await
-            .map_err(|error| file_access_error(requested_path, error))?;
+            .map_err(|error| workspace_file_access_error(requested_path, error, "write"))?;
         self.ensure_inside(&canonical, requested_path)?;
         match kind {
-            FileKind::Regular => Ok(true),
-            FileKind::Directory => Err(invalid_argument(format!(
+            WorkspacePathKind::File => Ok(true),
+            WorkspacePathKind::Directory => Err(invalid_argument(format!(
                 "Cannot write file \"{requested_path}\": the target is a directory. Choose a file path."
             ))),
-            FileKind::Other => Err(invalid_argument(format!(
-                "Cannot write file \"{requested_path}\": the target is not a regular file. Choose a text file path."
-            ))),
+            WorkspacePathKind::Symlink | WorkspacePathKind::Other => {
+                Err(invalid_argument(format!(
+                    "Cannot write file \"{requested_path}\": the target is not a regular file. Choose a text file path."
+                )))
+            }
         }
     }
 
@@ -120,22 +139,27 @@ impl WriteFile {
         parent: &Path,
         requested_path: &str,
     ) -> Result<bool, ToolExecutionError> {
-        match self.file_system.canonicalize(parent.to_path_buf()).await {
+        match self
+            .path_resolver
+            .canonicalize(parent)
+            .await
+            .map_err(workspace_io_error)
+        {
             Ok(canonical) => {
                 self.ensure_inside(&canonical, requested_path)?;
                 Ok(false)
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 self.ensure_existing_parent(parent, requested_path).await?;
-                self.file_system
-                    .create_dir_all(parent.to_path_buf())
+                self.writer
+                    .create_dir_all(parent)
                     .await
-                    .map_err(|error| parent_error(requested_path, error))?;
+                    .map_err(|error| parent_error(requested_path, workspace_io_error(error)))?;
                 let canonical = self
-                    .file_system
-                    .canonicalize(parent.to_path_buf())
+                    .path_resolver
+                    .canonicalize(parent)
                     .await
-                    .map_err(|error| parent_error(requested_path, error))?;
+                    .map_err(|error| parent_error(requested_path, workspace_io_error(error)))?;
                 self.ensure_inside(&canonical, requested_path)?;
                 Ok(true)
             }
@@ -150,7 +174,12 @@ impl WriteFile {
     ) -> Result<(), ToolExecutionError> {
         let mut existing = parent.to_path_buf();
         loop {
-            match self.file_system.canonicalize(existing.clone()).await {
+            match self
+                .path_resolver
+                .canonicalize(&existing)
+                .await
+                .map_err(workspace_io_error)
+            {
                 Ok(canonical) => return self.ensure_inside(&canonical, requested_path),
                 Err(error) if error.kind() == io::ErrorKind::NotFound && existing != self.root => {
                     if !existing.pop() {
@@ -231,13 +260,18 @@ mod tests {
 
     use super::{WriteFile, WriteFileArgs, WriteFileOutput};
     use crate::{
-        shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata},
+        contracts::tools::{
+            permissions::ToolPermissionMetadata,
+            workspace::{
+                WorkspaceFuture, WorkspacePathKind, WorkspacePathResolver, WorkspaceWriter,
+            },
+        },
+        entities::tool::tool_entities::PermissionRequirement,
         tools::{
             action::Action,
             error_codes,
             tool_write_file::{
                 errors::parent_error,
-                filesystem::{FileKind, FileSystem},
                 validation::{MAX_CONTENT_BYTES, display_path, validate_arguments, validate_path},
             },
         },
@@ -245,7 +279,7 @@ mod tests {
 
     struct FakeFileSystem {
         canonical: Mutex<VecDeque<Result<PathBuf, ErrorKind>>>,
-        metadata: Result<FileKind, ErrorKind>,
+        metadata: Result<WorkspacePathKind, ErrorKind>,
         create_result: Result<(), ErrorKind>,
         write_result: Result<(), ErrorKind>,
         created: Mutex<Vec<PathBuf>>,
@@ -255,7 +289,7 @@ mod tests {
     impl FakeFileSystem {
         fn new(
             canonical: Vec<Result<PathBuf, ErrorKind>>,
-            metadata: Result<FileKind, ErrorKind>,
+            metadata: Result<WorkspacePathKind, ErrorKind>,
         ) -> Self {
             Self {
                 canonical: Mutex::new(canonical.into_iter().collect()),
@@ -273,60 +307,67 @@ mod tests {
         }
     }
 
-    impl FileSystem for FakeFileSystem {
-        fn canonicalize(
-            &self,
-            _path: PathBuf,
-        ) -> futures::future::BoxFuture<'static, std::io::Result<PathBuf>> {
+    impl WorkspacePathResolver for FakeFileSystem {
+        fn root(&self) -> PathBuf {
+            PathBuf::from("/workspace")
+        }
+
+        fn resolve(&self, path: &str) -> anyhow::Result<PathBuf> {
+            Ok(self.root().join(path))
+        }
+
+        fn canonicalize(&self, _path: &Path) -> WorkspaceFuture<'_, PathBuf> {
             let result = self
                 .canonical
                 .lock()
                 .ok()
                 .and_then(|mut paths| paths.pop_front())
-                .unwrap_or(Err(ErrorKind::Other));
-            Box::pin(async move { result.map_err(std::io::Error::from) })
+                .unwrap_or(Err(ErrorKind::Other))
+                .map_err(std::io::Error::from);
+            Box::pin(async move { result.map_err(anyhow::Error::from) })
+        }
+    }
+
+    impl WorkspaceWriter for FakeFileSystem {
+        fn metadata(&self, _path: &Path) -> WorkspaceFuture<'_, WorkspacePathKind> {
+            let result = self.metadata.map_err(std::io::Error::from);
+            Box::pin(async move { result.map_err(anyhow::Error::from) })
         }
 
-        fn metadata(
-            &self,
-            _path: PathBuf,
-        ) -> futures::future::BoxFuture<'static, std::io::Result<FileKind>> {
-            let result = self.metadata;
-            Box::pin(async move { result.map_err(std::io::Error::from) })
-        }
-
-        fn create_dir_all(
-            &self,
-            path: PathBuf,
-        ) -> futures::future::BoxFuture<'static, std::io::Result<()>> {
+        fn create_dir_all(&self, path: &Path) -> WorkspaceFuture<'_, ()> {
             let result = self.create_result;
             if result.is_ok()
                 && let Ok(mut paths) = self.created.lock()
             {
-                paths.push(path);
+                paths.push(path.to_path_buf());
             }
-            Box::pin(async move { result.map_err(std::io::Error::from) })
+            Box::pin(async move {
+                result
+                    .map_err(std::io::Error::from)
+                    .map_err(anyhow::Error::from)
+            })
         }
 
-        fn write(
-            &self,
-            path: PathBuf,
-            contents: Vec<u8>,
-        ) -> futures::future::BoxFuture<'static, std::io::Result<()>> {
+        fn write(&self, path: &Path, contents: &[u8]) -> WorkspaceFuture<'_, ()> {
             let result = self.write_result;
             if result.is_ok()
                 && let Ok(mut writes) = self.writes.lock()
             {
-                writes.push((path, contents));
+                writes.push((path.to_path_buf(), contents.to_vec()));
             }
-            Box::pin(async move { result.map_err(std::io::Error::from) })
+            Box::pin(async move {
+                result
+                    .map_err(std::io::Error::from)
+                    .map_err(anyhow::Error::from)
+            })
         }
     }
 
     fn tool(file_system: Arc<FakeFileSystem>) -> WriteFile {
         WriteFile {
             root: PathBuf::from("/workspace"),
-            file_system,
+            path_resolver: file_system.clone(),
+            writer: file_system,
             permission: PermissionRequirement::ConfirmationRequired,
         }
     }
@@ -421,7 +462,7 @@ mod tests {
                 Ok(PathBuf::from("/workspace/existing.md")),
                 Ok(PathBuf::from("/workspace")),
             ],
-            Ok(FileKind::Regular),
+            Ok(WorkspacePathKind::File),
         ));
         let result = write(&tool(file_system.clone()), "existing.md", "new").await;
 
@@ -443,7 +484,7 @@ mod tests {
     async fn directory_target_is_rejected_before_writing() {
         let file_system = Arc::new(FakeFileSystem::new(
             vec![Ok(PathBuf::from("/workspace/src"))],
-            Ok(FileKind::Directory),
+            Ok(WorkspacePathKind::Directory),
         ));
         let result = write(&tool(file_system.clone()), "src", "content").await;
 
@@ -498,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn path_policy_rejects_traversal_and_normalizes_current_directory() {
+    fn path_policy_rejects_traversal_and_normalizes_dot() {
         assert_eq!(
             validate_path("a/../file.md").ok(),
             Some(PathBuf::from("file.md"))

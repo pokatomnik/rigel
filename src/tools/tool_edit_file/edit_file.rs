@@ -9,21 +9,25 @@ use serde::{Deserialize, Serialize};
 use super::{
     diff::bounded_diff,
     errors::{stale_content_error, write_error},
-    filesystem::{FileSystem, TokioFileSystem},
     validation::{
         MAX_FILE_BYTES, file_too_large_error, replaced_text, unique_match, unsupported_file_error,
-        validate_arguments, validate_path, validate_result_size,
+        validate_arguments, validate_result_size,
     },
 };
-use crate::shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata};
 use crate::tools::{
     action::Action,
     utils::{
-        errors::{file_access_error, io_error, path_outside_workspace},
-        filesystem::startup_root_with,
+        errors::{path_outside_workspace, workspace_file_access_error, workspace_io_error},
         path::{display_workspace_path, is_inside},
         text::decode_text,
     },
+};
+use crate::{
+    contracts::tools::{
+        permissions::ToolPermissionMetadata,
+        workspace::{WorkspacePathKind, WorkspacePathResolver, WorkspaceReader, WorkspaceWriter},
+    },
+    entities::tool::tool_entities::PermissionRequirement,
 };
 
 #[cfg(test)]
@@ -51,20 +55,25 @@ pub(crate) struct EditFileOutput {
 /// Performs one exact, bounded replacement in an existing workspace text file.
 pub(crate) struct EditFile {
     root: PathBuf,
-    file_system: Arc<dyn FileSystem>,
+    path_resolver: Arc<dyn WorkspacePathResolver>,
+    reader: Arc<dyn WorkspaceReader>,
+    writer: Arc<dyn WorkspaceWriter>,
     permission: PermissionRequirement,
 }
 
 impl EditFile {
-    /// Creates an edit tool rooted at Rigel's canonical startup workspace.
-    pub(crate) async fn new() -> Result<Self, ToolExecutionError> {
-        let file_system: Arc<dyn FileSystem> = Arc::new(TokioFileSystem);
-        let root = startup_root_with(|path| file_system.canonicalize(path))
-            .await
-            .map_err(|error| io_error("workspace", error, "edit"))?;
+    /// Creates an edit tool from injected path, read, and write capabilities.
+    pub(crate) async fn new(
+        path_resolver: Arc<dyn WorkspacePathResolver>,
+        reader: Arc<dyn WorkspaceReader>,
+        writer: Arc<dyn WorkspaceWriter>,
+    ) -> Result<Self, ToolExecutionError> {
+        let root = path_resolver.root();
         Ok(Self {
             root,
-            file_system,
+            path_resolver,
+            reader,
+            writer,
             permission: PermissionRequirement::ConfirmationRequired,
         })
     }
@@ -76,7 +85,10 @@ impl EditFile {
         new_text: &str,
     ) -> Result<EditFileOutput, ToolExecutionError> {
         validate_arguments(requested_path, old_text, new_text)?;
-        let candidate = self.root.join(validate_path(requested_path)?);
+        let candidate = self
+            .path_resolver
+            .resolve(requested_path)
+            .map_err(|error| workspace_file_access_error(requested_path, error, "edit"))?;
         let canonical = self.canonical_path(&candidate, requested_path).await?;
         self.ensure_regular_file(&canonical, requested_path).await?;
         let original = self.read_text(&canonical, requested_path).await?;
@@ -89,10 +101,10 @@ impl EditFile {
         validate_result_size(updated.len())?;
         let path = display_workspace_path(&self.root, &canonical, requested_path, "edit")?;
         let diff = bounded_diff(&path, &original, &updated, start, old_text, new_text);
-        self.file_system
-            .write(canonical, updated.into_bytes())
+        self.writer
+            .write(&canonical, updated.as_bytes())
             .await
-            .map_err(|error| write_error(requested_path, error))?;
+            .map_err(|error| write_error(requested_path, workspace_io_error(error)))?;
         Ok(EditFileOutput {
             action: Action::Edited,
             ok: true,
@@ -110,10 +122,10 @@ impl EditFile {
         requested_path: &str,
     ) -> Result<PathBuf, ToolExecutionError> {
         let canonical = self
-            .file_system
-            .canonicalize(candidate.to_path_buf())
+            .path_resolver
+            .canonicalize(candidate)
             .await
-            .map_err(|error| file_access_error(requested_path, error, "edit"))?;
+            .map_err(|error| workspace_file_access_error(requested_path, error, "edit"))?;
         if !is_inside(&self.root, &canonical) {
             return Err(path_outside_workspace(requested_path, "edit"));
         }
@@ -125,12 +137,12 @@ impl EditFile {
         path: &Path,
         requested_path: &str,
     ) -> Result<(), ToolExecutionError> {
-        let is_file = self
-            .file_system
-            .metadata(path.to_path_buf())
+        let kind = self
+            .reader
+            .metadata(path)
             .await
-            .map_err(|error| file_access_error(requested_path, error, "edit"))?;
-        if !is_file {
+            .map_err(|error| workspace_file_access_error(requested_path, error, "edit"))?;
+        if kind != WorkspacePathKind::File {
             return Err(unsupported_file_error(requested_path));
         }
         Ok(())
@@ -150,15 +162,15 @@ impl EditFile {
         path: &Path,
         requested_path: &str,
     ) -> Result<Vec<u8>, ToolExecutionError> {
-        let bytes = self
-            .file_system
-            .read(path.to_path_buf())
+        let read = self
+            .reader
+            .read(path, MAX_FILE_BYTES)
             .await
-            .map_err(|error| file_access_error(requested_path, error, "edit"))?;
-        if bytes.len() > MAX_FILE_BYTES {
+            .map_err(|error| workspace_file_access_error(requested_path, error, "edit"))?;
+        if read.truncated || read.bytes.len() > MAX_FILE_BYTES {
             return Err(file_too_large_error(requested_path));
         }
-        Ok(bytes)
+        Ok(read.bytes)
     }
 }
 
@@ -224,12 +236,21 @@ mod tests {
     use rig::tool::{Tool, ToolContext};
 
     use super::{
-        EditFile, EditFileArgs, FileSystem, TEST_MAX_DIFF_BYTES, bounded_diff, changed_line_count,
+        EditFile, EditFileArgs, TEST_MAX_DIFF_BYTES, bounded_diff, changed_line_count,
         replaced_text, unique_match,
     };
-    use crate::shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata};
-    use crate::tools::error_codes;
     use crate::tools::tool_edit_file::validation::MAX_EDIT_TEXT_BYTES;
+    use crate::{
+        contracts::tools::{
+            permissions::ToolPermissionMetadata,
+            workspace::{
+                WorkspaceFuture, WorkspacePathKind, WorkspacePathResolver, WorkspaceRead,
+                WorkspaceReader, WorkspaceWriter,
+            },
+        },
+        entities::tool::tool_entities::PermissionRequirement,
+        tools::error_codes,
+    };
 
     struct FakeFileSystem {
         canonical_path: Result<PathBuf, ErrorKind>,
@@ -268,41 +289,76 @@ mod tests {
         }
     }
 
-    impl FileSystem for FakeFileSystem {
-        fn canonicalize(
-            &self,
-            _path: PathBuf,
-        ) -> futures::future::BoxFuture<'static, std::io::Result<PathBuf>> {
-            let result = self.canonical_path.clone().map_err(std::io::Error::from);
-            Box::pin(async move { result })
+    impl WorkspacePathResolver for FakeFileSystem {
+        fn root(&self) -> PathBuf {
+            PathBuf::from("/workspace")
         }
 
-        fn metadata(
-            &self,
-            _path: PathBuf,
-        ) -> futures::future::BoxFuture<'static, std::io::Result<bool>> {
-            let result = self.metadata.map_err(std::io::Error::from);
-            Box::pin(async move { result })
+        fn resolve(&self, path: &str) -> anyhow::Result<PathBuf> {
+            Ok(self.root().join(path))
+        }
+
+        fn canonicalize(&self, _path: &std::path::Path) -> WorkspaceFuture<'_, PathBuf> {
+            let result = self.canonical_path.clone().map_err(std::io::Error::from);
+            Box::pin(async move { result.map_err(anyhow::Error::from) })
+        }
+    }
+
+    impl WorkspaceReader for FakeFileSystem {
+        fn metadata(&self, _path: &std::path::Path) -> WorkspaceFuture<'_, WorkspacePathKind> {
+            let result = self
+                .metadata
+                .map(|is_file| {
+                    if is_file {
+                        WorkspacePathKind::File
+                    } else {
+                        WorkspacePathKind::Directory
+                    }
+                })
+                .map_err(std::io::Error::from);
+            Box::pin(async move { result.map_err(anyhow::Error::from) })
         }
 
         fn read(
             &self,
-            _path: PathBuf,
-        ) -> futures::future::BoxFuture<'static, std::io::Result<Vec<u8>>> {
+            _path: &std::path::Path,
+            _max_bytes: usize,
+        ) -> WorkspaceFuture<'_, WorkspaceRead> {
             let result = self
                 .reads
                 .lock()
                 .ok()
                 .and_then(|mut reads| reads.pop_front())
-                .unwrap_or(Err(ErrorKind::Other));
-            Box::pin(async move { result.map_err(std::io::Error::from) })
+                .unwrap_or(Err(ErrorKind::Other))
+                .map(|bytes| WorkspaceRead {
+                    bytes,
+                    truncated: false,
+                })
+                .map_err(std::io::Error::from);
+            Box::pin(async move { result.map_err(anyhow::Error::from) })
+        }
+    }
+
+    impl WorkspaceWriter for FakeFileSystem {
+        fn metadata(&self, _path: &std::path::Path) -> WorkspaceFuture<'_, WorkspacePathKind> {
+            let result = self
+                .metadata
+                .map(|is_file| {
+                    if is_file {
+                        WorkspacePathKind::File
+                    } else {
+                        WorkspacePathKind::Directory
+                    }
+                })
+                .map_err(std::io::Error::from);
+            Box::pin(async move { result.map_err(anyhow::Error::from) })
         }
 
-        fn write(
-            &self,
-            _path: PathBuf,
-            contents: Vec<u8>,
-        ) -> futures::future::BoxFuture<'static, std::io::Result<()>> {
+        fn create_dir_all(&self, _path: &std::path::Path) -> WorkspaceFuture<'_, ()> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn write(&self, _path: &std::path::Path, contents: &[u8]) -> WorkspaceFuture<'_, ()> {
             let result = self
                 .write_result
                 .lock()
@@ -311,16 +367,20 @@ mod tests {
             if result.is_ok()
                 && let Ok(mut writes) = self.writes.lock()
             {
-                writes.push(contents);
+                writes.push(contents.to_vec());
             }
-            Box::pin(async move { result.map_err(std::io::Error::from) })
+            Box::pin(async move {
+                result.map_err(|error| anyhow::Error::from(std::io::Error::from(error)))
+            })
         }
     }
 
     fn tool(file_system: Arc<FakeFileSystem>) -> EditFile {
         EditFile {
             root: PathBuf::from("/workspace"),
-            file_system,
+            path_resolver: file_system.clone(),
+            reader: file_system.clone(),
+            writer: file_system,
             permission: PermissionRequirement::ConfirmationRequired,
         }
     }

@@ -9,6 +9,30 @@ pub(crate) fn invalid_argument(message: impl Into<String>) -> ToolExecutionError
     ToolExecutionError::invalid_args(message).with_code(error_codes::INVALID_ARGUMENT)
 }
 
+/// Converts an injected capability error while preserving an embedded I/O cause.
+pub(crate) fn workspace_file_access_error(
+    path: impl std::fmt::Display,
+    error: anyhow::Error,
+    operation: &str,
+) -> ToolExecutionError {
+    file_access_error(path, workspace_io_error(error), operation)
+}
+
+/// Extracts an I/O cause from an injected workspace error for legacy tool messages.
+pub(crate) fn workspace_io_error(error: anyhow::Error) -> io::Error {
+    match error.downcast::<io::Error>() {
+        Ok(error) => error,
+        Err(error) => io::Error::other(error.to_string()),
+    }
+}
+
+/// Builds an invalid-argument error for an unsupported search target.
+pub(crate) fn invalid_search_path(path: impl std::fmt::Display) -> ToolExecutionError {
+    invalid_argument(format!(
+        "Cannot search \"{path}\": choose a regular file or directory inside the workspace."
+    ))
+}
+
 /// Classifies a filesystem failure as not-found or generic I/O for a tool operation.
 pub(crate) fn file_access_error(
     path: impl std::fmt::Display,

@@ -4,15 +4,15 @@ use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    entities::context_usage::ContextUsage,
-    shared::{
-        terminal::terminal_io::{ReadlineOutcome, TerminalIO},
-        tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata},
+    contracts::{interaction::UserInteraction, tools::permissions::ToolPermissionMetadata},
+    entities::{
+        application::input_outcome::InputOutcome, conversation::context_usage::ContextUsage,
+        tool::tool_entities::PermissionRequirement,
     },
     tools::{action::Action, error_codes},
 };
 
-use super::interaction::{InteractionFailure, TerminalInteraction, UserInteraction};
+use super::interaction::InteractionFailure;
 
 /// The UI-only label appended to every `ask_user` selection menu.
 pub(crate) const SOMETHING_ELSE: &str = "Something else";
@@ -43,16 +43,8 @@ pub(crate) struct AskUser {
 }
 
 impl AskUser {
-    /// Creates the production user-question tool for the current chat session.
-    pub(crate) fn new(terminal_io: Arc<TerminalIO>) -> Self {
-        Self {
-            interaction: Arc::new(TerminalInteraction::new(terminal_io)),
-            permission: PermissionRequirement::Automatic,
-        }
-    }
-
-    #[cfg(test)]
-    fn with_interaction(interaction: Arc<dyn UserInteraction>) -> Self {
+    /// Creates the user-question tool from a composition-root-selected interaction adapter.
+    pub(crate) fn with_interaction(interaction: Arc<dyn UserInteraction>) -> Self {
         Self {
             interaction,
             permission: PermissionRequirement::Automatic,
@@ -109,15 +101,15 @@ impl AskUser {
                 .readline(context_usage)
                 .map_err(interaction_error)?
             {
-                ReadlineOutcome::Text(answer) if answer.trim().is_empty() => continue,
-                ReadlineOutcome::Text(answer) => {
+                InputOutcome::Text(answer) if answer.trim().is_empty() => continue,
+                InputOutcome::Text(answer) => {
                     validate_text("answer", &answer, MAX_ANSWER_BYTES)?;
                     return Ok(answer);
                 }
-                ReadlineOutcome::Eof => {
+                InputOutcome::Eof => {
                     return Err(interaction_unavailable("the user input reached EOF."));
                 }
-                ReadlineOutcome::Cancelled => {
+                InputOutcome::Cancelled => {
                     return Err(user_cancelled("the user cancelled free-form input."));
                 }
             }
@@ -224,12 +216,12 @@ fn invalid_argument(message: impl Into<String>) -> ToolExecutionError {
     ToolExecutionError::invalid_args(message).with_code(error_codes::INVALID_ARGUMENT)
 }
 
-fn interaction_error(failure: InteractionFailure) -> ToolExecutionError {
-    match failure {
-        InteractionFailure::Cancelled => user_cancelled("the user cancelled the interaction."),
-        InteractionFailure::Unavailable => {
-            interaction_unavailable("the user interaction is unavailable.")
+fn interaction_error(error: anyhow::Error) -> ToolExecutionError {
+    match error.downcast_ref::<InteractionFailure>() {
+        Some(InteractionFailure::Cancelled) => {
+            user_cancelled("the user cancelled the interaction.")
         }
+        _ => interaction_unavailable("the user interaction is unavailable."),
     }
 }
 
@@ -250,26 +242,28 @@ mod tests {
 
     use rig::tool::{Tool, ToolContext};
 
-    use super::super::interaction::{InteractionFailure, UserInteraction};
+    use super::super::interaction::InteractionFailure;
     use super::{AskUser, AskUserArgs, SOMETHING_ELSE};
-    use crate::shared::terminal::terminal_io::ReadlineOutcome;
     use crate::{
-        entities::context_usage::ContextUsage,
-        shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata},
+        contracts::{interaction::UserInteraction, tools::permissions::ToolPermissionMetadata},
+        entities::{
+            application::input_outcome::InputOutcome, conversation::context_usage::ContextUsage,
+            tool::tool_entities::PermissionRequirement,
+        },
         tools::error_codes,
     };
 
     struct StubInteraction {
-        selections: Mutex<VecDeque<Result<Option<usize>, InteractionFailure>>>,
-        inputs: Mutex<VecDeque<Result<ReadlineOutcome, InteractionFailure>>>,
+        selections: Mutex<VecDeque<Result<Option<usize>, anyhow::Error>>>,
+        inputs: Mutex<VecDeque<Result<InputOutcome, anyhow::Error>>>,
         items: Mutex<Vec<String>>,
         contexts: Mutex<Vec<ContextUsage>>,
     }
 
     impl StubInteraction {
         fn new(
-            selection: Result<Option<usize>, InteractionFailure>,
-            inputs: Vec<Result<ReadlineOutcome, InteractionFailure>>,
+            selection: Result<Option<usize>, anyhow::Error>,
+            inputs: Vec<Result<InputOutcome, anyhow::Error>>,
         ) -> Self {
             Self {
                 selections: Mutex::new(VecDeque::from([selection])),
@@ -297,7 +291,7 @@ mod tests {
             &self,
             _question: &str,
             items: &[String],
-        ) -> Result<Option<usize>, InteractionFailure> {
+        ) -> Result<Option<usize>, anyhow::Error> {
             if let Ok(mut captured) = self.items.lock() {
                 *captured = items.to_vec();
             }
@@ -305,13 +299,10 @@ mod tests {
                 .lock()
                 .ok()
                 .and_then(|mut selections| selections.pop_front())
-                .unwrap_or(Err(InteractionFailure::Unavailable))
+                .unwrap_or_else(|| Err(anyhow::Error::new(InteractionFailure::Unavailable)))
         }
 
-        fn readline(
-            &self,
-            context_usage: ContextUsage,
-        ) -> Result<ReadlineOutcome, InteractionFailure> {
+        fn readline(&self, context_usage: ContextUsage) -> Result<InputOutcome, anyhow::Error> {
             if let Ok(mut contexts) = self.contexts.lock() {
                 contexts.push(context_usage);
             }
@@ -319,7 +310,7 @@ mod tests {
                 .lock()
                 .ok()
                 .and_then(|mut inputs| inputs.pop_front())
-                .unwrap_or(Err(InteractionFailure::Unavailable))
+                .unwrap_or_else(|| Err(anyhow::Error::new(InteractionFailure::Unavailable)))
         }
     }
 
@@ -403,10 +394,8 @@ mod tests {
         let interaction = Arc::new(StubInteraction::new(
             Ok(Some(2)),
             vec![
-                Ok(ReadlineOutcome::Text(String::new())),
-                Ok(ReadlineOutcome::Text(
-                    "  use the remote backend  ".to_string(),
-                )),
+                Ok(InputOutcome::Text(String::new())),
+                Ok(InputOutcome::Text("  use the remote backend  ".to_string())),
             ],
         ));
         let tool = tool(interaction.clone());
@@ -429,7 +418,7 @@ mod tests {
     async fn cancellation_eof_and_interaction_errors_are_not_successes() {
         for (outcome, expected_code) in [
             (
-                Err(InteractionFailure::Cancelled),
+                Err(anyhow::Error::new(InteractionFailure::Cancelled)),
                 error_codes::USER_CANCELLED,
             ),
             (Ok(None), error_codes::USER_CANCELLED),
@@ -447,7 +436,7 @@ mod tests {
 
         let interaction = Arc::new(StubInteraction::new(
             Ok(Some(1)),
-            vec![Ok(ReadlineOutcome::Eof)],
+            vec![Ok(InputOutcome::Eof)],
         ));
         let tool = tool(interaction);
         let mut context = context();
@@ -493,7 +482,7 @@ mod tests {
     async fn freeform_cancellation_is_a_distinct_error() {
         let interaction = Arc::new(StubInteraction::new(
             Ok(Some(1)),
-            vec![Ok(ReadlineOutcome::Cancelled)],
+            vec![Ok(InputOutcome::Cancelled)],
         ));
         let tool = tool(interaction);
         let mut context = context();

@@ -1,26 +1,25 @@
 use std::{sync::Arc, time::Duration};
 
-use dom_smoothie::{Config, Readability, TextMode};
-use futures::StreamExt;
-use reqwest::{Client, Response, Url};
+use reqwest::Url;
 use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::Serialize;
 
-use crate::shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata};
-
-use crate::tools::{action::Action, error_codes};
+use crate::{
+    contracts::tools::{network::SafeHttpFetcher, permissions::ToolPermissionMetadata},
+    entities::tool::tool_entities::{HttpFetchRequest, PermissionRequirement},
+    tools::{action::Action, error_codes},
+};
 
 use super::{
     errors::{
-        blocked_network_target, blocked_redirect_target, fetch_error, invalid_url,
-        invalid_url_credentials, invalid_url_host, invalid_url_scheme, response_body_error,
-        timeout_error,
+        blocked_network_target, fetch_error, invalid_url, invalid_url_credentials,
+        invalid_url_host, invalid_url_scheme, timeout_error,
     },
     policy::is_allowed_network_target,
 };
 
 const SERVER_TIMEOUT: Duration = Duration::from_secs(20);
-const MAX_DOWNLOAD_BYTES: usize = 1024 * 1024;
+
 const MAX_CONTENT_BYTES: usize = 32 * 1024;
 const CONTENT_TRUNCATION_SUFFIX: &str = "\n[content truncated: content is limited; use a more precise URL or a separate follow-up operation]";
 
@@ -44,14 +43,15 @@ pub(crate) struct FetchUrlOutput {
 }
 
 pub(crate) struct FetchUrl {
-    client: Arc<Client>,
+    fetcher: Arc<dyn SafeHttpFetcher>,
     permission: PermissionRequirement,
 }
 
 impl FetchUrl {
-    pub(crate) fn new(client: Arc<Client>) -> Self {
+    /// Creates the URL-fetching tool from a composition-root-selected safe fetcher.
+    pub(crate) fn with_fetcher(fetcher: Arc<dyn SafeHttpFetcher>) -> Self {
         Self {
-            client,
+            fetcher,
             permission: PermissionRequirement::Automatic,
         }
     }
@@ -75,16 +75,25 @@ impl FetchUrl {
 
     async fn fetch(&self, url: &str) -> Result<FetchUrlOutput, ToolExecutionError> {
         let parsed = Self::parse_url(url)?;
+        let request = HttpFetchRequest {
+            url: parsed.to_string(),
+        };
         let response = self
-            .client
-            .get(parsed)
-            .send()
+            .fetcher
+            .fetch(request)
             .await
-            .map_err(|error| fetch_error(url, error))?;
-        let metadata = response_metadata(&response)?;
-        let (body, body_truncated) = read_body(response, url).await?;
-        let readable = readable_content(&metadata.0, &metadata.1, &body);
-        let (content, content_truncated) = limit_content(readable, body_truncated);
+            .map_err(|error| fetch_failure(url, error))?;
+        let content_truncated = response.body.ends_with(CONTENT_TRUNCATION_SUFFIX);
+        let content = if content_truncated {
+            response.body
+        } else {
+            limit_content(response.body, false).0
+        };
+        let metadata = (
+            url.to_string(),
+            "application/octet-stream".to_string(),
+            response.status,
+        );
         Ok(build_output(metadata, content, content_truncated))
     }
 }
@@ -132,52 +141,11 @@ impl Tool for FetchUrl {
     }
 }
 
-fn response_metadata(response: &Response) -> Result<(String, String, u16), ToolExecutionError> {
-    if !is_allowed_network_target(response.url()) {
-        return Err(blocked_redirect_target());
+fn fetch_failure(url: &str, error: anyhow::Error) -> ToolExecutionError {
+    match error.downcast::<ToolExecutionError>() {
+        Ok(error) => error,
+        Err(error) => fetch_error(url, std::io::Error::other(format!("{error:#}"))),
     }
-    let final_url = response.url().to_string();
-    let content_type = response
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map_or_else(|| "application/octet-stream".to_string(), str::to_string);
-    Ok((final_url, content_type, response.status().as_u16()))
-}
-
-async fn read_body(response: Response, url: &str) -> Result<(Vec<u8>, bool), ToolExecutionError> {
-    let mut stream = response.bytes_stream();
-    let mut body = Vec::new();
-    let mut truncated = false;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| response_body_error(url, error))?;
-        let remaining = MAX_DOWNLOAD_BYTES.saturating_sub(body.len());
-        let kept = chunk.len().min(remaining);
-        body.extend_from_slice(&chunk[..kept]);
-        truncated |= chunk.len() > kept;
-        if truncated {
-            break;
-        }
-    }
-    Ok((body, truncated))
-}
-
-fn readable_content(url: &str, content_type: &str, body: &[u8]) -> String {
-    let source = String::from_utf8_lossy(body).into_owned();
-    if !content_type.to_ascii_lowercase().contains("text/html") {
-        return source;
-    }
-    readable_html(url, &source).unwrap_or(source)
-}
-
-fn readable_html(url: &str, source: &str) -> Option<String> {
-    let config = Config {
-        text_mode: TextMode::Markdown,
-        ..Default::default()
-    };
-    let mut readability = Readability::new(source, Some(url), Some(config)).ok()?;
-    let result = readability.parse().ok()?;
-    Some(result.text_content.into())
 }
 
 fn build_output(
@@ -237,11 +205,14 @@ fn limit_content(content: String, source_truncated: bool) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::model_runtime::http_fetcher::ReqwestSafeHttpFetcher;
     use crate::tools::tool_fetch_url::errors::{fetch_error, timeout_error};
 
     #[test]
     fn schema_contains_only_url() {
-        let tool = FetchUrl::new(Arc::new(Client::new()));
+        let tool = FetchUrl::with_fetcher(Arc::new(ReqwestSafeHttpFetcher::new(Arc::new(
+            reqwest::Client::new(),
+        ))));
         let schema = tool.parameters();
 
         assert_eq!(schema["required"], serde_json::json!(["url"]));

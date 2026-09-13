@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 pub(crate) fn subagent_prompt() -> &'static str {
     include_str!("./subagent.md")
 }

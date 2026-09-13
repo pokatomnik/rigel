@@ -3,12 +3,14 @@ use std::sync::Arc;
 use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 
-use crate::shared::{
-    goal::goal_state::{GoalState, GoalStateError, Report},
-    tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata},
+use crate::{
+    contracts::tools::{goal::GoalCompleter, permissions::ToolPermissionMetadata},
+    entities::{
+        goal::goal_state::{GoalReport, GoalStateError},
+        tool::tool_entities::PermissionRequirement,
+    },
+    tools::error_codes,
 };
-
-use crate::tools::error_codes;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -21,15 +23,17 @@ pub(crate) struct MarkGoalCompleteOutput {
     report: String,
 }
 
+/// Completes the active goal through a domain contract supplied by the root.
 pub(crate) struct MarkGoalComplete {
-    goal_state: Arc<GoalState>,
+    goal_completer: Arc<dyn GoalCompleter>,
     permission: PermissionRequirement,
 }
 
 impl MarkGoalComplete {
-    pub(crate) fn new(goal_state: Arc<GoalState>) -> Self {
+    /// Creates the automatic completion tool around the shared goal capability.
+    pub(crate) fn new(goal_completer: Arc<dyn GoalCompleter>) -> Self {
         Self {
-            goal_state,
+            goal_completer,
             permission: PermissionRequirement::Automatic,
         }
     }
@@ -72,7 +76,7 @@ impl MarkGoalComplete {
         }
     }
 
-    fn output(report: Report) -> MarkGoalCompleteOutput {
+    fn output(report: GoalReport) -> MarkGoalCompleteOutput {
         MarkGoalCompleteOutput {
             report: report.as_str().to_string(),
         }
@@ -106,8 +110,9 @@ impl Tool for MarkGoalComplete {
     ) -> Result<Self::Output, Self::Error> {
         Self::validate_report(&args.report)?;
         let report = self
-            .goal_state
+            .goal_completer
             .complete(args.report)
+            .await
             .map_err(Self::completion_error)?;
         Ok(Self::output(report))
     }
@@ -121,15 +126,41 @@ mod tests {
 
     use super::{MarkGoalComplete, MarkGoalCompleteArgs};
     use crate::{
-        shared::{
-            goal::goal_state::GoalState,
-            tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata},
+        contracts::tools::{goal::GoalCompleter, permissions::ToolPermissionMetadata},
+        entities::{
+            goal::goal_state::{GoalReport, GoalState, GoalStateError},
+            tool::tool_entities::PermissionRequirement,
         },
         tools::error_codes,
     };
 
+    struct TestGoalCompleter {
+        state: Arc<GoalState>,
+    }
+
+    impl GoalCompleter for TestGoalCompleter {
+        fn complete(
+            &self,
+            report: String,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<GoalReport, GoalStateError>> + Send + '_>,
+        > {
+            Box::pin(async move { self.state.complete(report) })
+        }
+
+        fn has_pending_report(&self) -> bool {
+            self.state.has_pending_report()
+        }
+    }
+
+    fn completer(state: Arc<GoalState>) -> Arc<dyn GoalCompleter> {
+        Arc::new(TestGoalCompleter { state })
+    }
+
     #[test]
     fn schema_requires_only_a_non_empty_report() {
+        let state = Arc::new(GoalState::new());
+        let _tool = MarkGoalComplete::new(completer(state));
         let schema = MarkGoalComplete::parameters_schema();
 
         assert_eq!(schema["required"], serde_json::json!(["report"]));
@@ -140,7 +171,8 @@ mod tests {
 
     #[test]
     fn completion_tool_is_automatic() {
-        let tool = MarkGoalComplete::new(Arc::new(GoalState::new()));
+        let state = Arc::new(GoalState::new());
+        let tool = MarkGoalComplete::new(completer(state));
 
         assert_eq!(
             tool.permission_requirement(),
@@ -161,7 +193,8 @@ mod tests {
 
     #[tokio::test]
     async fn completion_without_active_goal_is_model_visible() {
-        let tool = MarkGoalComplete::new(Arc::new(GoalState::new()));
+        let state = Arc::new(GoalState::new());
+        let tool = MarkGoalComplete::new(completer(state));
         let mut context = ToolContext::default();
 
         let result = tool
@@ -184,7 +217,7 @@ mod tests {
     async fn completion_transitions_state_and_returns_the_report() -> anyhow::Result<()> {
         let state = Arc::new(GoalState::new());
         state.start("inspect repository".to_string())?;
-        let tool = MarkGoalComplete::new(state.clone());
+        let tool = MarkGoalComplete::new(completer(state.clone()));
         let mut context = ToolContext::default();
 
         let output = tool

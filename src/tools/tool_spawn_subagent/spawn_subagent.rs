@@ -1,23 +1,12 @@
-#![allow(dead_code)]
-
 use std::sync::Arc;
 
-use futures::future::BoxFuture;
-use rig::{
-    providers::openai::CompletionModel,
-    tool::{Tool, ToolContext, ToolExecutionError},
-};
+use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    shared::{
-        agent::{agent::Agent, agent_config::AgentConfig, dependencies::AgentDependencies},
-        history::{chat_history::ChatHistory, history_persistence::NonPersistentHistory},
-        terminal::terminal_io::TerminalIO,
-        tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata},
-    },
+    contracts::tools::{permissions::ToolPermissionMetadata, subagent::SubagentRunner},
+    entities::tool::tool_entities::{PermissionRequirement, SubagentTask},
     tools::error_codes,
-    use_cases::subagent::subagent::{Subagent, SubagentContext},
 };
 
 #[derive(Deserialize)]
@@ -32,38 +21,19 @@ pub(crate) struct SpawnSubagentOutput {
 }
 
 pub(crate) struct SpawnSubagent {
-    subagent: Subagent<CompletionModel>,
+    runner: Arc<dyn SubagentRunner>,
     permission: PermissionRequirement,
 }
 
 impl SpawnSubagent {
-    pub(crate) fn new(
-        terminal_io: Arc<TerminalIO>,
-        dependencies: Arc<AgentDependencies>,
-        config: AgentConfig,
-    ) -> BoxFuture<'static, anyhow::Result<Self>> {
-        Box::pin(async move {
-            let subagent = Self::create_subagent(terminal_io, dependencies, config).await?;
-            Ok(Self {
-                subagent,
-                permission: PermissionRequirement::Automatic,
-            })
-        })
-    }
-
-    async fn create_subagent(
-        terminal_io: Arc<TerminalIO>,
-        dependencies: Arc<AgentDependencies>,
-        config: AgentConfig,
-    ) -> anyhow::Result<Subagent<CompletionModel>> {
-        let chat_history = Arc::new(ChatHistory::new(Vec::new(), NonPersistentHistory));
-        let configured_agent =
-            Agent::new_subagent(config, chat_history.clone(), dependencies).await?;
-        Ok(Subagent::with_history_context(
-            configured_agent.agent,
-            terminal_io,
-            SubagentContext::new(chat_history, configured_agent.max_context_tokens),
-        ))
+    /// Creates the subagent tool from a runner selected by the composition root.
+    ///
+    /// The runner owns session construction, isolation, and provider-specific behavior.
+    pub(crate) fn with_runner(runner: Arc<dyn SubagentRunner>) -> Self {
+        Self {
+            runner,
+            permission: PermissionRequirement::Automatic,
+        }
     }
 
     fn parameters_schema() -> serde_json::Value {
@@ -128,11 +98,13 @@ impl Tool for SpawnSubagent {
     ) -> Result<Self::Output, Self::Error> {
         Self::validate_task(&args.task)?;
         let report = self
-            .subagent
-            .run(args.task)
+            .runner
+            .run(SubagentTask { task: args.task })
             .await
             .map_err(Self::subagent_error)?;
-        Ok(SpawnSubagentOutput { report })
+        Ok(SpawnSubagentOutput {
+            report: report.report,
+        })
     }
 }
 
