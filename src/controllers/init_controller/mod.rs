@@ -1,1 +1,1 @@
-pub mod init_controller;
+pub mod controller;

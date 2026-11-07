@@ -7,14 +7,14 @@ use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::Deserialize;
 
 use crate::{
-    contracts::tools::{
-        permissions::ToolPermissionMetadata,
-        workspace::{
-            WorkspaceDirectoryEntries, WorkspacePathKind, WorkspacePathResolver, WorkspaceReader,
-            WorkspaceScanner,
-        },
+    entities::{
+        tool::tool_entities::PermissionRequirement,
+        workspace::workspace_entities::{WorkspaceDirectoryEntries, WorkspacePathKind},
     },
-    entities::tool::tool_entities::PermissionRequirement,
+    infrastructure::tools::{
+        permissions::ToolPermissionMetadata,
+        workspace::{WorkspacePathResolver, WorkspaceReader, WorkspaceScanner},
+    },
     tools::utils::{
         errors::{path_outside_workspace, workspace_file_access_error},
         path::is_inside,
@@ -146,14 +146,14 @@ mod tests {
 
     use super::{MAX_PATTERN_BYTES, SearchFiles};
     use crate::{
-        contracts::tools::{
-            permissions::ToolPermissionMetadata,
-            workspace::{
-                WorkspaceDirectoryEntries, WorkspaceFuture, WorkspacePathKind,
-                WorkspacePathResolver, WorkspaceRead, WorkspaceReader, WorkspaceScanner,
-            },
-        },
         entities::tool::tool_entities::PermissionRequirement,
+        entities::workspace::workspace_entities::{
+            WorkspaceDirectoryEntries, WorkspacePathKind, WorkspaceRead,
+        },
+        infrastructure::tools::{
+            permissions::ToolPermissionMetadata,
+            workspace::{WorkspacePathResolver, WorkspaceReader, WorkspaceScanner},
+        },
         tools::{
             error_codes,
             tool_search_files::search::{MAX_MATCHES, SearchContext},
@@ -163,6 +163,9 @@ mod tests {
             },
         },
     };
+
+    type WorkspaceFuture<'a, T> =
+        std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<T>> + Send + 'a>>;
 
     struct FakeWorkspace;
 

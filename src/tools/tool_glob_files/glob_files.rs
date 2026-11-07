@@ -7,13 +7,14 @@ use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    contracts::tools::{
-        permissions::ToolPermissionMetadata,
-        workspace::{
-            WorkspaceDirectoryEntries, WorkspacePathKind, WorkspacePathResolver, WorkspaceScanner,
-        },
+    entities::{
+        tool::tool_entities::PermissionRequirement,
+        workspace::workspace_entities::{WorkspaceDirectoryEntries, WorkspacePathKind},
     },
-    entities::tool::tool_entities::PermissionRequirement,
+    infrastructure::tools::{
+        permissions::ToolPermissionMetadata,
+        workspace::{WorkspacePathResolver, WorkspaceScanner},
+    },
     tools::{
         action::Action,
         utils::{
@@ -247,20 +248,21 @@ mod tests {
     use super::super::scan::MAX_MATCHES;
     use super::GlobFiles;
     use crate::{
-        contracts::tools::{
-            permissions::ToolPermissionMetadata,
-            workspace::{
-                WorkspaceDirectoryEntries, WorkspaceFuture, WorkspacePathKind,
-                WorkspacePathResolver, WorkspaceScanner,
-            },
-        },
         entities::tool::tool_entities::PermissionRequirement,
+        entities::workspace::workspace_entities::{WorkspaceDirectoryEntries, WorkspacePathKind},
+        infrastructure::tools::{
+            permissions::ToolPermissionMetadata,
+            workspace::{WorkspacePathResolver, WorkspaceScanner},
+        },
         tools::{
             error_codes,
             tool_glob_files::{pattern::GlobPattern, scan::GlobScan},
             utils::path::MAX_PATH_BYTES,
         },
     };
+
+    type WorkspaceFuture<'a, T> =
+        std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<T>> + Send + 'a>>;
 
     struct FakeWorkspace;
 

@@ -4,8 +4,11 @@ use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    contracts::tools::{permissions::ToolPermissionMetadata, subagent::SubagentRunner},
-    entities::tool::tool_entities::{PermissionRequirement, SubagentTask},
+    entities::{
+        selected_model::selection::SelectedModel,
+        tool::tool_entities::{PermissionRequirement, SubagentTask},
+    },
+    infrastructure::tools::{permissions::ToolPermissionMetadata, subagent::SubagentRunner},
     tools::error_codes,
 };
 
@@ -51,6 +54,14 @@ impl SpawnSubagent {
         })
     }
 
+    fn task_from_context(task: String, context: &ToolContext) -> SubagentTask {
+        let task = SubagentTask::new(task);
+        match context.get::<SelectedModel>().cloned() {
+            Some(model) => task.with_selected_model(model),
+            None => task,
+        }
+    }
+
     fn validate_task(task: &str) -> Result<(), ToolExecutionError> {
         if task.trim().is_empty() {
             return Err(ToolExecutionError::invalid_args(
@@ -93,15 +104,12 @@ impl Tool for SpawnSubagent {
 
     async fn call(
         &self,
-        _context: &mut ToolContext,
+        context: &mut ToolContext,
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
         Self::validate_task(&args.task)?;
-        let report = self
-            .runner
-            .run(SubagentTask { task: args.task })
-            .await
-            .map_err(Self::subagent_error)?;
+        let task = Self::task_from_context(args.task, context);
+        let report = self.runner.run(task).await.map_err(Self::subagent_error)?;
         Ok(SpawnSubagentOutput {
             report: report.report,
         })
@@ -110,7 +118,10 @@ impl Tool for SpawnSubagent {
 
 #[cfg(test)]
 mod tests {
+    use rig::tool::ToolContext;
+
     use super::{SpawnSubagent, SpawnSubagentOutput};
+    use crate::entities::selected_model::selection::SelectedModel;
 
     #[test]
     fn schema_requires_only_task() {
@@ -119,6 +130,21 @@ mod tests {
         assert_eq!(schema["required"], serde_json::json!(["task"]));
         assert_eq!(schema["additionalProperties"], serde_json::json!(false));
         assert!(schema["properties"].get("prompt").is_none());
+    }
+
+    #[test]
+    fn parent_model_context_is_carried_without_changing_tool_schema() {
+        let model = SelectedModel::new("parent-model".to_string(), Some(1_024));
+        let mut context = ToolContext::new();
+        context.insert(model.clone());
+
+        let task = SpawnSubagent::task_from_context("delegate".to_string(), &context);
+
+        assert_eq!(task.selected_model(), Some(&model));
+        assert_eq!(
+            SpawnSubagent::parameters_schema()["required"],
+            serde_json::json!(["task"])
+        );
     }
 
     #[test]

@@ -5,8 +5,8 @@ use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::Serialize;
 
 use crate::{
-    contracts::tools::{network::SafeHttpFetcher, permissions::ToolPermissionMetadata},
     entities::tool::tool_entities::{HttpFetchRequest, PermissionRequirement},
+    infrastructure::tools::{network::SafeHttpFetcher, permissions::ToolPermissionMetadata},
     tools::{action::Action, error_codes},
 };
 
@@ -205,7 +205,7 @@ fn limit_content(content: String, source_truncated: bool) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapters::model_runtime::http_fetcher::ReqwestSafeHttpFetcher;
+    use crate::controllers::model_runtime::http_fetcher::ReqwestSafeHttpFetcher;
     use crate::tools::tool_fetch_url::errors::{fetch_error, timeout_error};
 
     #[test]

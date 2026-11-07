@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use crate::{
-    contracts::tools::goal::GoalCompleter,
     entities::goal::goal_state::{GoalReport, GoalState, GoalStateError},
+    infrastructure::tools::goal::GoalCompleter,
 };
 
 /// Contract adapter that exposes one shared goal entity to model tools and hooks.

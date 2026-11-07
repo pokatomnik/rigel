@@ -131,4 +131,20 @@ mod tests {
             Some(800)
         );
     }
+
+    #[test]
+    fn usage_details_are_not_added_to_total_tokens() {
+        let mut usage = rig::completion::Usage::new();
+        usage.total_tokens = 800;
+        usage.reasoning_tokens = 200;
+        usage.tool_use_prompt_tokens = 100;
+        usage.cached_input_tokens = 50;
+        usage.cache_creation_input_tokens = 25;
+        assert_eq!(
+            ContextUsage::from_total_tokens(Some(usage.total_tokens), Some(1_000))
+                .values()
+                .0,
+            Some(800)
+        );
+    }
 }

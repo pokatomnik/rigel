@@ -1,0 +1,1 @@
+The {tool} call failed. If this operation is still required, correct the tool choice or arguments and try again. If the call was unnecessary or the request is already complete, return a non-empty final answer. Do not call an unrelated tool.

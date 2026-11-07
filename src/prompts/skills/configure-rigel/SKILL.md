@@ -27,9 +27,11 @@ contains the API key. The key itself is not stored in TOML.
 
 Use `rigel chat --profile <PATH>` (or `-p <PATH>`) to load a specific TOML
 file as the global layer. The project layer at
-`<current-dir>/.rigel/config.toml` is still read and overrides it. Errors
-loading an explicit profile are returned to the caller. Errors loading the
-default configuration fall back to Rigel's defaults.
+`<current-dir>/.rigel/config.toml` is still read and overrides it. Read or TOML
+parse errors in the optional default-global and project files are ignored; Rigel
+uses the other valid layer, or defaults if neither layer is usable. An explicit
+profile is required, so its read or parse errors are returned to the caller;
+the project layer remains optional.
 
 ## TOML fields
 

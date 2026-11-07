@@ -4,15 +4,14 @@ use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    contracts::{interaction::UserInteraction, tools::permissions::ToolPermissionMetadata},
     entities::{
-        application::input_outcome::InputOutcome, conversation::context_usage::ContextUsage,
-        tool::tool_entities::PermissionRequirement,
+        application::input_outcome::InputOutcome,
+        conversation::context_usage::ContextUsage,
+        tool::{interaction_failure::InteractionFailure, tool_entities::PermissionRequirement},
     },
+    infrastructure::{interaction::UserInteraction, tools::permissions::ToolPermissionMetadata},
     tools::{action::Action, error_codes},
 };
-
-use super::interaction::InteractionFailure;
 
 /// The UI-only label appended to every `ask_user` selection menu.
 pub(crate) const SOMETHING_ELSE: &str = "Something else";
@@ -242,13 +241,15 @@ mod tests {
 
     use rig::tool::{Tool, ToolContext};
 
-    use super::super::interaction::InteractionFailure;
     use super::{AskUser, AskUserArgs, SOMETHING_ELSE};
     use crate::{
-        contracts::{interaction::UserInteraction, tools::permissions::ToolPermissionMetadata},
         entities::{
-            application::input_outcome::InputOutcome, conversation::context_usage::ContextUsage,
-            tool::tool_entities::PermissionRequirement,
+            application::input_outcome::InputOutcome,
+            conversation::context_usage::ContextUsage,
+            tool::{interaction_failure::InteractionFailure, tool_entities::PermissionRequirement},
+        },
+        infrastructure::{
+            interaction::UserInteraction, tools::permissions::ToolPermissionMetadata,
         },
         tools::error_codes,
     };

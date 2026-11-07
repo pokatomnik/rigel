@@ -23,11 +23,14 @@ use crate::tools::{
     },
 };
 use crate::{
-    contracts::tools::{
-        permissions::ToolPermissionMetadata,
-        workspace::{WorkspacePathKind, WorkspacePathResolver, WorkspaceReader, WorkspaceWriter},
+    entities::{
+        tool::tool_entities::PermissionRequirement,
+        workspace::workspace_entities::WorkspacePathKind,
     },
-    entities::tool::tool_entities::PermissionRequirement,
+    infrastructure::tools::{
+        permissions::ToolPermissionMetadata,
+        workspace::{WorkspacePathResolver, WorkspaceReader, WorkspaceWriter},
+    },
 };
 
 #[cfg(test)]
@@ -240,15 +243,16 @@ mod tests {
         replaced_text, unique_match,
     };
     use crate::tools::tool_edit_file::validation::MAX_EDIT_TEXT_BYTES;
+
+    type WorkspaceFuture<'a, T> =
+        std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<T>> + Send + 'a>>;
     use crate::{
-        contracts::tools::{
-            permissions::ToolPermissionMetadata,
-            workspace::{
-                WorkspaceFuture, WorkspacePathKind, WorkspacePathResolver, WorkspaceRead,
-                WorkspaceReader, WorkspaceWriter,
-            },
-        },
         entities::tool::tool_entities::PermissionRequirement,
+        entities::workspace::workspace_entities::{WorkspacePathKind, WorkspaceRead},
+        infrastructure::tools::{
+            permissions::ToolPermissionMetadata,
+            workspace::{WorkspacePathResolver, WorkspaceReader, WorkspaceWriter},
+        },
         tools::error_codes,
     };
 

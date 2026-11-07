@@ -22,11 +22,14 @@ use crate::tools::{
     },
 };
 use crate::{
-    contracts::tools::{
-        permissions::ToolPermissionMetadata,
-        workspace::{WorkspacePathKind, WorkspacePathResolver, WorkspaceWriter},
+    entities::{
+        tool::tool_entities::PermissionRequirement,
+        workspace::workspace_entities::WorkspacePathKind,
     },
-    entities::tool::tool_entities::PermissionRequirement,
+    infrastructure::tools::{
+        permissions::ToolPermissionMetadata,
+        workspace::{WorkspacePathResolver, WorkspaceWriter},
+    },
 };
 
 #[derive(Deserialize)]
@@ -260,13 +263,12 @@ mod tests {
 
     use super::{WriteFile, WriteFileArgs, WriteFileOutput};
     use crate::{
-        contracts::tools::{
-            permissions::ToolPermissionMetadata,
-            workspace::{
-                WorkspaceFuture, WorkspacePathKind, WorkspacePathResolver, WorkspaceWriter,
-            },
-        },
         entities::tool::tool_entities::PermissionRequirement,
+        entities::workspace::workspace_entities::WorkspacePathKind,
+        infrastructure::tools::{
+            permissions::ToolPermissionMetadata,
+            workspace::{WorkspacePathResolver, WorkspaceWriter},
+        },
         tools::{
             action::Action,
             error_codes,
@@ -276,6 +278,9 @@ mod tests {
             },
         },
     };
+
+    type WorkspaceFuture<'a, T> =
+        std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<T>> + Send + 'a>>;
 
     struct FakeFileSystem {
         canonical: Mutex<VecDeque<Result<PathBuf, ErrorKind>>>,
@@ -540,6 +545,28 @@ mod tests {
 
     #[test]
     fn path_policy_rejects_traversal_and_normalizes_dot() {
+        assert_eq!(
+            validate_path("a/../file.md").ok(),
+            Some(PathBuf::from("file.md"))
+        );
+        assert_eq!(
+            validate_path("../file.md")
+                .err()
+                .as_ref()
+                .and_then(|error| error.code()),
+            Some(error_codes::PATH_OUTSIDE_WORKSPACE)
+        );
+        assert_eq!(
+            validate_path(".")
+                .err()
+                .as_ref()
+                .and_then(|error| error.code()),
+            Some(error_codes::INVALID_ARGUMENT)
+        );
+    }
+
+    #[test]
+    fn path_policy_rejects_traversal_and_normalizes_current_directory() {
         assert_eq!(
             validate_path("a/../file.md").ok(),
             Some(PathBuf::from("file.md"))

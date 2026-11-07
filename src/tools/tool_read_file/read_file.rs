@@ -7,11 +7,14 @@ use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    contracts::tools::{
-        permissions::ToolPermissionMetadata,
-        workspace::{WorkspacePathKind, WorkspacePathResolver, WorkspaceReader},
+    entities::{
+        tool::tool_entities::PermissionRequirement,
+        workspace::workspace_entities::WorkspacePathKind,
     },
-    entities::tool::tool_entities::PermissionRequirement,
+    infrastructure::tools::{
+        permissions::ToolPermissionMetadata,
+        workspace::{WorkspacePathResolver, WorkspaceReader},
+    },
 };
 
 use crate::tools::{
@@ -254,16 +257,17 @@ mod tests {
         MAX_CONTENT_BYTES, MAX_LINES, ReadFile, ReadFileArgs, ReadFileOutput, bounded_content,
     };
     use crate::{
-        contracts::tools::{
-            permissions::ToolPermissionMetadata,
-            workspace::{
-                WorkspaceFuture, WorkspacePathKind, WorkspacePathResolver, WorkspaceRead,
-                WorkspaceReader,
-            },
-        },
         entities::tool::tool_entities::PermissionRequirement,
+        entities::workspace::workspace_entities::{WorkspacePathKind, WorkspaceRead},
+        infrastructure::tools::{
+            permissions::ToolPermissionMetadata,
+            workspace::{WorkspacePathResolver, WorkspaceReader},
+        },
         tools::error_codes,
     };
+
+    type WorkspaceFuture<'a, T> =
+        std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<T>> + Send + 'a>>;
 
     #[derive(Clone)]
     struct FakeFileSystem {

@@ -29,6 +29,14 @@ pub(crate) enum TurnStatus {
 }
 
 impl TurnStatus {
+    /// Creates a completed turn with its final output and latest token usage.
+    pub(crate) fn complete(output: String, context_usage: ContextUsage) -> Self {
+        Self::Complete {
+            output,
+            context_usage,
+        }
+    }
+
     /// Returns usage for either successful or stopped turns.
     pub(crate) fn context_usage(&self) -> ContextUsage {
         match self {
@@ -39,6 +47,7 @@ impl TurnStatus {
     }
 
     /// Returns answer text only for successful turns.
+    #[cfg(test)]
     pub(crate) fn output(&self) -> Option<&str> {
         match self {
             Self::Complete { output, .. } => Some(output.as_str()),

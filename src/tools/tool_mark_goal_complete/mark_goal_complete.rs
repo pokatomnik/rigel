@@ -4,11 +4,11 @@ use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    contracts::tools::{goal::GoalCompleter, permissions::ToolPermissionMetadata},
     entities::{
         goal::goal_state::{GoalReport, GoalStateError},
         tool::tool_entities::PermissionRequirement,
     },
+    infrastructure::tools::{goal::GoalCompleter, permissions::ToolPermissionMetadata},
     tools::error_codes,
 };
 
@@ -36,6 +36,11 @@ impl MarkGoalComplete {
             goal_completer,
             permission: PermissionRequirement::Automatic,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shares_goal_completer(&self, expected: &Arc<dyn GoalCompleter>) -> bool {
+        Arc::ptr_eq(&self.goal_completer, expected)
     }
 
     fn parameters_schema() -> serde_json::Value {
@@ -126,11 +131,11 @@ mod tests {
 
     use super::{MarkGoalComplete, MarkGoalCompleteArgs};
     use crate::{
-        contracts::tools::{goal::GoalCompleter, permissions::ToolPermissionMetadata},
         entities::{
             goal::goal_state::{GoalReport, GoalState, GoalStateError},
             tool::tool_entities::PermissionRequirement,
         },
+        infrastructure::tools::{goal::GoalCompleter, permissions::ToolPermissionMetadata},
         tools::error_codes,
     };
 

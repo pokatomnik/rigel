@@ -1,8 +1,10 @@
 use std::sync::Arc;
 
 use crate::{
-    contracts::{application::ConfigurationInitializer, configuration::ConfigurationRepository},
-    entities::{application::init_request::InitRequest, configuration::configuration::RigelConfig},
+    entities::{application::init_request::InitRequest, configuration::config::RigelConfig},
+    infrastructure::{
+        application::ConfigurationInitializer, configuration::ConfigurationRepository,
+    },
 };
 
 /// Application workflow that maps `InitRequest` into a repository-owned config write.

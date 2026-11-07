@@ -1,2 +1,9 @@
 pub mod chat_controller;
+pub mod configuration;
 pub mod init_controller;
+pub mod mcp_registry;
+pub mod model_runtime;
+pub mod network;
+pub mod skills;
+pub mod terminal;
+pub mod workspace;

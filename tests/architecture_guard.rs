@@ -34,6 +34,23 @@ fn collect_rust_files(path: &Path, files: &mut Vec<PathBuf>) -> anyhow::Result<(
     Ok(())
 }
 
+fn source_directories(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let mut directories = vec![root.to_path_buf()];
+    collect_source_directories(root, &mut directories)?;
+    Ok(directories)
+}
+
+fn collect_source_directories(path: &Path, directories: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    for entry in fs::read_dir(path)? {
+        let entry_path = entry?.path();
+        if entry_path.is_dir() {
+            directories.push(entry_path.clone());
+            collect_source_directories(entry_path.as_path(), directories)?;
+        }
+    }
+    Ok(())
+}
+
 fn production_source(source: &str) -> String {
     remove_cfg_test_items(strip_comments_and_literals(source).as_str())
 }
@@ -169,17 +186,7 @@ fn advance_char(source: &str, index: &mut usize) {
 }
 
 fn remove_cfg_test_items(source: &str) -> String {
-    let marker = "#[cfg(test)]";
-    let mut ranges = Vec::new();
-    let mut search_start = 0;
-    while let Some(offset) = source[search_start..].find(marker) {
-        let start = search_start + offset;
-        let item_start = skip_whitespace(source, start + marker.len());
-        let end = test_item_end(source, item_start);
-        ranges.push((start, end));
-        search_start = end;
-    }
-
+    let ranges = cfg_test_ranges(source);
     source
         .char_indices()
         .map(|(index, character)| {
@@ -193,6 +200,38 @@ fn remove_cfg_test_items(source: &str) -> String {
             }
         })
         .collect()
+}
+
+fn cfg_test_ranges(source: &str) -> Vec<(usize, usize)> {
+    let marker = "#[cfg(test)]";
+    let mut ranges = Vec::new();
+    let mut search_start = 0;
+    while let Some(offset) = source[search_start..].find(marker) {
+        let start = search_start + offset;
+        let item_start = skip_whitespace(source, start + marker.len());
+        let end = test_item_end(source, item_start);
+        ranges.push((start, end));
+        search_start = end;
+    }
+    ranges
+}
+
+fn production_physical_lines(source: &str) -> usize {
+    let code = strip_comments_and_literals(source);
+    let ranges = cfg_test_ranges(&code);
+    let mut offset = 0;
+    let mut count = 0;
+    for line in source.split_inclusive('\n') {
+        let end = offset + line.len();
+        if !ranges
+            .iter()
+            .any(|(start, finish)| offset >= *start && offset < *finish)
+        {
+            count += 1;
+        }
+        offset = end;
+    }
+    count
 }
 
 fn skip_whitespace(source: &str, mut index: usize) -> usize {
@@ -209,6 +248,11 @@ fn skip_whitespace(source: &str, mut index: usize) -> usize {
 }
 
 fn test_item_end(source: &str, item_start: usize) -> usize {
+    if source[item_start..].starts_with("use ") {
+        return source[item_start..]
+            .find(';')
+            .map_or(source.len(), |offset| item_start + offset + 1);
+    }
     let mut index = item_start;
     while index < source.len() {
         let Some(character) = source[index..].chars().next() else {
@@ -384,9 +428,13 @@ fn skip_to_use_separator(tokens: &[ImportToken], cursor: &mut usize) {
 }
 
 fn qualified_paths(source: &str) -> Vec<Vec<String>> {
-    let tokens = import_tokens(source);
+    let source = without_use_statements(source);
+    let tokens = import_tokens(&source);
     let mut paths = Vec::new();
     for start in 0..tokens.len() {
+        if start > 0 && matches!(tokens[start - 1], ImportToken::ColonColon) {
+            continue;
+        }
         let Some(ImportToken::Name(name)) = tokens.get(start) else {
             continue;
         };
@@ -406,19 +454,43 @@ fn qualified_paths(source: &str) -> Vec<Vec<String>> {
     paths
 }
 
+fn without_use_statements(source: &str) -> String {
+    let mut code = source.as_bytes().to_vec();
+    let mut cursor = 0;
+    while let Some(offset) = source[cursor..].find("use") {
+        let start = cursor + offset;
+        if !is_keyword_at(source, start, "use") {
+            cursor = start + 1;
+            continue;
+        }
+        let end = source[start..]
+            .find(';')
+            .map_or(source.len(), |offset| start + offset + 1);
+        for byte in code.iter_mut().take(end).skip(start) {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+        cursor = end;
+    }
+    String::from_utf8_lossy(&code).into_owned()
+}
+
 fn path_matches(path: &[String], forbidden: &str) -> bool {
     let forbidden_segments: Vec<&str> = forbidden
         .trim_end_matches(':')
         .split("::")
         .filter(|segment| !segment.is_empty())
         .collect();
-    path.starts_with(
-        forbidden_segments
-            .iter()
-            .map(|segment| (*segment).to_owned())
-            .collect::<Vec<_>>()
-            .as_slice(),
-    )
+    let forbidden_segments = forbidden_segments
+        .iter()
+        .map(|segment| (*segment).to_owned())
+        .collect::<Vec<_>>();
+    path.starts_with(forbidden_segments.as_slice())
+        || (path.first().is_some_and(|segment| segment == "crate")
+            && path
+                .get(1..)
+                .is_some_and(|root_path| root_path.starts_with(forbidden_segments.as_slice())))
 }
 
 fn assert_forbidden_imports(root: &Path, forbidden: &[&str]) -> anyhow::Result<()> {
@@ -441,7 +513,23 @@ fn assert_forbidden_imports(root: &Path, forbidden: &[&str]) -> anyhow::Result<(
 #[test]
 fn command_parsing_does_not_know_controllers() -> anyhow::Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cmd");
-    assert_forbidden_imports(root.as_path(), &["crate::controllers", "controllers::"])
+    assert_forbidden_imports(
+        root.as_path(),
+        &[
+            "crate::controllers",
+            "controllers::",
+            "crate::infrastructure",
+            "infrastructure::",
+            "crate::prompts",
+            "prompts::",
+            "crate::tools",
+            "tools::",
+            "crate::use_cases",
+            "use_cases::",
+            "crate::shared",
+            "shared::",
+        ],
+    )
 }
 
 #[test]
@@ -450,95 +538,327 @@ fn shared_contains_only_domain_neutral_primitives() -> anyhow::Result<()> {
     assert_forbidden_imports(
         root.as_path(),
         &[
-            "crate::cmd",
-            "crate::controllers",
-            "crate::contracts",
-            "crate::entities",
-            "crate::prompts",
-            "crate::tools",
-            "crate::use_cases",
-        ],
-    )
-}
-
-#[test]
-fn tools_do_not_depend_on_shared_services() -> anyhow::Result<()> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tools");
-    assert_forbidden_imports(root.as_path(), &["crate::shared", "shared::"])
-}
-
-#[test]
-fn contracts_do_not_contain_runtime_framework_types() -> anyhow::Result<()> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/contracts");
-    assert_forbidden_imports(
-        root.as_path(),
-        &["rig::", "reqwest::", "dialoguer::", "tokio::"],
-    )
-}
-
-#[test]
-fn use_cases_do_not_depend_on_controllers_prompts_or_rig() -> anyhow::Result<()> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/use_cases");
-    assert_forbidden_imports(
-        root.as_path(),
-        &[
-            "crate::controllers",
+            "cmd::",
             "controllers::",
-            "crate::adapters",
-            "adapters::",
-            "crate::prompts",
-            "rig::",
-        ],
-    )
-}
-
-#[test]
-fn tools_do_not_depend_on_controllers_or_use_cases() -> anyhow::Result<()> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tools");
-    assert_forbidden_imports(
-        root.as_path(),
-        &[
-            "crate::controllers",
-            "controllers::",
-            "crate::use_cases",
+            "infrastructure::",
+            "entities::",
+            "prompts::",
+            "tools::",
             "use_cases::",
-            "crate::adapters",
-            "adapters::",
         ],
     )
 }
 
 #[test]
-fn entities_do_not_depend_on_contracts_or_runtime_adapters() -> anyhow::Result<()> {
+fn entities_do_not_depend_on_application_or_technical_layers() -> anyhow::Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/entities");
     assert_forbidden_imports(
         root.as_path(),
         &[
-            "crate::contracts",
-            "contracts::",
-            "crate::adapters",
+            "cmd::",
+            "controllers::",
+            "infrastructure::",
+            "shared::",
+            "prompts::",
+            "tools::",
+            "use_cases::",
             "adapters::",
         ],
     )
 }
 
 #[test]
-fn controllers_do_not_depend_on_use_cases_or_runtime_adapters() -> anyhow::Result<()> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/controllers");
+fn infrastructure_does_not_depend_on_concrete_outer_layers() -> anyhow::Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/infrastructure");
     assert_forbidden_imports(
         root.as_path(),
         &[
-            "crate::use_cases",
+            "cmd::",
+            "controllers::",
+            "shared::",
+            "prompts::",
+            "tools::",
             "use_cases::",
-            "crate::adapters",
+            "adapters::",
+            "rig::",
+            "reqwest::",
+            "dialoguer::",
+            "tokio::",
+        ],
+    )
+}
+
+#[test]
+fn tools_do_not_depend_on_outer_layers_or_shared_services() -> anyhow::Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tools");
+    assert_forbidden_imports(
+        root.as_path(),
+        &[
+            "cmd::",
+            "controllers::",
+            "shared::",
+            "prompts::",
+            "use_cases::",
             "adapters::",
         ],
     )
 }
 
+#[test]
+fn prompts_do_not_depend_on_application_or_runtime_layers() -> anyhow::Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/prompts");
+    assert_forbidden_imports(
+        root.as_path(),
+        &[
+            "cmd::",
+            "controllers::",
+            "shared::",
+            "tools::",
+            "use_cases::",
+            "adapters::",
+        ],
+    )
+}
+
+#[test]
+fn use_cases_do_not_depend_on_controllers_prompts_or_provider_runtime() -> anyhow::Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/use_cases");
+    assert_forbidden_imports(
+        root.as_path(),
+        &[
+            "cmd::",
+            "controllers::",
+            "prompts::",
+            "tools::",
+            "adapters::",
+            "rig::",
+            "reqwest::",
+            "dialoguer::",
+        ],
+    )
+}
+
+#[test]
+fn controllers_do_not_depend_on_application_or_prompt_construction() -> anyhow::Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/controllers");
+    assert_forbidden_imports(
+        root.as_path(),
+        &["cmd::", "use_cases::", "prompts::", "tools::", "adapters::"],
+    )
+}
+
+#[test]
+fn source_contains_only_the_approved_top_level_layers() -> anyhow::Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut actual = fs::read_dir(root.as_path())?
+        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut expected = vec![
+        "cmd",
+        "controllers",
+        "entities",
+        "infrastructure",
+        "main.rs",
+        "prompts",
+        "shared",
+        "tools",
+        "use_cases",
+        "user_agents.txt",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect::<Vec<_>>();
+    actual.sort();
+    expected.sort();
+    assert_eq!(
+        actual, expected,
+        "unexpected top-level source layer or file"
+    );
+    Ok(())
+}
+
+#[test]
+fn no_unapproved_top_level_adapter_layer_exists() -> anyhow::Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    assert!(
+        !root.join("adapters").exists(),
+        "src/adapters is a forbidden layer"
+    );
+    Ok(())
+}
+
+fn concrete_declaration(source: &str) -> Option<&'static str> {
+    let production = production_source(source);
+    for line in production.lines() {
+        let mut declaration = line.trim_start();
+        for visibility in ["pub(crate) ", "pub(super) ", "pub "] {
+            if let Some(item) = declaration.strip_prefix(visibility) {
+                declaration = item;
+                break;
+            }
+        }
+        for keyword in ["struct", "enum", "union", "type", "const", "static", "impl"] {
+            if declaration.strip_prefix(keyword).is_some_and(|rest| {
+                rest.chars().next().is_some_and(char::is_whitespace) || rest.starts_with('<')
+            }) {
+                return Some(keyword);
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn infrastructure_is_traits_only_including_mod_files() -> anyhow::Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/infrastructure");
+    for file in rust_files(root.as_path())? {
+        let source = fs::read_to_string(file.as_path())?;
+        assert!(
+            concrete_declaration(source.as_str()).is_none(),
+            "infrastructure may contain only trait contracts: {}",
+            file.display()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn agent_wiring_does_not_own_workspace_or_late_mutable_tool_sets() -> anyhow::Result<()> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/controllers/model_runtime/agent/dependencies.rs");
+    let source = production_source(fs::read_to_string(path.as_path())?.as_str());
+    for forbidden in ["WorkspaceCapabilities", "RwLock", "set_tool_sets"] {
+        assert!(
+            !source.contains(forbidden),
+            "AgentWiring may not retain `{forbidden}`"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn legacy_composition_bags_and_global_telemetry_are_removed() -> anyhow::Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for file in rust_files(root.as_path())? {
+        let source = fs::read_to_string(file.as_path())?;
+        for forbidden in [
+            "AgentDependencies",
+            "ToolBuildContext",
+            "GLOBAL_SHELL_USAGE",
+            "ShellUsageTelemetry::global",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "legacy composition symbol `{forbidden}` remains in {}",
+                file.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn production_rust_files_respect_the_physical_line_limit() -> anyhow::Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for file in rust_files(root.as_path())? {
+        let source = fs::read_to_string(file.as_path())?;
+        let lines = production_physical_lines(source.as_str());
+        assert!(
+            lines <= 300,
+            "production source has {lines} physical lines (maximum 300): {}",
+            file.display()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn source_directories_respect_the_file_count_limit() -> anyhow::Result<()> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    for directory in source_directories(root.as_path())? {
+        let files = fs::read_dir(directory.as_path())?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_file())
+            .filter(|entry| entry.file_name() != "mod.rs")
+            .count();
+        assert!(
+            files <= 7,
+            "directory contains {files} files excluding mod.rs (maximum 7): {}",
+            directory.display()
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{actual_import_paths, path_matches};
+    use super::{actual_import_paths, path_matches, production_physical_lines};
+
+    #[test]
+    fn expands_nested_grouped_imports_without_inventing_root_paths() {
+        let source =
+            "use crate::{infrastructure::{tools::network::Fetcher}, entities::model::Model};";
+        let imports = actual_import_paths(source);
+
+        assert!(
+            imports
+                .iter()
+                .any(|path| path_matches(path, "crate::infrastructure"))
+        );
+        assert!(
+            imports
+                .iter()
+                .any(|path| path_matches(path, "crate::entities"))
+        );
+        assert!(!imports.iter().any(|path| path_matches(path, "tools::")));
+    }
+
+    #[test]
+    fn detects_root_qualified_expressions_without_matching_nested_suffixes() {
+        let source = "use tools::run; use infrastructure::tools::Fetcher; let _ = crate::tools::run(); let _ = tools::run(); let _ = infrastructure::tools::Fetcher;";
+        let imports = actual_import_paths(source);
+
+        assert!(
+            imports
+                .iter()
+                .any(|path| path_matches(path, "crate::tools"))
+        );
+        assert!(imports.iter().any(|path| path_matches(path, "tools::")));
+        assert!(
+            imports
+                .iter()
+                .any(|path| path_matches(path, "infrastructure::tools"))
+        );
+        assert!(!imports.iter().any(|path| {
+            path_matches(path, "tools::")
+                && path
+                    .first()
+                    .is_some_and(|segment| segment == "infrastructure")
+        }));
+    }
+
+    #[test]
+    fn excludes_fully_qualified_paths_inside_cfg_test_items() {
+        let source = "#[cfg(test)] mod tests { let _ = crate::controllers::TestOnly; } let _ = crate::entities::Model;";
+        let imports = actual_import_paths(source);
+
+        assert!(
+            !imports
+                .iter()
+                .any(|path| path_matches(path, "crate::controllers"))
+        );
+        assert!(
+            imports
+                .iter()
+                .any(|path| path_matches(path, "crate::entities"))
+        );
+    }
+
+    #[test]
+    fn production_line_count_excludes_test_items_only() {
+        let source = "fn production() {}\n#[cfg(test)]\nmod tests {\n    fn test() {}\n}\n";
+        assert_eq!(production_physical_lines(source), 1);
+    }
 
     #[test]
     fn ignores_comments_literals_and_test_modules() {

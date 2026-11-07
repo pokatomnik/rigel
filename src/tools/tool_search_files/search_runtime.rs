@@ -4,10 +4,8 @@ use rig::tool::ToolExecutionError;
 
 use super::search::{SearchContext, SearchFilesOutput};
 use crate::{
-    contracts::tools::workspace::{
-        WorkspaceDirectoryEntries, WorkspacePathKind, WorkspacePathResolver, WorkspaceReader,
-        WorkspaceScanner,
-    },
+    entities::workspace::workspace_entities::{WorkspaceDirectoryEntries, WorkspacePathKind},
+    infrastructure::tools::workspace::{WorkspacePathResolver, WorkspaceReader, WorkspaceScanner},
     tools::{
         error_codes,
         tool_search_files::search_files::SearchFiles,

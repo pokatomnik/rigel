@@ -1,0 +1,20 @@
+[
+  {
+    "role": "user",
+    "content": [
+      {
+        "type": "text",
+        "text": "Hello"
+      }
+    ]
+  },
+  {
+    "role": "assistant",
+    "id": null,
+    "content": [
+      {
+        "text": "Hi"
+      }
+    ]
+  }
+]

@@ -8,20 +8,19 @@ Rigel is a conversational LLM agent that integrates shell and network tools into
 
 ## Architecture
 
-Rigel keeps application workflows, domain data, runtime adapters, and composition separate:
+Rigel keeps application workflows, domain data, concrete integrations, and composition separate:
 
-- `src/main.rs` is the composition root. It parses the CLI, creates concrete adapters and workflows, wires them through contracts, and starts the CLI controllers.
+- `src/main.rs` is the only composition root. It parses the CLI, creates concrete implementations, wires them through infrastructure traits, and starts the controllers.
 - `src/cmd/` contains only Clap parsing and CLI DTOs.
-- `src/contracts/` contains ports shared across layers. Contracts describe application capabilities without exposing provider or terminal framework types.
+- `src/infrastructure/` contains traits for capabilities shared across layers, without exposing provider or terminal framework types.
 - `src/entities/` contains domain entities and value objects, including application requests, configuration, conversation state, goals, skills, and tool data.
-- `src/use_cases/` contains provider-neutral application workflows such as chat, initialization, and goal state transitions.
-- `src/adapters/` contains concrete runtime integrations: configuration and history persistence, terminal I/O, workspace access, MCP, model sessions, streaming, recovery, permissions, and subagent adapters.
-- `src/controllers/` contains only input/output boundary controllers. They receive application requests, invoke workflows through contracts, and return results without constructing runtime dependencies.
-- `src/tools/` contains the agent-callable tool implementations. Tools use contracts for application state and I/O.
+- `src/controllers/` owns external-system integrations and input/output boundaries: configuration/history persistence, terminal I/O, workspace access, MCP, OpenAI/Rig sessions, and provider event translation.
+- `src/use_cases/` owns provider-neutral workflows: chat turns, history state transitions, recovery policy, compaction, goals, permissions, and subagent orchestration. It depends only on entities and infrastructure traits.
+- `src/tools/` contains agent-callable implementations and receives state/I/O capabilities through infrastructure traits.
 - `src/prompts/` contains static model-facing prompt text; Rust prompt modules compose it with runtime values.
 - `src/shared/` contains domain-neutral technical primitives.
 
-The composition root selects concrete adapters and use cases once, then passes them to controllers through contracts. Controllers do not depend on adapters or concrete use cases; contracts and entities keep workflows independent from runtime integrations.
+Infrastructure contains capability traits only; entities contain domain data/state, and `shared` remains domain-neutral. Concrete integrations live under `src/controllers/` and tool-specific implementations under `src/tools/`.
 
 ## Configuration
 
@@ -30,7 +29,11 @@ default. `rigel chat --profile <PATH>` uses `<PATH>` as the global file. In
 both cases Rigel also reads `<current-dir>/.rigel/config.toml` and overlays it
 on the global configuration. Each explicitly configured project value overrides
 the global/profile value; an omitted project value is inherited. Defaults are
-used only when neither layer configures that value.
+used only when neither layer configures that value. Read or TOML parse errors in
+the optional default-global and project files are ignored; Rigel uses the other
+valid layer, or defaults if neither is usable. An explicit `--profile` is
+required, so its read or parse errors are reported; project configuration remains
+optional.
 
 The MCP servers whose tools are exposed to the agent are declared in TOML:
 
@@ -101,9 +104,11 @@ project settings may omit `command` or `url` and inherit them from the global
 layer. Project `args` are appended to global `args`, while project environment
 variables override global variables with the same name.
 
-If the default file is missing or cannot be read or parsed, Rigel uses its
-defaults. An explicitly supplied `--profile` path must exist and contain valid
-TOML; errors are returned to the caller.
+Read or TOML parse errors in the optional default-global and project files are
+ignored; Rigel uses the other valid layer, or defaults if neither layer is
+usable. An explicitly supplied `--profile` is required, so its read or parse
+errors are reported. The project config remains optional even when a profile is
+specified.
 
 ### Interactive commands
 
@@ -130,6 +135,16 @@ The prompt displays usage as `used/limit >`, using `K`, `M`, or `B` suffixes
 for large values. If only the context limit is known, the prompt shows `?/1M >`;
 if only usage is known, it shows `123K >`; if neither is known, it shows `> `.
 `/compact` remains available for manual compaction and uses the same summary behavior.
+
+Chat history is persisted at `~/.rigel/<sha256-of-startup-directory>/history.json`;
+each startup working-directory path has its own history file. Delegated subagent
+calls start with fresh, nonpersistent history containing the delegated task,
+not the chat's history or context. Each delegation inherits the chat agent's
+currently selected model, including after `/agent` changes it, but not its
+conversation history. The built-in subagent tool set includes workspace,
+command, and fetch tools; it excludes the built-in `ask_user`, `spawn_subagent`,
+and `mark_goal_complete` tools. Selected MCP tools are also registered for the
+provider runtime.
 
 While a goal is active, Rigel does not read new user commands. After each completed model run it
 sends an internal continuation prompt containing the original goal. These follow-up runs have the
@@ -196,9 +211,8 @@ rigel/
 ├── src/
 │   ├── main.rs        # Composition root and CLI dispatch
 │   ├── cmd/           # CLI argument parsing and options
-│   ├── contracts/     # Application ports and capability boundaries
-│   ├── adapters/      # Concrete runtime and external-system adapters
-│   ├── controllers/   # Input/output boundary controllers only
+│   ├── infrastructure/ # Application ports and capability boundaries
+│   ├── controllers/   # Boundary controllers and concrete external integrations
 │   ├── entities/      # Domain entities and value objects
 │   ├── prompts/       # Static model-facing prompt text
 │   ├── shared/        # Domain-neutral technical primitives
@@ -223,15 +237,15 @@ and `chat` subcommands:
 cargo run -- chat --profile ./config.toml
 ```
 
-### CLI Controllers and Runtime Adapters
+### CLI Controllers and Concrete Integrations
 
-`src/controllers/chat_controller/chat_controller.rs` contains a thin `ChatController`. It receives a `ChatRequest`, writes the welcome message through `ApplicationOutput`, and invokes the provider-neutral chat workflow through `ChatWorkflow`. `InitController` follows the same contract-only boundary for configuration initialization.
+`src/controllers/chat_controller/controller.rs` contains a thin `ChatController`. It receives a `ChatRequest`, writes the welcome message through `ApplicationOutput`, and invokes the provider-neutral chat workflow through `ChatRunner`. `InitController` follows the same contract-only boundary for configuration initialization.
 
-Concrete model, history, terminal, workspace, MCP, permission, streaming, recovery, and subagent integrations live under `src/adapters/`. They are selected and wired by `src/main.rs`; controllers never construct or import them directly.
+Concrete configuration/history, terminal, workspace, MCP, and Rig/OpenAI integrations live under `src/controllers/`; application workflows live under `src/use_cases/`. `src/main.rs` selects and wires them. Controllers and use cases communicate through infrastructure traits and entities, never through concrete implementations owned by another layer.
 
 ### Built-in Tools
 
-Rigel currently provides ten built-in tools. Their implementations live under `src/tools/` and are registered by the concrete agent adapter under `src/adapters/model_runtime/agent/tool_registration.rs`:
+Rigel currently provides ten built-in tools. Their implementations live under `src/tools/`; `src/main.rs` creates both chat and subagent tool sets and the Rig runtime receives them through a type-erased registration boundary:
 
 | Tool                 | Implementation path                  | Description                                                                             |
 | -------------------- | ------------------------------------ | --------------------------------------------------------------------------------------- |
@@ -250,12 +264,12 @@ Rigel currently provides ten built-in tools. Their implementations live under `s
 
 ### Use Cases
 
-- **Chat boundary**: `src/use_cases/chat/` invokes one composed chat runner without knowing Rig, terminal, or filesystem types.
+- **Chat**: `src/use_cases/chat/workflow.rs` runs the interactive command loop through infrastructure boundaries; named operations under `src/use_cases/chat/` handle turns, history, recovery, and compaction.
 - **Initialization**: `src/use_cases/init/` creates the configured profile.
-- **Model runtime**: `src/adapters/model_runtime/model_selector/` adapts provider model discovery and selection.
-- **Permissions**: `src/adapters/model_runtime/permissions/` contains the runtime hook and delegates policy decisions through contracts.
-- **Goals**: `src/use_cases/goal/` owns goal completion state.
-- **Subagents**: `src/adapters/model_runtime/subagent.rs` adapts isolated provider sessions behind the tool contract.
+- **Model runtime**: `src/controllers/model_runtime/model_selector/` adapts provider model discovery and selection; controller runtime code translates Rig events and supplies provider capabilities.
+- **Recovery and compaction**: `src/use_cases/chat/recovery/` owns turn-recovery policy, while `src/use_cases/chat/compaction/` owns history-compaction policy. Provider-backed summarization stays under `src/controllers/model_runtime/compaction/`.
+- **Permissions and goals**: provider hooks live under `src/controllers/model_runtime/permissions/`; policy decisions and goal state transitions are handled by `src/use_cases/permissions/` and `src/use_cases/goal/`.
+- **Subagents**: `src/use_cases/subagent/workflow.rs` implements `RunSubagent`; `src/controllers/model_runtime/subagent_session_factory.rs` creates a fresh provider session and nonpersistent history for each delegation.
 
 ## Development Guidelines
 

@@ -1,1 +1,2 @@
-pub mod chat_controller;
+pub mod command_parser;
+pub mod controller;
