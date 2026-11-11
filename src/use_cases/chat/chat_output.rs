@@ -1,46 +1,48 @@
-use rig::completion::CompletionModel;
+use crate::entities::conversation::turn::TurnStatus;
 
-use crate::shared::{
-    agent::dependencies::ConfiguredAgent,
-    recovery::recovery_error::format_recovery_stopped_notice,
-    streaming::{message_output::display_message, stream_output_state::StreamOutputState},
-};
+use super::workflow::Chat;
 
-use super::chat::Chat;
-
-impl<CM, P, GM> Chat<CM, P, GM>
-where
-    CM: CompletionModel + 'static,
-    P: crate::shared::history::history_persistence::HistoryPersistence,
-    GM: AsyncFn() -> anyhow::Result<ConfiguredAgent<CM>> + 'static,
-{
+impl Chat {
     pub(super) fn echo_prompt(&self, prompt: &str, echo: bool) {
         if echo {
-            self.terminal_io.print(format!("{prompt}\n").as_str());
+            self.io.print(format!("{prompt}\n").as_str());
         }
     }
 
-    pub(super) fn report_turn_status(
-        &self,
-        status: &crate::shared::recovery::turn_recovery::TurnStatus,
-    ) {
+    pub(super) fn report_turn_status(&self, status: &TurnStatus) {
         if let Some(error) = status.error() {
-            let notice = format_recovery_stopped_notice(error);
-            self.terminal_io.eprintln(format!("\n{notice}").as_str());
+            self.io
+                .eprintln(format!("\n{}", format_recovery_stopped_notice(error)).as_str());
         }
     }
 
     pub(super) async fn display_history(&self) {
         let messages = self.history.snapshot().await;
-        if messages.is_empty() {
-            return;
+        if !messages.is_empty() {
+            self.io.display_history(messages.as_slice());
         }
+    }
+}
 
-        let mut output_state = StreamOutputState::default();
-        for message in &messages {
-            if display_message(self.terminal_io.as_ref(), &mut output_state, message) {
-                self.terminal_io.eprintln("");
-            }
-        }
+/// Formats the user-facing notice after automatic recovery stops.
+///
+/// The notice directs the user to provide guidance in a new turn or exit explicitly.
+pub(crate) fn format_recovery_stopped_notice(error: &str) -> String {
+    format!(
+        "[automatic recovery stopped: {error}]\nReview the tool errors above, then enter a new message with instructions for the model, or /exit."
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_recovery_stopped_notice;
+
+    #[test]
+    fn recovery_stopped_notice_tells_user_how_to_resume() {
+        let message = format_recovery_stopped_notice("MaxTurnsError");
+
+        assert!(message.contains("automatic recovery stopped: MaxTurnsError"));
+        assert!(message.contains("enter a new message with instructions for the model"));
+        assert!(message.contains("/exit"));
     }
 }

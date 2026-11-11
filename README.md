@@ -6,6 +6,22 @@ A Rust 2024 CLI agent for interacting with OpenAI-compatible LLM APIs.
 
 Rigel is a conversational LLM agent that integrates shell and network tools into an interactive CLI session. It connects to OpenAI-compatible servers and runs commands from the directory where Rigel started.
 
+## Architecture
+
+Rigel keeps application workflows, domain data, concrete integrations, and composition separate:
+
+- `src/main.rs` is the only composition root. It parses the CLI, creates concrete implementations, wires them through infrastructure traits, and starts the controllers.
+- `src/cmd/` contains only Clap parsing and CLI DTOs.
+- `src/infrastructure/` contains traits for capabilities shared across layers, without exposing provider or terminal framework types.
+- `src/entities/` contains domain entities and value objects, including application requests, configuration, conversation state, goals, skills, and tool data.
+- `src/controllers/` owns external-system integrations and input/output boundaries: configuration/history persistence, terminal I/O, workspace access, MCP, OpenAI/Rig sessions, and provider event translation.
+- `src/use_cases/` owns provider-neutral workflows: chat turns, history state transitions, recovery policy, compaction, goals, permissions, and subagent orchestration. It depends only on entities and infrastructure traits.
+- `src/tools/` contains agent-callable implementations and receives state/I/O capabilities through infrastructure traits.
+- `src/prompts/` contains static model-facing prompt text; Rust prompt modules compose it with runtime values.
+- `src/shared/` contains domain-neutral technical primitives.
+
+Infrastructure contains capability traits only; entities contain domain data/state, and `shared` remains domain-neutral. Concrete integrations live under `src/controllers/` and tool-specific implementations under `src/tools/`.
+
 ## Configuration
 
 Rigel reads the global TOML configuration from `~/.rigel/config.toml` by
@@ -13,7 +29,11 @@ default. `rigel chat --profile <PATH>` uses `<PATH>` as the global file. In
 both cases Rigel also reads `<current-dir>/.rigel/config.toml` and overlays it
 on the global configuration. Each explicitly configured project value overrides
 the global/profile value; an omitted project value is inherited. Defaults are
-used only when neither layer configures that value.
+used only when neither layer configures that value. Read or TOML parse errors in
+the optional default-global and project files are ignored; Rigel uses the other
+valid layer, or defaults if neither is usable. An explicit `--profile` is
+required, so its read or parse errors are reported; project configuration remains
+optional.
 
 The MCP servers whose tools are exposed to the agent are declared in TOML:
 
@@ -84,9 +104,11 @@ project settings may omit `command` or `url` and inherit them from the global
 layer. Project `args` are appended to global `args`, while project environment
 variables override global variables with the same name.
 
-If the default file is missing or cannot be read or parsed, Rigel uses its
-defaults. An explicitly supplied `--profile` path must exist and contain valid
-TOML; errors are returned to the caller.
+Read or TOML parse errors in the optional default-global and project files are
+ignored; Rigel uses the other valid layer, or defaults if neither layer is
+usable. An explicitly supplied `--profile` is required, so its read or parse
+errors are reported. The project config remains optional even when a profile is
+specified.
 
 ### Interactive commands
 
@@ -114,6 +136,16 @@ for large values. If only the context limit is known, the prompt shows `?/1M >`;
 if only usage is known, it shows `123K >`; if neither is known, it shows `> `.
 `/compact` remains available for manual compaction and uses the same summary behavior.
 
+Chat history is persisted at `~/.rigel/<sha256-of-startup-directory>/history.json`;
+each startup working-directory path has its own history file. Delegated subagent
+calls start with fresh, nonpersistent history containing the delegated task,
+not the chat's history or context. Each delegation inherits the chat agent's
+currently selected model, including after `/agent` changes it, but not its
+conversation history. The built-in subagent tool set includes workspace,
+command, and fetch tools; it excludes the built-in `ask_user`, `spawn_subagent`,
+and `mark_goal_complete` tools. Selected MCP tools are also registered for the
+provider runtime.
+
 While a goal is active, Rigel does not read new user commands. After each completed model run it
 sends an internal continuation prompt containing the original goal. These follow-up runs have the
 same 12-turn limit as an ordinary run, but the number of consecutive follow-up runs is unlimited.
@@ -123,10 +155,11 @@ This completion tool is exposed only to the main chat agent, not to subagents.
 
 ### Built-in skills
 
-`configure-rigel` is always available in `/skills`. It documents the TOML
-configuration file, model parameters, MCP servers, and project and global skill
-directories. It is compiled into Rigel and does not require a file in the
-current project or home directory. When selected, it provides this context to
+`configure-rigel` is always available in `/skills`. Its static source lives under
+`src/prompts/skills/configure-rigel/SKILL.md`; it documents the TOML configuration
+file, model parameters, MCP servers, and project and global skill directories. It
+is compiled into Rigel and does not require a file in the current project or home
+directory. When selected, it provides this context to
 the agent and asks how it can help configure Rigel instead of asking the agent
 to summarize the skill.
 
@@ -173,44 +206,18 @@ cargo clippy --all-targets --all-features
 
 ## Project Structure
 
-## Quick Start
-
-```bash
-# Clone the repository
-git clone <repository-url>
-cd rigel
-
-# Run help command
-cargo run -- --help
-
-# Start Rigel with the default configuration
-cargo run -- chat
-
-# Build the project
-cargo build
-
-# Run tests
-cargo test --all-targets
-
-# Format Rust code
-cargo fmt --all -- --check
-
-# Run clippy checks
-cargo clippy --all-targets --all-features
-```
-
-## Project Structure
-
 ```
 rigel/
 ├── src/
+│   ├── main.rs        # Composition root and CLI dispatch
 │   ├── cmd/           # CLI argument parsing and options
-│   ├── controllers/   # Request orchestration layer
-│   ├── entities/      # Domain entities
-│   ├── prompts/       # System prompts for LLM interaction
-│   ├── shared/        # Terminal IO and shared utilities
-│   ├── tools/         # Agent-callable tools
-│   └── use_cases/     # Application workflows (chat, model selection)
+│   ├── infrastructure/ # Application ports and capability boundaries
+│   ├── controllers/   # Boundary controllers and concrete external integrations
+│   ├── entities/      # Domain entities and value objects
+│   ├── prompts/       # Static model-facing prompt text
+│   ├── shared/        # Domain-neutral technical primitives
+│   ├── tools/         # Agent-callable tool implementations
+│   └── use_cases/     # Application workflows
 ├── Cargo.toml         # Rust package metadata and dependencies
 ├── Cargo.lock         # Resolved dependency versions
 └── README.md          # This file
@@ -230,38 +237,39 @@ and `chat` subcommands:
 cargo run -- chat --profile ./config.toml
 ```
 
-### Agent Controller
+### CLI Controllers and Concrete Integrations
 
-Located in `src/controllers/chat_controller.rs`, the IndexController orchestrates agent operations:
+`src/controllers/chat_controller/controller.rs` contains a thin `ChatController`. It receives a `ChatRequest`, writes the welcome message through `ApplicationOutput`, and invokes the provider-neutral chat workflow through `ChatRunner`. `InitController` follows the same contract-only boundary for configuration initialization.
 
-- Establishes connection to an OpenAI-compatible server
-- Selects available models deterministically
-- Initializes chat with system prompt
-- Manages conversation turns (default: 12)
-- Routes built-in tools to appropriate agents
+Concrete configuration/history, terminal, workspace, MCP, and Rig/OpenAI integrations live under `src/controllers/`; application workflows live under `src/use_cases/`. `src/main.rs` selects and wires them. Controllers and use cases communicate through infrastructure traits and entities, never through concrete implementations owned by another layer.
 
 ### Built-in Tools
 
-Rigel provides nine built-in tools:
+Rigel currently provides ten built-in tools. Their implementations live under `src/tools/`; `src/main.rs` creates both chat and subagent tool sets and the Rig runtime receives them through a type-erased registration boundary:
 
-| Tool                 | Description                                                                     |
-| -------------------- | ------------------------------------------------------------------------------- |
-| `run_command`        | Run shell commands for builds, tests, git, programs, and uncovered capabilities |
-| `read_file`          | Read bounded UTF-8 text with numbered lines                                     |
-| `search_files`       | Search bounded file contents for literal text                                   |
-| `edit_file`          | Replace one exact unique fragment with a bounded diff                           |
-| `write_file`         | Create or fully replace a UTF-8 text file                                       |
-| `fetch_url`          | Fetch bounded text from a known HTTP or HTTPS URL                               |
-| `spawn_subagent`     | Run an autonomous subagent for a delegated task                                 |
-| `ask_user`           | Ask one question with selectable answers or required free-form input            |
-| `mark_goal_complete` | End the active `/goal` mode with a truthful work report                         |
+| Tool                 | Implementation path                  | Description                                                                             |
+| -------------------- | ------------------------------------ | --------------------------------------------------------------------------------------- |
+| `ask_user`           | `src/tools/tool_ask_user/`           | Ask one question with selectable answers or required free-form input                    |
+| `run_command`        | `src/tools/tool_run_command/`        | Run bounded shell commands for builds, tests, git, programs, and uncovered capabilities |
+| `read_file`          | `src/tools/tool_read_file/`          | Read bounded UTF-8 text with numbered lines                                             |
+| `edit_file`          | `src/tools/tool_edit_file/`          | Replace one exact unique fragment with a bounded diff                                   |
+| `write_file`         | `src/tools/tool_write_file/`         | Create or fully replace a UTF-8 text file                                               |
+| `search_files`       | `src/tools/tool_search_files/`       | Search bounded file contents for literal text                                           |
+| `glob_files`         | `src/tools/tool_glob_files/`         | Find bounded workspace files by a relative glob pattern                                 |
+| `fetch_url`          | `src/tools/tool_fetch_url/`          | Fetch bounded text from a known HTTP or HTTPS URL                                       |
+| `spawn_subagent`     | `src/tools/tool_spawn_subagent/`     | Run an autonomous subagent for a delegated task                                         |
+| `mark_goal_complete` | `src/tools/tool_mark_goal_complete/` | End the active `/goal` mode with a truthful work report                                 |
 
-`read_file` reads only bounded, ordinary UTF-8 text from relative paths inside the startup workspace and runs automatically; `search_files` performs bounded, literal, case-sensitive content searches in files or directories inside that workspace and also runs automatically; use them instead of shell commands or pipelines for ordinary file reading and content searches. Prefer `read_file` for inspecting a matching file. After reading or searching, use `edit_file` for one exact unique replacement in an existing UTF-8 file; it requires confirmation, verifies the file was not changed between reads, writes the result directly, and returns only a bounded diff. Use `write_file` for a consciously complete new file or full replacement; it requires confirmation, creates missing parent directories inside the workspace, never appends, and rejects content above its server limit. `ask_user` is automatic and is available only to the main chat agent: it presents the model's ordered answers plus `Something else`; choosing the latter keeps the same tool call open until the user enters non-empty free text. It does not add a separate user turn and is available during `/goal` when the model needs the user's choice. Its automatic permission avoids a confirmation dialog; an explicit `allow = false` policy can still deny it without prompting. `run_command` remains the fallback for builds, tests, git, programs, and capabilities not covered by these dedicated tools; it keeps the existing shell, startup directory, 30-second timeout, output cap, and permission confirmation policy. Other filesystem changes remain subject to the existing tool permission mechanism.
+`read_file` reads only bounded, ordinary UTF-8 text from relative paths inside the startup workspace and runs automatically; `search_files` performs bounded, literal, case-sensitive content searches in files or directories inside that workspace and also runs automatically; `glob_files` performs bounded filename discovery in that workspace. Prefer these tools instead of shell commands or pipelines for ordinary file inspection and search. After reading or searching, use `edit_file` for one exact unique replacement in an existing UTF-8 file; it requires confirmation, verifies the file was not changed between reads, writes the result directly, and returns only a bounded diff. Use `write_file` for a consciously complete new file or full replacement; it requires confirmation, creates missing parent directories inside the workspace, never appends, and rejects content above its server limit. `ask_user` is automatic and is available only to the main chat agent: it presents the model's ordered answers plus `Something else`; choosing the latter keeps the same tool call open until the user enters non-empty free text. It does not add a separate user turn and is available during `/goal` when the model needs the user's choice. Its automatic permission avoids a confirmation dialog; an explicit `allow = false` policy can still deny it without prompting. `run_command` remains the fallback for builds, tests, git, programs, and capabilities not covered by these dedicated tools; it keeps the existing shell, startup directory, 30-second timeout, output cap, and permission confirmation policy. Other filesystem changes remain subject to the existing tool permission mechanism.
 
 ### Use Cases
 
-- **Chat**: Interactive conversation with LLM models
-- **Model Selection**: Deterministic model selection based on terminal output
+- **Chat**: `src/use_cases/chat/workflow.rs` runs the interactive command loop through infrastructure boundaries; named operations under `src/use_cases/chat/` handle turns, history, recovery, and compaction.
+- **Initialization**: `src/use_cases/init/` creates the configured profile.
+- **Model runtime**: `src/controllers/model_runtime/model_selector/` adapts provider model discovery and selection; controller runtime code translates Rig events and supplies provider capabilities.
+- **Recovery and compaction**: `src/use_cases/chat/recovery/` owns turn-recovery policy, while `src/use_cases/chat/compaction/` owns history-compaction policy. Provider-backed summarization stays under `src/controllers/model_runtime/compaction/`.
+- **Permissions and goals**: provider hooks live under `src/controllers/model_runtime/permissions/`; policy decisions and goal state transitions are handled by `src/use_cases/permissions/` and `src/use_cases/goal/`.
+- **Subagents**: `src/use_cases/subagent/workflow.rs` implements `RunSubagent`; `src/controllers/model_runtime/subagent_session_factory.rs` creates a fresh provider session and nonpersistent history for each delegation.
 
 ## Development Guidelines
 

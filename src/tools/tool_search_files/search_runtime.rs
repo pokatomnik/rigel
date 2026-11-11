@@ -3,17 +3,20 @@ use std::path::{Path, PathBuf};
 use rig::tool::ToolExecutionError;
 
 use super::search::{SearchContext, SearchFilesOutput};
-use crate::tools::{
-    error_codes,
-    tool_search_files::search_files::SearchFiles,
-    utils::{
-        errors::file_access_error,
-        filesystem::{
-            DirectoryEntries, PathKind, canonical_path, invalid_search_path, is_excluded_directory,
-            path_kind, read_directory, read_prefix, startup_root,
+use crate::{
+    entities::workspace::workspace_entities::{WorkspaceDirectoryEntries, WorkspacePathKind},
+    infrastructure::tools::workspace::{WorkspacePathResolver, WorkspaceReader, WorkspaceScanner},
+    tools::{
+        error_codes,
+        tool_search_files::search_files::SearchFiles,
+        utils::{
+            errors::{invalid_search_path, workspace_file_access_error},
+            path::{
+                MAX_PATH_BYTES, display_workspace_path, is_excluded_directory,
+                validate_relative_path,
+            },
+            text::decode_text,
         },
-        path::{MAX_PATH_BYTES, display_workspace_path, validate_relative_path},
-        text::decode_text,
     },
 };
 
@@ -21,17 +24,24 @@ const MAX_PATTERN_BYTES: usize = 4 * 1024;
 
 const MAX_FILE_BYTES: usize = 1024 * 1024;
 const MAX_SCANNED_BYTES: usize = 8 * 1024 * 1024;
-const MAX_DIRECTORY_ENTRIES: usize = 2048;
+
 const MAX_DIRECTORIES: usize = 10_000;
 const MAX_PENDING_DIRECTORIES: usize = 10_000;
 
 impl SearchFiles {
-    /// Creates a read-only search tool rooted at Rigel's startup directory.
-    pub(crate) async fn new() -> Result<Self, ToolExecutionError> {
-        let root = startup_root("search").await?;
+    /// Creates a search tool from injected path, read, and scan capabilities.
+    pub(crate) async fn new(
+        path_resolver: std::sync::Arc<dyn WorkspacePathResolver>,
+        reader: std::sync::Arc<dyn WorkspaceReader>,
+        scanner: std::sync::Arc<dyn WorkspaceScanner>,
+    ) -> Result<Self, ToolExecutionError> {
+        let root = path_resolver.root();
         Ok(Self {
             root,
-            permission: crate::shared::tool_permissions::catalog::PermissionRequirement::Automatic,
+            path_resolver,
+            reader,
+            scanner,
+            permission: crate::entities::tool::tool_entities::PermissionRequirement::Automatic,
         })
     }
 
@@ -42,9 +52,12 @@ impl SearchFiles {
         requested_path: &str,
     ) -> Result<SearchFilesOutput, ToolExecutionError> {
         Self::validate_pattern(requested_pattern)?;
-        let relative_path = validate_relative_path(requested_path, MAX_PATH_BYTES, "search")?;
-        let candidate = self.root.join(relative_path);
-        let canonical_path = canonical_path(&self.root, &candidate, requested_path).await?;
+        validate_relative_path(requested_path, MAX_PATH_BYTES, "search")?;
+        let candidate = self
+            .path_resolver
+            .resolve(requested_path)
+            .map_err(|error| workspace_file_access_error(requested_path, error, "search"))?;
+        let canonical_path = self.canonical_path(&candidate, requested_path).await?;
         let display_path =
             display_workspace_path(&self.root, &canonical_path, requested_path, "search")?;
         let mut context = SearchContext::new(canonical_path.clone(), requested_pattern);
@@ -68,14 +81,13 @@ impl SearchFiles {
         root: PathBuf,
         context: &mut SearchContext,
     ) -> Result<(), ToolExecutionError> {
-        match path_kind(&root)
-            .await
-            .map_err(|error| file_access_error(root.display(), error, "search"))?
-        {
-            PathKind::File => self.scan_file(root, context).await,
-            PathKind::Directory if is_excluded_directory(&root) => Ok(()),
-            PathKind::Directory => self.walk_directories(context).await,
-            PathKind::Other | PathKind::Symlink => Err(invalid_search_path(root.display())),
+        match self.path_kind(&root).await? {
+            WorkspacePathKind::File => self.scan_file(root, context).await,
+            WorkspacePathKind::Directory if is_excluded_directory(&root) => Ok(()),
+            WorkspacePathKind::Directory => self.walk_directories(context).await,
+            WorkspacePathKind::Other | WorkspacePathKind::Symlink => {
+                Err(invalid_search_path(root.display()))
+            }
         }
     }
 
@@ -105,7 +117,7 @@ impl SearchFiles {
         context: &mut SearchContext,
         pending: &mut Vec<PathBuf>,
     ) -> Result<(), ToolExecutionError> {
-        let entries = Self::directory_entries(&directory, context).await?;
+        let entries = self.directory_entries(&directory, context).await?;
         let truncated = entries.truncated;
         let mut paths = entries.paths;
         paths.sort_by(|left, right| left.to_string_lossy().cmp(&right.to_string_lossy()));
@@ -122,20 +134,19 @@ impl SearchFiles {
     }
 
     async fn directory_entries(
+        &self,
         directory: &Path,
         context: &mut SearchContext,
-    ) -> Result<DirectoryEntries, ToolExecutionError> {
-        match read_directory(directory, MAX_DIRECTORY_ENTRIES).await {
+    ) -> Result<WorkspaceDirectoryEntries, ToolExecutionError> {
+        match self.read_directory(directory).await {
             Ok(entries) => Ok(entries),
-            Err(error) if directory == context.root() => {
-                Err(file_access_error(directory.display(), error, "search"))
-            }
+            Err(error) if directory == context.root() => Err(error),
             Err(_) => {
                 context.warning(format!(
                     "Skipped unreadable directory \"{}\".",
                     directory.display()
                 ));
-                Ok(DirectoryEntries {
+                Ok(WorkspaceDirectoryEntries {
                     paths: Vec::new(),
                     truncated: false,
                 })
@@ -167,32 +178,36 @@ impl SearchFiles {
         path: PathBuf,
         context: &mut SearchContext,
     ) -> Result<Option<PathBuf>, ToolExecutionError> {
-        let Some(kind) = Self::entry_kind(&path, context).await else {
+        let Some(kind) = self.entry_kind(&path, context).await else {
             return Ok(None);
         };
-        if kind == PathKind::Symlink {
+        if kind == WorkspacePathKind::Symlink {
             return self.inspect_symlink(path, context).await;
         }
-        if kind == PathKind::Directory && is_excluded_directory(&path) {
+        if kind == WorkspacePathKind::Directory && is_excluded_directory(&path) {
             return Ok(None);
         }
         let Some(canonical) = self.canonical_entry(&path, context).await? else {
             return Ok(None);
         };
         match kind {
-            PathKind::File => {
+            WorkspacePathKind::File => {
                 if let Err(error) = self.scan_file(canonical, context).await {
                     self.record_file_error(path, error, context)?;
                 }
                 Ok(None)
             }
-            PathKind::Directory => Ok(Some(canonical)),
-            PathKind::Other | PathKind::Symlink => Ok(None),
+            WorkspacePathKind::Directory => Ok(Some(canonical)),
+            WorkspacePathKind::Other | WorkspacePathKind::Symlink => Ok(None),
         }
     }
 
-    async fn entry_kind(path: &Path, context: &mut SearchContext) -> Option<PathKind> {
-        match path_kind(path).await {
+    async fn entry_kind(
+        &self,
+        path: &Path,
+        context: &mut SearchContext,
+    ) -> Option<WorkspacePathKind> {
+        match self.path_kind(path).await {
             Ok(kind) => Some(kind),
             Err(_) => {
                 context.warning(format!("Skipped inaccessible path \"{}\".", path.display()));
@@ -206,7 +221,7 @@ impl SearchFiles {
         path: &Path,
         context: &mut SearchContext,
     ) -> Result<Option<PathBuf>, ToolExecutionError> {
-        match canonical_path(&self.root, path, &path.to_string_lossy()).await {
+        match self.canonical_path(path, &path.to_string_lossy()).await {
             Ok(path) => Ok(Some(path)),
             Err(error) if error.code() == Some(error_codes::PATH_OUTSIDE_WORKSPACE) => Err(error),
             Err(_) => {
@@ -221,7 +236,7 @@ impl SearchFiles {
         path: PathBuf,
         context: &mut SearchContext,
     ) -> Result<Option<PathBuf>, ToolExecutionError> {
-        match canonical_path(&self.root, &path, &path.to_string_lossy()).await {
+        match self.canonical_path(&path, &path.to_string_lossy()).await {
             Err(error) if error.code() == Some(error_codes::PATH_OUTSIDE_WORKSPACE) => Err(error),
             _ => {
                 context.warning(format!("Skipped symlink \"{}\".", path.display()));
@@ -241,9 +256,11 @@ impl SearchFiles {
             return Ok(());
         }
         let limit = remaining.min(MAX_FILE_BYTES);
-        let read = read_prefix(&path, limit)
+        let read = self
+            .reader
+            .read(&path, limit)
             .await
-            .map_err(|error| file_access_error(path.display(), error, "search"))?;
+            .map_err(|error| workspace_file_access_error(path.display(), error, "search"))?;
         context.consume_bytes(read.bytes.len());
         if read.truncated {
             context.mark_scan_limit();

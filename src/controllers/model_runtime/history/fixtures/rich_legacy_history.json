@@ -1,0 +1,70 @@
+[
+  {
+    "role": "user",
+    "content": [
+      { "type": "text", "text": "inspect this" },
+      {
+        "type": "image",
+        "data": { "type": "base64", "value": "aW1hZ2U=" },
+        "media_type": "png",
+        "detail": "high",
+        "additional_params": { "vendor_image": { "opaque": true } }
+      },
+      {
+        "type": "toolresult",
+        "id": "result-1",
+        "call_id": "call-1",
+        "content": [
+          {
+            "type": "text",
+            "text": "first result",
+            "additional_params": { "result_meta": "one" }
+          },
+          { "type": "json", "value": { "ok": true } }
+        ]
+      },
+      {
+        "type": "toolresult",
+        "id": "result-2",
+        "call_id": "call-2",
+        "content": [
+          {
+            "type": "text",
+            "text": "second result",
+            "additional_params": { "result_meta": "two" }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "role": "assistant",
+    "id": "assistant-legacy-7",
+    "content": [
+      {
+        "id": "reason-1",
+        "content": [
+          {
+            "type": "text",
+            "content": {
+              "text": "private thought",
+              "signature": "opaque-reasoning"
+            }
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "text": "completed",
+        "additional_params": { "vendor_answer": { "trace": 17 } }
+      },
+      {
+        "id": "tool-7",
+        "call_id": "external-call-7",
+        "function": { "name": "lookup", "arguments": { "key": "value" } },
+        "signature": "opaque-call",
+        "additional_params": { "vendor_call": [1, 2, 3] }
+      }
+    ]
+  }
+]

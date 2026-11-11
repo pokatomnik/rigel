@@ -1,23 +1,26 @@
 use std::{
-    io,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use futures::future::BoxFuture;
 use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 
-use crate::shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata};
-use crate::tools::{
-    action::Action,
-    utils::{
-        errors::{io_error, path_outside_workspace},
-        filesystem::{
-            DirectoryEntries, PathKind, is_excluded_directory, path_kind, read_directory,
-            startup_root_with,
+use crate::{
+    entities::{
+        tool::tool_entities::PermissionRequirement,
+        workspace::workspace_entities::{WorkspaceDirectoryEntries, WorkspacePathKind},
+    },
+    infrastructure::tools::{
+        permissions::ToolPermissionMetadata,
+        workspace::{WorkspacePathResolver, WorkspaceScanner},
+    },
+    tools::{
+        action::Action,
+        utils::{
+            errors::{path_outside_workspace, workspace_file_access_error},
+            path::{display_relative_path, is_excluded_directory, is_inside},
         },
-        path::{display_relative_path, is_inside},
     },
 };
 
@@ -53,45 +56,25 @@ pub(crate) struct GlobFilesOutput {
     pub(crate) message: Option<String>,
 }
 
-trait FileSystem: Send + Sync {
-    fn canonicalize(&self, path: PathBuf) -> BoxFuture<'static, io::Result<PathBuf>>;
-    fn path_kind(&self, path: PathBuf) -> BoxFuture<'static, io::Result<PathKind>>;
-    fn read_directory(&self, path: PathBuf) -> BoxFuture<'static, io::Result<DirectoryEntries>>;
-}
-
-struct TokioFileSystem;
-
-impl FileSystem for TokioFileSystem {
-    fn canonicalize(&self, path: PathBuf) -> BoxFuture<'static, io::Result<PathBuf>> {
-        Box::pin(tokio::fs::canonicalize(path))
-    }
-
-    fn path_kind(&self, path: PathBuf) -> BoxFuture<'static, io::Result<PathKind>> {
-        Box::pin(async move { path_kind(&path).await })
-    }
-
-    fn read_directory(&self, path: PathBuf) -> BoxFuture<'static, io::Result<DirectoryEntries>> {
-        Box::pin(async move { read_directory(&path, MAX_DIRECTORY_ENTRIES).await })
-    }
-}
-
 /// Read-only, bounded filename discovery rooted at Rigel's startup workspace.
 pub(crate) struct GlobFiles {
     root: PathBuf,
-    file_system: Arc<dyn FileSystem>,
+    path_resolver: Arc<dyn WorkspacePathResolver>,
+    scanner: Arc<dyn WorkspaceScanner>,
     permission: PermissionRequirement,
 }
 
 impl GlobFiles {
-    /// Creates an automatic-permission tool rooted at the canonical startup directory.
-    pub(crate) async fn new() -> Result<Self, ToolExecutionError> {
-        let file_system: Arc<dyn FileSystem> = Arc::new(TokioFileSystem);
-        let root = startup_root_with(|path| file_system.canonicalize(path))
-            .await
-            .map_err(|error| io_error("workspace", error, "glob"))?;
+    /// Creates a filename discovery tool from injected path and scan capabilities.
+    pub(crate) async fn new(
+        path_resolver: Arc<dyn WorkspacePathResolver>,
+        scanner: Arc<dyn WorkspaceScanner>,
+    ) -> Result<Self, ToolExecutionError> {
+        let root = path_resolver.root();
         Ok(Self {
             root,
-            file_system,
+            path_resolver,
+            scanner,
             permission: PermissionRequirement::Automatic,
         })
     }
@@ -127,7 +110,7 @@ impl GlobFiles {
         directory: PathBuf,
         scan: &mut GlobScan,
     ) -> Result<(), ToolExecutionError> {
-        let entries = self.read_directory(directory.clone()).await?;
+        let entries = self.read_directory(&directory).await?;
         let was_truncated = entries.truncated;
         let mut paths = entries.paths;
         paths.sort_by(|left, right| left.to_string_lossy().cmp(&right.to_string_lossy()));
@@ -150,12 +133,12 @@ impl GlobFiles {
         path: PathBuf,
         scan: &mut GlobScan,
     ) -> Result<(), ToolExecutionError> {
-        let kind = self.path_kind(path.clone()).await?;
+        let kind = self.path_kind(&path).await?;
         match kind {
-            PathKind::File => self.record_file(path, scan).await,
-            PathKind::Directory if is_excluded_directory(&path) => Ok(()),
-            PathKind::Directory => self.queue_directory(path, scan).await,
-            PathKind::Symlink | PathKind::Other => Ok(()),
+            WorkspacePathKind::File => self.record_file(path, scan).await,
+            WorkspacePathKind::Directory if is_excluded_directory(&path) => Ok(()),
+            WorkspacePathKind::Directory => self.queue_directory(path, scan).await,
+            WorkspacePathKind::Symlink | WorkspacePathKind::Other => Ok(()),
         }
     }
 
@@ -185,28 +168,31 @@ impl GlobFiles {
 
     async fn canonical_entry(&self, path: &Path) -> Result<PathBuf, ToolExecutionError> {
         let canonical = self
-            .file_system
-            .canonicalize(path.to_path_buf())
+            .path_resolver
+            .canonicalize(path)
             .await
-            .map_err(|error| io_error(path.display(), error, "glob"))?;
+            .map_err(|error| workspace_file_access_error(path.display(), error, "glob"))?;
         if !is_inside(&self.root, &canonical) {
             return Err(path_outside_workspace(&path.to_string_lossy(), "glob"));
         }
         Ok(canonical)
     }
 
-    async fn read_directory(&self, path: PathBuf) -> Result<DirectoryEntries, ToolExecutionError> {
-        self.file_system
-            .read_directory(path.clone())
+    async fn read_directory(
+        &self,
+        path: &Path,
+    ) -> Result<WorkspaceDirectoryEntries, ToolExecutionError> {
+        self.scanner
+            .read_directory(path, MAX_DIRECTORY_ENTRIES)
             .await
-            .map_err(|error| io_error(path.display(), error, "glob"))
+            .map_err(|error| workspace_file_access_error(path.display(), error, "glob"))
     }
 
-    async fn path_kind(&self, path: PathBuf) -> Result<PathKind, ToolExecutionError> {
-        self.file_system
-            .path_kind(path.clone())
+    async fn path_kind(&self, path: &Path) -> Result<WorkspacePathKind, ToolExecutionError> {
+        self.scanner
+            .path_kind(path)
             .await
-            .map_err(|error| io_error(path.display(), error, "glob"))
+            .map_err(|error| workspace_file_access_error(path.display(), error, "glob"))
     }
 }
 
@@ -252,16 +238,77 @@ impl Tool for GlobFiles {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
+
     use rig::tool::{Tool, ToolExecutionError};
 
     use super::super::scan::MAX_MATCHES;
-    use super::{GlobFiles, TokioFileSystem};
-    use crate::shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata};
-    use crate::tools::{
-        error_codes,
-        tool_glob_files::{pattern::GlobPattern, scan::GlobScan},
-        utils::path::MAX_PATH_BYTES,
+    use super::GlobFiles;
+    use crate::{
+        entities::tool::tool_entities::PermissionRequirement,
+        entities::workspace::workspace_entities::{WorkspaceDirectoryEntries, WorkspacePathKind},
+        infrastructure::tools::{
+            permissions::ToolPermissionMetadata,
+            workspace::{WorkspacePathResolver, WorkspaceScanner},
+        },
+        tools::{
+            error_codes,
+            tool_glob_files::{pattern::GlobPattern, scan::GlobScan},
+            utils::path::MAX_PATH_BYTES,
+        },
     };
+
+    type WorkspaceFuture<'a, T> =
+        std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<T>> + Send + 'a>>;
+
+    struct FakeWorkspace;
+
+    impl WorkspacePathResolver for FakeWorkspace {
+        fn root(&self) -> PathBuf {
+            PathBuf::from("/workspace")
+        }
+
+        fn resolve(&self, path: &str) -> anyhow::Result<PathBuf> {
+            Ok(self.root().join(path))
+        }
+
+        fn canonicalize(&self, path: &Path) -> WorkspaceFuture<'_, PathBuf> {
+            let path = path.to_path_buf();
+            Box::pin(async move { Ok(path) })
+        }
+    }
+
+    impl WorkspaceScanner for FakeWorkspace {
+        fn path_kind(&self, _path: &Path) -> WorkspaceFuture<'_, WorkspacePathKind> {
+            Box::pin(async { Ok(WorkspacePathKind::Directory) })
+        }
+
+        fn read_directory(
+            &self,
+            _path: &Path,
+            _max_entries: usize,
+        ) -> WorkspaceFuture<'_, WorkspaceDirectoryEntries> {
+            Box::pin(async {
+                Ok(WorkspaceDirectoryEntries {
+                    paths: Vec::new(),
+                    truncated: false,
+                })
+            })
+        }
+    }
+
+    fn tool() -> GlobFiles {
+        let workspace = Arc::new(FakeWorkspace);
+        GlobFiles {
+            root: PathBuf::from("/workspace"),
+            path_resolver: workspace.clone(),
+            scanner: workspace,
+            permission: PermissionRequirement::Automatic,
+        }
+    }
 
     fn pattern(value: &str) -> Option<GlobPattern> {
         GlobPattern::parse(value).ok()
@@ -269,12 +316,7 @@ mod tests {
 
     #[test]
     fn schema_has_only_one_required_pattern() {
-        let tool = GlobFiles {
-            root: std::path::PathBuf::from("/workspace"),
-            file_system: std::sync::Arc::new(TokioFileSystem),
-            permission: PermissionRequirement::Automatic,
-        };
-        let schema = tool.parameters();
+        let schema = tool().parameters();
 
         assert_eq!(schema["required"], serde_json::json!(["pattern"]));
         assert_eq!(schema["additionalProperties"], serde_json::json!(false));
@@ -287,14 +329,8 @@ mod tests {
 
     #[test]
     fn glob_files_is_automatic() {
-        let tool = GlobFiles {
-            root: std::path::PathBuf::from("/workspace"),
-            file_system: std::sync::Arc::new(TokioFileSystem),
-            permission: PermissionRequirement::Automatic,
-        };
-
         assert_eq!(
-            tool.permission_requirement(),
+            tool().permission_requirement(),
             PermissionRequirement::Automatic
         );
     }

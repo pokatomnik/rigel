@@ -1,21 +1,27 @@
 use std::{
-    io,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use futures::future::BoxFuture;
 use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 
-use crate::shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata};
+use crate::{
+    entities::{
+        tool::tool_entities::PermissionRequirement,
+        workspace::workspace_entities::WorkspacePathKind,
+    },
+    infrastructure::tools::{
+        permissions::ToolPermissionMetadata,
+        workspace::{WorkspacePathResolver, WorkspaceReader},
+    },
+};
 
 use crate::tools::{
     action::Action,
     error_codes,
     utils::{
-        errors::{file_access_error, io_error, path_outside_workspace},
-        filesystem::startup_root_with,
+        errors::{path_outside_workspace, workspace_file_access_error},
         path::{display_workspace_path, is_inside, validate_non_absolute_path},
         text::decode_text,
     },
@@ -44,64 +50,51 @@ pub(crate) struct ReadFileOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
 }
-trait FileSystem: Send + Sync {
-    fn canonicalize(&self, path: PathBuf) -> BoxFuture<'static, io::Result<PathBuf>>;
-    fn metadata(&self, path: PathBuf) -> BoxFuture<'static, io::Result<bool>>;
-    fn read(&self, path: PathBuf) -> BoxFuture<'static, io::Result<Vec<u8>>>;
-}
 
-struct TokioFileSystem;
-impl FileSystem for TokioFileSystem {
-    fn canonicalize(&self, path: PathBuf) -> BoxFuture<'static, io::Result<PathBuf>> {
-        Box::pin(tokio::fs::canonicalize(path))
-    }
-
-    fn metadata(&self, path: PathBuf) -> BoxFuture<'static, io::Result<bool>> {
-        Box::pin(async move {
-            tokio::fs::metadata(path)
-                .await
-                .map(|metadata| metadata.is_file())
-        })
-    }
-
-    fn read(&self, path: PathBuf) -> BoxFuture<'static, io::Result<Vec<u8>>> {
-        Box::pin(tokio::fs::read(path))
-    }
-}
 pub(crate) struct ReadFile {
     root: PathBuf,
-    file_system: Arc<dyn FileSystem>,
+    path_resolver: Arc<dyn WorkspacePathResolver>,
+    reader: Arc<dyn WorkspaceReader>,
     permission: PermissionRequirement,
 }
 
 impl ReadFile {
-    pub(crate) async fn new() -> Result<Self, ToolExecutionError> {
-        let file_system: Arc<dyn FileSystem> = Arc::new(TokioFileSystem);
-        let root = startup_root_with(|path| file_system.canonicalize(path))
-            .await
-            .map_err(|error| io_error("workspace", error, "read"))?;
+    /// Creates a read tool from an injected root resolver and bounded reader.
+    pub(crate) async fn new(
+        path_resolver: Arc<dyn WorkspacePathResolver>,
+        reader: Arc<dyn WorkspaceReader>,
+    ) -> Result<Self, ToolExecutionError> {
+        let root = path_resolver.root();
         Ok(Self {
             root,
-            file_system,
+            path_resolver,
+            reader,
             permission: PermissionRequirement::Automatic,
         })
     }
 
     async fn read_path(&self, requested_path: &str) -> Result<ReadFileOutput, ToolExecutionError> {
-        let relative_path = Self::validate_path(requested_path)?;
-        let candidate = self.root.join(relative_path);
+        Self::validate_path(requested_path)?;
+        let candidate = self
+            .path_resolver
+            .resolve(requested_path)
+            .map_err(|error| workspace_file_access_error(requested_path, error, "read"))?;
         let canonical_path = self.canonical_path(&candidate, requested_path).await?;
         self.ensure_regular_file(&canonical_path, requested_path)
             .await?;
-        let bytes = self
-            .file_system
-            .read(canonical_path.clone())
+        let read = self
+            .reader
+            .read(&canonical_path, MAX_CONTENT_BYTES)
             .await
-            .map_err(|error| file_access_error(requested_path, error, "read"))?;
-        let text = decode_text(bytes).ok_or_else(|| unsupported_file_error(requested_path))?;
+            .map_err(|error| workspace_file_access_error(requested_path, error, "read"))?;
+        let text = decode_text(read.bytes).ok_or_else(|| unsupported_file_error(requested_path))?;
         let display_path =
             display_workspace_path(&self.root, &canonical_path, requested_path, "read")?;
-        Ok(build_output(display_path, &text))
+        let mut output = build_output(display_path, &text);
+        if read.truncated {
+            mark_byte_truncation(&mut output);
+        }
+        Ok(output)
     }
 
     fn validate_path(path: &str) -> Result<PathBuf, ToolExecutionError> {
@@ -114,10 +107,10 @@ impl ReadFile {
         requested_path: &str,
     ) -> Result<PathBuf, ToolExecutionError> {
         let canonical_path = self
-            .file_system
-            .canonicalize(candidate.to_path_buf())
+            .path_resolver
+            .canonicalize(candidate)
             .await
-            .map_err(|error| file_access_error(requested_path, error, "read"))?;
+            .map_err(|error| workspace_file_access_error(requested_path, error, "read"))?;
         if !is_inside(&self.root, &canonical_path) {
             return Err(path_outside_workspace(requested_path, "read"));
         }
@@ -130,11 +123,11 @@ impl ReadFile {
         requested_path: &str,
     ) -> Result<(), ToolExecutionError> {
         let metadata = self
-            .file_system
-            .metadata(path.to_path_buf())
+            .reader
+            .metadata(path)
             .await
-            .map_err(|error| file_access_error(requested_path, error, "read"))?;
-        if !metadata {
+            .map_err(|error| workspace_file_access_error(requested_path, error, "read"))?;
+        if metadata != WorkspacePathKind::File {
             return Err(ToolExecutionError::invalid_args(format!(
                 "Cannot read file \"{requested_path}\": the path is not a regular file. Choose a UTF-8 text file.",
             ))
@@ -149,6 +142,7 @@ impl ToolPermissionMetadata for ReadFile {
         self.permission
     }
 }
+
 impl Tool for ReadFile {
     const NAME: &'static str = "read_file";
     type Args = ReadFileArgs;
@@ -197,6 +191,12 @@ fn build_output(path: String, text: &str) -> ReadFileOutput {
         next_offset: bounded.next_offset,
         message: bounded.message,
     }
+}
+
+fn mark_byte_truncation(output: &mut ReadFileOutput) {
+    output.truncated = true;
+    output.next_offset = Some(output.end_line.saturating_add(1));
+    output.message = Some(TRUNCATION_MESSAGE.to_string());
 }
 
 struct BoundedContent {
@@ -254,13 +254,20 @@ mod tests {
     use rig::tool::{Tool, ToolContext};
 
     use super::{
-        FileSystem, MAX_CONTENT_BYTES, MAX_LINES, ReadFile, ReadFileArgs, ReadFileOutput,
-        bounded_content,
+        MAX_CONTENT_BYTES, MAX_LINES, ReadFile, ReadFileArgs, ReadFileOutput, bounded_content,
     };
     use crate::{
-        shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata},
+        entities::tool::tool_entities::PermissionRequirement,
+        entities::workspace::workspace_entities::{WorkspacePathKind, WorkspaceRead},
+        infrastructure::tools::{
+            permissions::ToolPermissionMetadata,
+            workspace::{WorkspacePathResolver, WorkspaceReader},
+        },
         tools::error_codes,
     };
+
+    type WorkspaceFuture<'a, T> =
+        std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<T>> + Send + 'a>>;
 
     #[derive(Clone)]
     struct FakeFileSystem {
@@ -283,36 +290,59 @@ mod tests {
         }
     }
 
-    impl FileSystem for FakeFileSystem {
-        fn canonicalize(
-            &self,
-            _path: PathBuf,
-        ) -> futures::future::BoxFuture<'static, std::io::Result<PathBuf>> {
-            let result = self.canonical_path.clone().map_err(std::io::Error::from);
-            Box::pin(async move { result })
+    impl WorkspacePathResolver for FakeFileSystem {
+        fn root(&self) -> PathBuf {
+            PathBuf::from("/workspace")
         }
 
-        fn metadata(
-            &self,
-            _path: PathBuf,
-        ) -> futures::future::BoxFuture<'static, std::io::Result<bool>> {
-            let result = self.metadata.map_err(std::io::Error::from);
-            Box::pin(async move { result })
+        fn resolve(&self, path: &str) -> anyhow::Result<PathBuf> {
+            Ok(self.root().join(path))
+        }
+
+        fn canonicalize(&self, _path: &std::path::Path) -> WorkspaceFuture<'_, PathBuf> {
+            let result = self.canonical_path.clone().map_err(std::io::Error::from);
+            Box::pin(async move { result.map_err(anyhow::Error::from) })
+        }
+    }
+
+    impl WorkspaceReader for FakeFileSystem {
+        fn metadata(&self, _path: &std::path::Path) -> WorkspaceFuture<'_, WorkspacePathKind> {
+            let result = self
+                .metadata
+                .map(|is_file| {
+                    if is_file {
+                        WorkspacePathKind::File
+                    } else {
+                        WorkspacePathKind::Directory
+                    }
+                })
+                .map_err(std::io::Error::from);
+            Box::pin(async move { result.map_err(anyhow::Error::from) })
         }
 
         fn read(
             &self,
-            _path: PathBuf,
-        ) -> futures::future::BoxFuture<'static, std::io::Result<Vec<u8>>> {
-            let result = self.bytes.clone().map_err(std::io::Error::from);
-            Box::pin(async move { result })
+            _path: &std::path::Path,
+            _max_bytes: usize,
+        ) -> WorkspaceFuture<'_, WorkspaceRead> {
+            let result = self
+                .bytes
+                .clone()
+                .map(|bytes| WorkspaceRead {
+                    bytes,
+                    truncated: false,
+                })
+                .map_err(std::io::Error::from);
+            Box::pin(async move { result.map_err(anyhow::Error::from) })
         }
     }
 
     fn tool(file_system: FakeFileSystem) -> ReadFile {
+        let file_system = Arc::new(file_system);
         ReadFile {
             root: PathBuf::from("/workspace"),
-            file_system: Arc::new(file_system),
+            path_resolver: file_system.clone(),
+            reader: file_system,
             permission: PermissionRequirement::Automatic,
         }
     }

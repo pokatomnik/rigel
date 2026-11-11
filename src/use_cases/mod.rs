@@ -1,3 +1,5 @@
 pub mod chat;
-pub mod model_selector;
+pub mod goal;
+pub mod init;
+pub mod permissions;
 pub mod subagent;

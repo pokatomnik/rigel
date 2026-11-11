@@ -1,14 +1,31 @@
-use std::path::PathBuf;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use rig::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::Deserialize;
 
-use crate::shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata};
+use crate::{
+    entities::{
+        tool::tool_entities::PermissionRequirement,
+        workspace::workspace_entities::{WorkspaceDirectoryEntries, WorkspacePathKind},
+    },
+    infrastructure::tools::{
+        permissions::ToolPermissionMetadata,
+        workspace::{WorkspacePathResolver, WorkspaceReader, WorkspaceScanner},
+    },
+    tools::utils::{
+        errors::{path_outside_workspace, workspace_file_access_error},
+        path::is_inside,
+    },
+};
 
 use super::search::SearchFilesOutput;
 
 #[cfg(test)]
 const MAX_PATTERN_BYTES: usize = 4 * 1024;
+const MAX_DIRECTORY_ENTRIES: usize = 2048;
 
 /// Arguments for a literal, case-sensitive search rooted in the startup workspace.
 #[derive(Deserialize)]
@@ -20,10 +37,57 @@ pub(crate) struct SearchFilesArgs {
 
 /// Read-only bounded content search with startup-workspace confinement.
 pub(crate) struct SearchFiles {
-    /// Canonical startup directory used as the only permitted search root.
+    /// Canonical workspace directory used as the only permitted search root.
     pub(crate) root: PathBuf,
+    /// Resolves tool paths through the composition-root-selected workspace.
+    pub(super) path_resolver: Arc<dyn WorkspacePathResolver>,
+    /// Reads bounded file content through the injected workspace.
+    pub(super) reader: Arc<dyn WorkspaceReader>,
+    /// Classifies and lists entries through the injected workspace.
+    pub(super) scanner: Arc<dyn WorkspaceScanner>,
     /// Automatic permission because search is read-only and bounded.
     pub(crate) permission: PermissionRequirement,
+}
+
+impl SearchFiles {
+    /// Canonicalizes a candidate through the injected root capability and enforces confinement.
+    pub(super) async fn canonical_path(
+        &self,
+        candidate: &Path,
+        requested_path: &str,
+    ) -> Result<PathBuf, ToolExecutionError> {
+        let canonical = self
+            .path_resolver
+            .canonicalize(candidate)
+            .await
+            .map_err(|error| workspace_file_access_error(requested_path, error, "search"))?;
+        if !is_inside(&self.root, &canonical) {
+            return Err(path_outside_workspace(requested_path, "search"));
+        }
+        Ok(canonical)
+    }
+
+    /// Classifies one path through the injected scanner and preserves tool error mapping.
+    pub(super) async fn path_kind(
+        &self,
+        path: &Path,
+    ) -> Result<WorkspacePathKind, ToolExecutionError> {
+        self.scanner
+            .path_kind(path)
+            .await
+            .map_err(|error| workspace_file_access_error(path.display(), error, "search"))
+    }
+
+    /// Reads one bounded directory listing through the injected scanner.
+    pub(super) async fn read_directory(
+        &self,
+        path: &Path,
+    ) -> Result<WorkspaceDirectoryEntries, ToolExecutionError> {
+        self.scanner
+            .read_directory(path, MAX_DIRECTORY_ENTRIES)
+            .await
+            .map_err(|error| workspace_file_access_error(path.display(), error, "search"))
+    }
 }
 
 impl ToolPermissionMetadata for SearchFiles {
@@ -73,20 +137,97 @@ impl Tool for SearchFiles {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
 
     use rig::tool::Tool;
 
     use super::{MAX_PATTERN_BYTES, SearchFiles};
-    use crate::shared::tool_permissions::catalog::{PermissionRequirement, ToolPermissionMetadata};
-    use crate::tools::{
-        error_codes,
-        tool_search_files::search::{MAX_MATCHES, SearchContext},
-        utils::{
-            path::{MAX_PATH_BYTES, validate_relative_path},
-            text::utf8_prefix,
+    use crate::{
+        entities::tool::tool_entities::PermissionRequirement,
+        entities::workspace::workspace_entities::{
+            WorkspaceDirectoryEntries, WorkspacePathKind, WorkspaceRead,
+        },
+        infrastructure::tools::{
+            permissions::ToolPermissionMetadata,
+            workspace::{WorkspacePathResolver, WorkspaceReader, WorkspaceScanner},
+        },
+        tools::{
+            error_codes,
+            tool_search_files::search::{MAX_MATCHES, SearchContext},
+            utils::{
+                path::{MAX_PATH_BYTES, validate_relative_path},
+                text::utf8_prefix,
+            },
         },
     };
+
+    type WorkspaceFuture<'a, T> =
+        std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<T>> + Send + 'a>>;
+
+    struct FakeWorkspace;
+
+    impl WorkspacePathResolver for FakeWorkspace {
+        fn root(&self) -> PathBuf {
+            PathBuf::from("/workspace")
+        }
+
+        fn resolve(&self, path: &str) -> anyhow::Result<PathBuf> {
+            Ok(self.root().join(path))
+        }
+
+        fn canonicalize(&self, path: &Path) -> WorkspaceFuture<'_, PathBuf> {
+            let path = path.to_path_buf();
+            Box::pin(async move { Ok(path) })
+        }
+    }
+
+    impl WorkspaceReader for FakeWorkspace {
+        fn metadata(&self, _path: &Path) -> WorkspaceFuture<'_, WorkspacePathKind> {
+            Box::pin(async { Ok(WorkspacePathKind::File) })
+        }
+
+        fn read(&self, _path: &Path, _max_bytes: usize) -> WorkspaceFuture<'_, WorkspaceRead> {
+            Box::pin(async {
+                Ok(WorkspaceRead {
+                    bytes: Vec::new(),
+                    truncated: false,
+                })
+            })
+        }
+    }
+
+    impl WorkspaceScanner for FakeWorkspace {
+        fn path_kind(&self, _path: &Path) -> WorkspaceFuture<'_, WorkspacePathKind> {
+            Box::pin(async { Ok(WorkspacePathKind::Directory) })
+        }
+
+        fn read_directory(
+            &self,
+            _path: &Path,
+            _max_entries: usize,
+        ) -> WorkspaceFuture<'_, WorkspaceDirectoryEntries> {
+            Box::pin(async {
+                Ok(WorkspaceDirectoryEntries {
+                    paths: Vec::new(),
+                    truncated: false,
+                })
+            })
+        }
+    }
+
+    fn tool() -> SearchFiles {
+        let workspace = Arc::new(FakeWorkspace);
+        SearchFiles {
+            root: PathBuf::from("/workspace"),
+            path_resolver: workspace.clone(),
+            reader: workspace.clone(),
+            scanner: workspace,
+            permission: PermissionRequirement::Automatic,
+        }
+    }
 
     fn context(pattern: &str) -> SearchContext {
         SearchContext::new(PathBuf::from("/workspace"), pattern)
@@ -94,11 +235,7 @@ mod tests {
 
     #[test]
     fn schema_requires_only_pattern_and_path() {
-        let tool = SearchFiles {
-            root: PathBuf::from("/workspace"),
-            permission: PermissionRequirement::Automatic,
-        };
-        let schema = tool.parameters();
+        let schema = tool().parameters();
 
         assert_eq!(schema["required"], serde_json::json!(["pattern", "path"]));
         assert_eq!(schema["additionalProperties"], serde_json::json!(false));
@@ -112,13 +249,8 @@ mod tests {
 
     #[test]
     fn search_files_is_automatic() {
-        let tool = SearchFiles {
-            root: PathBuf::from("/workspace"),
-            permission: PermissionRequirement::Automatic,
-        };
-
         assert_eq!(
-            tool.permission_requirement(),
+            tool().permission_requirement(),
             PermissionRequirement::Automatic
         );
     }

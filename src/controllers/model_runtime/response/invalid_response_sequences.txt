@@ -1,0 +1,5 @@
+<|tool_call|>
+<|tool_call_start|>
+
+<|tool_call|>
+<|tool_call_start|>

@@ -2,15 +2,23 @@
 
 ## Project Structure & Module Organization
 
-Rigel is a Rust 2024 CLI for OpenAI-compatible model APIs. Entry point: `src/main.rs`. Modules:
+Rigel is a Rust 2024 CLI for OpenAI-compatible model APIs. `src/main.rs` is the
+only composition root: it parses CLI input, creates concrete implementations,
+composes use cases through infrastructure traits, and dispatches requests to controllers. Modules:
 
 - `src/cmd/` — CLI parsing
-- `src/controllers/` — request orchestration
-- `src/use_cases/` — application workflows
-- `src/shared/` — shared terminal behavior
+- `src/infrastructure/` — application ports and capability boundaries
 - `src/entities/` — domain entities and value objects
-- `src/prompts/` — LLM prompts and text
+- `src/controllers/` — input/output boundaries and concrete external integrations
+- `src/use_cases/` — provider-neutral application workflows and state transitions
+- `src/prompts/` — static model-facing prompt text
 - `src/tools/` — agent-callable tools
+- `src/shared/` — domain-neutral technical primitives, including terminal loaders
+
+Infrastructure traits describe capabilities without provider or terminal framework types;
+entities hold domain data; use cases implement workflows; controllers own
+external integrations and boundary translation. There is no adapters layer.
+Keep all cross-layer concrete wiring at `src/main.rs`.
 
 Keep static model-facing prompt text in Markdown files under `src/prompts/` and
 include it at compile time with `include_str!`. Keep Rust prompt modules focused
@@ -22,7 +30,7 @@ Declare every production submodule in its nearest `mod.rs` using `pub mod`.
 The crate root (`main.rs`) is the only exception for top-level module declarations.
 Do not declare production submodules from implementation files. Do not re-export
 types with `pub use` or `pub(crate) use`; import them through their declaring
-module path, such as `use crate::entities::selected_model::SelectedModel`.
+module path, such as `use crate::entities::selected_model::selection::SelectedModel`.
 
 - Keep every directory to at most seven files, excluding `mod.rs` from the count.
   Before creating an eighth file, reconsider the decomposition: move a coherent
@@ -35,20 +43,40 @@ technical infrastructure and shared application mechanisms.
 
 ## Chat Run Loop Architecture
 
-`Chat::run` (`src/use_cases/chat/chat.rs`) is core functionality and must remain a
-simple, linear orchestration loop. This is a strict rule, not a style preference.
+`Chat::run` (`src/use_cases/chat/workflow.rs`) is the interactive command-loop boundary
+and must remain straightforward to follow. It delegates user-turn model work through
+infrastructure traits and the opaque model-session boundary. Rig/OpenAI event translation
+stays under `src/controllers/model_runtime/`; chat state transitions, recovery, compaction,
+history mutation, and command handling stay under `src/use_cases/chat/`.
 
-- `Chat::run` sequences high-level steps: read input, run stream, choose completion or recovery path, report turn outcome, continue or exit.
-- Add new substantive steps as named methods on `Chat`, invoked from `run`. This includes parsing, formatting, state transitions, history mutation, recovery prep, and error handling.
-- Do not add nested workflow logic or detailed branch bodies to `run` unless strictly necessary for top-level control flow.
+- `Chat::run` delegates model work through `ModelSession` and application history/interaction traits and does not expose provider types to callers.
+- Keep provider event translation and thin Rig hooks under `src/controllers/model_runtime/`; do not move business policy there.
+- Keep the application boundary linear and easy to inspect; detailed parsing, formatting, state transitions, history mutation, recovery, and error handling belong to named use-case operations behind infrastructure traits.
+- Controllers may implement external capabilities, but must not construct another layer's concrete collaborators; composition belongs in `src/main.rs`.
 - Refactor new logic out of `run` if it makes the loop harder to read. A reviewer must understand one user turn from `run` without reading implementation details.
 
-## Filesystem Tool Architecture
+## Built-in Tool Architecture
 
-- Filesystem interaction is performed through the `run_command` shell tool from Rigel's startup directory.
-- Use shell commands such as `ls`, `rg`, `find`, `rm`, `touch`, and `patch` for inspection and changes.
-- Keep the existing permissions mechanism unchanged; filesystem-changing `run_command` calls remain subject to permission checks.
-- Keep command output bounded and return actionable model-facing diagnostics on failures.
+Rigel currently registers ten built-in tools from the composition root in
+`src/main.rs`; the Rig runtime receives them through the registration boundary:
+
+- `src/tools/tool_ask_user/`
+- `src/tools/tool_run_command/`
+- `src/tools/tool_read_file/`
+- `src/tools/tool_edit_file/`
+- `src/tools/tool_write_file/`
+- `src/tools/tool_search_files/`
+- `src/tools/tool_glob_files/`
+- `src/tools/tool_fetch_url/`
+- `src/tools/tool_spawn_subagent/`
+- `src/tools/tool_mark_goal_complete/`
+
+Use the dedicated workspace tools for ordinary bounded file reads, literal
+searches, glob discovery, and exact edits. `run_command` remains the fallback
+for builds, tests, git, programs, and capabilities not covered by a dedicated
+tool. Keep tool output bounded and return actionable model-facing diagnostics on
+failures. Keep the existing permissions mechanism unchanged; filesystem-changing
+operations remain subject to permission checks.
 
 ## Tool Error Recovery
 
@@ -57,6 +85,9 @@ Recovery handles weak models where malformed and unnecessary tool calls are expe
 - After an error, accept a corrected call or non-empty final answer. Retry only responses containing neither. Prompts must forbid unrelated tool calls.
 - Do not treat arbitrary success as recovery. Only a later non-no-op success from the same tool clears its pending failure (`not_found` does not resolve a previous failure). A final answer may still close the pending state.
 - Recovery is scoped to one agent run. Do not reconstruct failures from old chat history.
+  Subagent orchestration is provider-neutral application behavior in
+  `src/use_cases/subagent/workflow.rs`; its provider session factory belongs under
+  `src/controllers/model_runtime/` and creates fresh, nonpersistent task history.
 - Hard budgets that do not reset: 12 model turns, 6 failed tool executions, 2 identical failures, 2 empty recovery responses, 2 invalid-tool retries. Detect A-B-A-B invocation cycles (including error/no-op).
 - When budget or cycle guard fires: set `ToolChoice::None` for next completion and request a concise final report. If the model still emits tools, stop after invalid-call budget.
 - `ToolRecoveryHook` writes small `rigel_tool_status` markers into model-visible results. `StreamOutputState` consumes them but never suppresses a non-empty final answer.
@@ -109,7 +140,6 @@ Treat the following as mandatory contribution rules:
 - Shallow control flow: no more than two nested `if`/`match` levels. Extract named operations for deeper branching.
 - At most 30 lines of code per function/method. Decompose into named operations rather than compressing.
 - At most 300 lines of non-test Rust code per file, including imports. `#[cfg(test)]` test modules are excluded from this limit regardless of their size.
-- At most 300 characters combined for logic/structs/enums/constants in a file. Test code excluded.
 - Every newly written public struct field or method must have an immediately preceding `///` doc comment. The comment must explain the field or method's purpose, responsibility boundary, usage, and relevant edge cases. Documentation comments count toward the 300-line production-code limit.
 
 ## Testing Guidelines

@@ -104,6 +104,26 @@ pub(crate) fn is_inside(root: &Path, path: &Path) -> bool {
     path.starts_with(root)
 }
 
+/// Identifies generated and metadata directories that bounded searches skip.
+pub(crate) fn is_excluded_directory(path: &Path) -> bool {
+    [
+        ".git",
+        "target",
+        "node_modules",
+        ".venv",
+        "vendor",
+        "dist",
+        "build",
+        ".next",
+    ]
+    .iter()
+    .any(|excluded| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == *excluded)
+    })
+}
+
 fn escapes_workspace(path: &Path) -> bool {
     let mut depth = 0usize;
     for component in path.components() {

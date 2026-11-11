@@ -1,23 +1,11 @@
-use rig::completion::CompletionModel;
-
-use crate::{
-    entities::context_usage::ContextUsage,
-    shared::{
-        agent::dependencies::ConfiguredAgent,
-        compaction::context_compactor::{CompactionKind, CompactionResult, ContextCompactor},
-        history::{chat_history::HistoryUpdate, history_persistence::HistoryPersistence},
-        recovery::turn_recovery::TurnStatus,
-    },
+use crate::entities::conversation::{
+    context_usage::ContextUsage,
+    turn::{CompactionKind, CompactionResult, HistoryUpdate, TurnStatus},
 };
 
-use super::chat::Chat;
+use super::workflow::Chat;
 
-impl<CM, P, GM> Chat<CM, P, GM>
-where
-    CM: CompletionModel + 'static,
-    P: HistoryPersistence,
-    GM: AsyncFn() -> anyhow::Result<ConfiguredAgent<CM>> + 'static,
-{
+impl Chat {
     pub(super) async fn history_updated(&self, update: HistoryUpdate) -> anyhow::Result<()> {
         self.history.update(update).await
     }
@@ -31,19 +19,18 @@ where
     }
 
     pub(super) async fn handle_compaction(&self) -> anyhow::Result<()> {
-        self.terminal_io.eprintln_gray("Compacting started...");
-        if self.compact_context().await? {
-            self.terminal_io.eprintln_gray("Compacting done.");
+        self.io.eprintln_gray("Compacting started...");
+        let compacted = self.compact_context().await?;
+        self.io.eprintln_gray(if compacted {
+            "Compacting done."
         } else {
-            self.terminal_io.eprintln_gray("Compacting failed.");
-        }
+            "Compacting failed."
+        });
         Ok(())
     }
 
     async fn compact_context_kind(&self, kind: CompactionKind) -> anyhow::Result<CompactionResult> {
-        ContextCompactor::new(&self.agent, self.history.as_ref())
-            .compact(kind)
-            .await
+        self.session.lock().await.compact(kind).await
     }
 
     pub(super) async fn compact_after_turn(&self, status: &TurnStatus) -> anyhow::Result<()> {
@@ -53,15 +40,18 @@ where
             return Ok(());
         }
 
-        self.terminal_io.eprintln_red("Compacting context...");
-        let result = ContextCompactor::new(&self.agent, self.history.as_ref())
+        self.io.eprintln_red("Compacting context...");
+        let result = self
+            .session
+            .lock()
+            .await
             .compact(CompactionKind::Automatic)
             .await?;
         if result.kind() == CompactionKind::Automatic && result.compacted() {
             self.reset_used_tokens().await;
-            self.terminal_io.eprintln_red("Context compacted.");
+            self.io.eprintln_red("Context compacted.");
         } else {
-            self.terminal_io.eprintln_red("Compacting failed.");
+            self.io.eprintln_red("Compacting failed.");
         }
         Ok(())
     }

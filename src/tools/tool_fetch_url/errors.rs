@@ -34,13 +34,6 @@ pub(super) fn blocked_network_target() -> ToolExecutionError {
     .with_code(error_codes::INVALID_ARGUMENT)
 }
 
-pub(super) fn blocked_redirect_target() -> ToolExecutionError {
-    ToolExecutionError::network(
-        "Cannot fetch this URL: a redirect target was blocked by the network policy.",
-    )
-    .with_code(error_codes::NETWORK_ERROR)
-}
-
 pub(super) fn invalid_url_scheme(url: &str) -> ToolExecutionError {
     ToolExecutionError::invalid_args(format!(
         "Cannot fetch URL \"{url}\": only HTTP and HTTPS URLs are supported."
@@ -54,17 +47,6 @@ where
 {
     ToolExecutionError::network(format!(
         "Cannot fetch URL \"{url}\": the network request failed."
-    ))
-    .with_code(error_codes::NETWORK_ERROR)
-    .with_source(error)
-}
-
-pub(super) fn response_body_error<E>(url: &str, error: E) -> ToolExecutionError
-where
-    E: Error + Send + Sync + 'static,
-{
-    ToolExecutionError::network(format!(
-        "Cannot read the response body for URL \"{url}\": the network request failed."
     ))
     .with_code(error_codes::NETWORK_ERROR)
     .with_source(error)

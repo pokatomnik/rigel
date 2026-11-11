@@ -1,26 +1,9 @@
-use std::sync::Arc;
+use crate::entities::goal::goal_state::GoalReport;
 
-use rig::completion::CompletionModel;
+use super::workflow::Chat;
 
-use crate::shared::{
-    agent::dependencies::ConfiguredAgent,
-    goal::goal_state::{GoalState, Report},
-};
-
-use super::chat::Chat;
-
-impl<CM, P, GM> Chat<CM, P, GM>
-where
-    CM: CompletionModel + 'static,
-    P: crate::shared::history::history_persistence::HistoryPersistence,
-    GM: AsyncFn() -> anyhow::Result<ConfiguredAgent<CM>> + 'static,
-{
-    pub(crate) fn with_goal_state(mut self, goal_state: Arc<GoalState>) -> Self {
-        self.goal_state = Some(goal_state);
-        self
-    }
-
-    pub(super) fn take_goal_report(&self) -> Option<Report> {
+impl Chat {
+    pub(super) fn take_goal_report(&self) -> Option<GoalReport> {
         self.goal_state
             .as_ref()
             .and_then(|goal_state| goal_state.take_report())
@@ -48,7 +31,11 @@ where
         let goal = goal_state
             .current_goal()
             .ok_or_else(|| anyhow::anyhow!("active goal has no goal text"))?;
-        Ok(crate::prompts::goal::goal_follow_up(goal.as_str()))
+        let provider = self
+            .prompt_provider
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("prompt provider was not configured"))?;
+        Ok(provider.goal_follow_up(goal.as_str()))
     }
 
     pub(super) async fn pursue_goal(&self, goal: String) -> anyhow::Result<()> {

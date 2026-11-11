@@ -1,0 +1,1 @@
+Tools are disabled for this final recovery response because {reason}. The "{tool}" tool call could not be dispatched. Available tools: {available_tools}. Correct its name and arguments, or return a non-empty final answer. Do not call an unrelated tool. Recovery attempt {attempt}/{max_attempts}.

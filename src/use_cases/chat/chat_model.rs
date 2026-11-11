@@ -1,22 +1,28 @@
-use rig::completion::CompletionModel;
+use crate::entities::model::model_session_kind::ModelSessionKind;
 
-use crate::{entities::context_usage::ContextUsage, shared::agent::dependencies::ConfiguredAgent};
+use super::workflow::Chat;
 
-use super::chat::Chat;
-
-impl<CM, P, GM> Chat<CM, P, GM>
-where
-    CM: CompletionModel + 'static,
-    P: crate::shared::history::history_persistence::HistoryPersistence,
-    GM: AsyncFn() -> anyhow::Result<ConfiguredAgent<CM>> + 'static,
-{
+impl Chat {
+    /// Replaces the session only after the factory has built a complete candidate.
     pub(super) async fn handle_change_model(&self) -> anyhow::Result<()> {
-        let new_agent = (self.change_model)().await?;
-        let mut guard = self.agent.lock().await;
-        *guard = new_agent.agent;
-        drop(guard);
-        self.update_context_usage(ContextUsage::new(None, new_agent.max_context_tokens))
-            .await;
+        let factory = self
+            .model_factory
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("model session factory was not configured"))?;
+        let replacement = factory.create(ModelSessionKind::ModelChange, None).await?;
+        let max_context_tokens = replacement.max_context_tokens();
+        let mut session = self.session.lock().await;
+        *session = replacement;
+        drop(session);
+        self.update_context_usage(
+            crate::entities::conversation::context_usage::ContextUsage::new(
+                None,
+                max_context_tokens,
+            ),
+        )
+        .await;
         Ok(())
     }
 }
