@@ -34,6 +34,23 @@ pub(crate) trait ConversationPersistence: Send + Sync + 'static {
         &self,
         messages: &[ConversationMessage],
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '_>>;
+
+    /// Persists a compaction summary, sealing the previous active segment when supported.
+    ///
+    /// The default keeps test and in-memory implementations working with a plain replacement.
+    fn commit_compaction(
+        &self,
+        summary: String,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '_>> {
+        Box::pin(async move { self.save(&[ConversationMessage::Assistant(summary)]).await })
+    }
+
+    /// Deletes every durable segment after an explicit user confirmation.
+    ///
+    /// The default keeps in-memory implementations working with a plain replacement.
+    fn reset(&self) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '_>> {
+        Box::pin(async move { self.save(&[]).await })
+    }
 }
 
 /// Owns a transactional conversation snapshot.
@@ -47,6 +64,21 @@ pub(crate) trait ConversationHistory: Send + Sync {
         update: HistoryUpdate,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '_>>;
 
+    /// Replaces the model context with a compaction summary and seals the previous segment.
+    ///
+    /// The default keeps test and in-memory implementations working with a plain replacement.
+    fn commit_compaction(
+        &self,
+        summary: String,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '_>> {
+        Box::pin(async move {
+            self.update(HistoryUpdate::Replace(vec![
+                ConversationMessage::Assistant(summary),
+            ]))
+            .await
+        })
+    }
+
     /// Marks a model-internal compaction that must not duplicate history callbacks.
     fn begin_compaction(&self);
 
@@ -55,4 +87,9 @@ pub(crate) trait ConversationHistory: Send + Sync {
 
     /// Reports whether compaction currently owns the history boundary.
     fn is_compaction_in_progress(&self) -> bool;
+
+    /// Deletes all durable segments and clears the in-memory snapshot.
+    fn reset(&self) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '_>> {
+        Box::pin(async move { self.update(HistoryUpdate::Replace(Vec::new())).await })
+    }
 }

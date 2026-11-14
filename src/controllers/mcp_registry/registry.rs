@@ -14,82 +14,80 @@ use rmcp::{
     transport::{IntoTransport, StreamableHttpClientTransport, TokioChildProcess},
 };
 use tokio::process::Command;
-use tokio::sync::Mutex;
 
 use crate::{
     controllers::model_runtime::permissions::catalog::ToolPermissionCatalog,
-    entities::configuration::{
-        config::RigelConfig,
-        server_config::{McpHttpConfig, McpServerConfig, McpStdioConfig},
+    entities::{
+        agent_event::status::{McpServerState, McpServerStatus},
+        configuration::{
+            config::RigelConfig,
+            server_config::{McpHttpConfig, McpServerConfig, McpStdioConfig},
+        },
     },
 };
 
 pub(crate) struct McpRegistry {
     connections: Vec<McpConnection>,
-    selected_indices: Mutex<Option<Vec<usize>>>,
+    statuses: Vec<McpServerStatus>,
 }
 
 struct McpConnection {
-    name: String,
     service: RunningService<RoleClient, McpClientHandler>,
     tools: Vec<Tool>,
 }
 
 impl McpRegistry {
-    pub async fn from_config(config: Arc<RigelConfig>) -> anyhow::Result<Self> {
+    /// Connects every configured server and keeps failed servers as visible statuses.
+    ///
+    /// A failed optional server never blocks the chat: its tools are absent and the UI shows a
+    /// red status. Successfully connected servers keep working for the whole session.
+    pub async fn from_config(config: Arc<RigelConfig>) -> Self {
         let tool_server = ToolServer::new().run();
-        let mut connections = Vec::with_capacity(config.mcp_servers().len());
-
-        for (name, server) in config.mcp_servers() {
-            connections.push(server.connect(name.as_str(), tool_server.clone()).await?);
+        let mut names = config
+            .mcp_servers()
+            .keys()
+            .cloned()
+            .collect::<Vec<String>>();
+        names.sort();
+        let mut connections = Vec::with_capacity(names.len());
+        let mut statuses = Vec::with_capacity(names.len());
+        for name in names {
+            let Some(server) = config.mcp_servers().get(&name) else {
+                continue;
+            };
+            match server.connect(name.as_str(), tool_server.clone()).await {
+                Ok(connection) => {
+                    connections.push(connection);
+                    statuses.push(McpServerStatus::new(name, McpServerState::Running));
+                }
+                Err(_) => statuses.push(McpServerStatus::new(name, McpServerState::Failed)),
+            }
         }
-
-        Ok(Self {
+        Self {
             connections,
-            selected_indices: Mutex::new(None),
-        })
-    }
-
-    pub async fn select_tools(&self) -> Vec<(Vec<Tool>, ServerSink)> {
-        if let Some(selected_indices) = self.selected_indices.lock().await.clone() {
-            return self.tools_for(selected_indices.as_slice());
+            statuses,
         }
-
-        self.reselect_tools().await
     }
 
+    /// Returns the configured server states for the header and palette.
+    pub(crate) fn statuses(&self) -> Vec<McpServerStatus> {
+        self.statuses.clone()
+    }
+
+    /// Returns tools from every server that connected successfully.
+    pub async fn select_tools(&self) -> Vec<(Vec<Tool>, ServerSink)> {
+        self.tools()
+    }
+
+    /// Rebuilds the tool list after a session replacement.
     pub async fn reselect_tools(&self) -> Vec<(Vec<Tool>, ServerSink)> {
-        let selected_indices = self.choose_indices();
-        *self.selected_indices.lock().await = Some(selected_indices.clone());
-        self.tools_for(selected_indices.as_slice())
+        self.tools()
     }
 
-    fn choose_indices(&self) -> Vec<usize> {
-        let connection_names = self
-            .connections
-            .iter()
-            .map(|c| c.name.as_str())
-            .collect::<Vec<&str>>();
-        let selected_names = connection_names
-            .clone()
-            .iter()
-            .map(|v| (v.to_string(), true))
-            .collect::<Vec<(String, bool)>>();
-        dialoguer::MultiSelect::new()
-            .with_prompt("Select MCP servers")
-            .report(false)
-            .clear(true)
-            .items_checked(selected_names)
-            .interact()
-            .unwrap_or_default()
-    }
-
-    fn tools_for(&self, selected_indices: &[usize]) -> Vec<(Vec<Tool>, ServerSink)> {
+    fn tools(&self) -> Vec<(Vec<Tool>, ServerSink)> {
         self.connections
             .iter()
-            .enumerate()
-            .filter(|(index, _)| selected_indices.contains(index))
-            .map(|(_, connection)| (connection.tools.clone(), connection.service.peer().clone()))
+            .map(|connection| (connection.tools.clone(), connection.service.peer().clone()))
             .collect()
     }
 }
@@ -120,11 +118,7 @@ trait McpConnector: Send + Sync {
             .await
             .with_context(|| format!("failed to list tools from MCP server `{name}`"))?
             .tools;
-        Ok(McpConnection {
-            service,
-            tools,
-            name: name.to_string(),
-        })
+        Ok(McpConnection { service, tools })
     }
 }
 

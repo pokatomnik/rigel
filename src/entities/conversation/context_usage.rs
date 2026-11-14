@@ -1,7 +1,9 @@
+use serde::{Deserialize, Serialize};
+
 const COMPACTION_THRESHOLD: f64 = 0.8;
 
 /// Tracks provider-neutral token usage and the configured context limit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ContextUsage {
     used_tokens: Option<u64>,
     max_context_tokens: Option<u64>,
@@ -38,13 +40,13 @@ impl ContextUsage {
         let (Some(used), Some(max)) = (self.used_tokens, self.max_context_tokens) else {
             return None;
         };
-        if max == 0 || used > max {
+        if max == 0 {
             return None;
         }
         Some(used as f64 / max as f64)
     }
 
-    /// Applies the 80% compaction rule only when both values are valid.
+    /// Applies the 80% compaction rule, including requests that already exceeded the limit.
     pub(crate) fn should_compact(self) -> bool {
         self.ratio()
             .is_some_and(|ratio| ratio >= COMPACTION_THRESHOLD)
@@ -108,8 +110,15 @@ mod tests {
     fn refuses_to_compact_when_context_data_is_unknown_or_invalid() {
         assert!(!ContextUsage::new(None, Some(1_000)).should_compact());
         assert!(!ContextUsage::new(Some(800), None).should_compact());
-        assert!(!ContextUsage::new(Some(1_001), Some(1_000)).should_compact());
         assert!(!ContextUsage::new(Some(800), Some(0)).should_compact());
+    }
+
+    #[test]
+    fn over_limit_usage_still_requests_compaction() {
+        let usage = ContextUsage::new(Some(1_001), Some(1_000));
+
+        assert_eq!(usage.ratio(), Some(1.001));
+        assert!(usage.should_compact());
     }
 
     #[test]

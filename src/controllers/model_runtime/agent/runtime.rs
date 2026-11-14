@@ -17,7 +17,6 @@ use crate::{
         history::{
             chat_history::ChatHistory,
             history_persistence::{HistoryPersistence, NonPersistentHistory},
-            persistence::History,
         },
         recovery::tool_recovery::ToolRecoveryHook,
         response::invalid_response::InvalidResponseHook,
@@ -30,7 +29,6 @@ use crate::{
         },
     },
     entities::selected_model::selection::SelectedModel,
-    infrastructure::model::ModelCatalog,
 };
 
 const MAX_AGENT_TURNS: usize = 12;
@@ -59,7 +57,7 @@ impl Agent {
     /// Builds a persistent interactive chat session.
     pub(crate) async fn new_chat_agent(
         config: AgentConfig,
-        chat_history: Arc<ChatHistory<History>>,
+        chat_history: Arc<ChatHistory<crate::controllers::storage::history::JsonlHistory>>,
         wiring: Arc<AgentWiring>,
     ) -> anyhow::Result<ConfiguredAgent<CompletionModel>> {
         Self::build_agent(
@@ -79,7 +77,7 @@ impl Agent {
         P: HistoryPersistence,
     {
         let client = Self::build_client(&config, &wiring)?;
-        let selected_model = Self::select_model(&config, &client, &wiring).await?;
+        let selected_model = Self::select_model(&config)?;
         let config = Self::configure_model(config, &selected_model)?;
         let agent = Self { config, wiring };
         agent
@@ -99,20 +97,36 @@ impl Agent {
         let builder = self
             .build_builder(&client, selected_model.id.clone())
             .await?;
+        let summarizer = self
+            .build_summarizer(&client, selected_model.id.clone())
+            .await?;
         let (builder, catalog) = self.register_tools(builder).await?;
         let builder = self.add_hooks(builder, chat_history);
         let manager = self.wiring.permission_manager()?;
+        let prompter = self
+            .wiring
+            .permission_prompter(match self.config.tool_set {
+                AgentToolSet::Chat => {
+                    crate::entities::agent_event::payload::InteractionOrigin::MainAgent
+                }
+                AgentToolSet::Subagent => {
+                    crate::entities::agent_event::payload::InteractionOrigin::Subagent
+                }
+            })?;
         let recovery_factory = self.wiring.recovery_policy_factory()?;
-        let builder = builder.add_hook(ToolPermissionHook::new(
-            self.wiring.terminal_io.clone(),
-            catalog,
-            manager,
-        ));
-        Ok(Self::finish_agent(
-            builder,
-            selected_model,
-            recovery_factory,
-        ))
+        let builder = builder.add_hook(ToolPermissionHook::new(prompter, catalog, manager));
+        let mut configured = Self::finish_agent(builder, selected_model, recovery_factory);
+        configured.summarizer = Some(summarizer);
+        Ok(configured)
+    }
+
+    async fn build_summarizer(
+        &self,
+        client: &rig::providers::openai::Client,
+        model_id: String,
+    ) -> anyhow::Result<rig::Agent<CompletionModel>> {
+        let builder = self.build_builder(client, model_id).await?;
+        Ok(builder.build())
     }
 
     fn configure_model(
@@ -131,7 +145,10 @@ impl Agent {
     ) -> anyhow::Result<AgentBuilder<CompletionModel>> {
         let provider = self.wiring.prompt_provider()?;
         let system_prompt = match self.config.tool_set {
-            AgentToolSet::Chat => provider.chat_system().await?,
+            AgentToolSet::Chat => match self.config.system_prompt.as_deref() {
+                Some(prompt) => prompt.to_string(),
+                None => provider.chat_system().await?,
+            },
             AgentToolSet::Subagent => provider.subagent_system().await?,
         };
         let builder = client
@@ -163,18 +180,12 @@ impl Agent {
         Ok((builder.mcp_tools(&mcp_tools, &mut catalog), catalog))
     }
 
-    async fn select_model(
-        config: &AgentConfig,
-        client: &rig::providers::openai::Client,
-        wiring: &AgentWiring,
-    ) -> anyhow::Result<SelectedModel> {
-        match config.model_id.clone() {
-            Some(model_id) => Ok(SelectedModel::new(model_id, config.model_context_length)),
-            None => {
-                let models = client.models().await?;
-                Ok(wiring.model_selector()?.select(&models).await?)
-            }
-        }
+    fn select_model(config: &AgentConfig) -> anyhow::Result<SelectedModel> {
+        config.selected_model().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Rigel is not configured: select a model that has `context_size` in the config"
+            )
+        })
     }
 
     fn add_hooks<M, P>(
@@ -201,6 +212,7 @@ impl Agent {
                 .add_hook(ToolRecoveryHook::new(recovery_factory))
                 .default_max_turns(MAX_AGENT_TURNS)
                 .build(),
+            summarizer: None,
             max_context_tokens: selected_model.context_length,
             selected_model: Some(selected_model),
         }

@@ -1,90 +1,11 @@
-use rig::{
-    OneOrMany,
-    message::{
-        AssistantContent, Message, Reasoning, Text, ToolCall, ToolResult, ToolResultContent,
-        UserContent,
-    },
-};
+use rig::message::{Text, ToolCall, ToolResult, ToolResultContent};
 
 use crate::{
     controllers::model_runtime::recovery::tool_recovery::tool_recovery_status,
-    controllers::terminal::terminal_io::TerminalIO,
-    entities::conversation::context_usage::ContextUsage, shared::string::string_ext::StringShort,
+    controllers::terminal::terminal_io::TerminalIO, shared::string::string_ext::StringShort,
 };
 
 use super::stream_output_state::StreamOutputState;
-
-pub(crate) fn display_message(
-    terminal_io: &TerminalIO,
-    state: &mut StreamOutputState,
-    message: &Message,
-) -> bool {
-    match message {
-        Message::System { .. } => false,
-        Message::User { content } => {
-            for content in content.iter() {
-                display_user_content(terminal_io, state, content);
-            }
-            false
-        }
-        Message::Assistant { content, .. } => {
-            for content in content.iter() {
-                display_assistant_content(terminal_io, state, content);
-            }
-            assistant_content_needs_line_break(content)
-        }
-    }
-}
-
-fn display_user_content(
-    terminal_io: &TerminalIO,
-    state: &mut StreamOutputState,
-    content: &UserContent,
-) {
-    match content {
-        UserContent::Text(text) => {
-            state.reset();
-            print_user_text(terminal_io, text);
-        }
-        UserContent::ToolResult(tool_result) => print_tool_result(terminal_io, state, tool_result),
-        UserContent::Image(_)
-        | UserContent::Audio(_)
-        | UserContent::Video(_)
-        | UserContent::Document(_) => {}
-    }
-}
-
-fn display_assistant_content(
-    terminal_io: &TerminalIO,
-    state: &mut StreamOutputState,
-    content: &AssistantContent,
-) {
-    match content {
-        AssistantContent::Reasoning(reasoning) => {
-            print_reasoning_block(terminal_io, state, reasoning)
-        }
-        AssistantContent::Text(text) => print_text(terminal_io, state, text),
-        AssistantContent::ToolCall(tool_call) => print_tool_call(terminal_io, tool_call),
-        AssistantContent::Image(_) => {}
-    }
-}
-
-fn print_user_text(terminal_io: &TerminalIO, text: &Text) {
-    terminal_io.print_prompt_prefix(ContextUsage::new(None, None));
-    terminal_io.print(text.text());
-    terminal_io.print("\n");
-}
-
-fn assistant_content_needs_line_break(content: &OneOrMany<AssistantContent>) -> bool {
-    content
-        .iter()
-        .fold(false, |needs_line_break, content| match content {
-            AssistantContent::Reasoning(reasoning) if !reasoning.display_text().is_empty() => true,
-            AssistantContent::Text(text) if !text.text().is_empty() => true,
-            AssistantContent::ToolCall(_) => false,
-            _ => needs_line_break,
-        })
-}
 
 pub(crate) fn print_reasoning(
     terminal_io: &TerminalIO,
@@ -105,12 +26,56 @@ pub(crate) fn print_reasoning(
     terminal_io.flush_stderr();
 }
 
-pub(crate) fn print_reasoning_block(
-    terminal_io: &TerminalIO,
-    state: &mut StreamOutputState,
-    reasoning: &Reasoning,
-) {
-    print_reasoning(terminal_io, state, reasoning.display_text().as_str());
+/// Routes one streamed turn's display to either the terminal or the live event sink.
+pub(crate) struct StreamDisplay<'a> {
+    terminal_io: &'a TerminalIO,
+    state: &'a mut StreamOutputState,
+}
+
+impl<'a> StreamDisplay<'a> {
+    /// Creates a display target for one streamed turn.
+    pub(crate) fn new(terminal_io: &'a TerminalIO, state: &'a mut StreamOutputState) -> Self {
+        Self { terminal_io, state }
+    }
+
+    /// Streams reasoning only when no live event sink is active.
+    pub(crate) fn reasoning(&mut self, reasoning: &str, live: bool) {
+        if live {
+            if !reasoning.trim().is_empty() {
+                self.state.set_received_reasoning(true);
+            }
+            return;
+        }
+        print_reasoning(self.terminal_io, self.state, reasoning);
+    }
+
+    /// Streams answer text only when no live event sink is active.
+    pub(crate) fn text(&mut self, text: &Text, live: bool) {
+        if live {
+            if !text.text().trim().is_empty() {
+                self.state.set_received_answer(true);
+            }
+            return;
+        }
+        print_text(self.terminal_io, self.state, text);
+    }
+
+    /// Records a tool result for recovery and prints it only without live events.
+    pub(crate) fn tool_result(&mut self, tool_result: &ToolResult, live: bool) {
+        if live {
+            self.state
+                .record_tool_result(tool_recovery_status(tool_result));
+            return;
+        }
+        print_tool_result(self.terminal_io, self.state, tool_result);
+    }
+}
+
+/// Prints a tool call only when no live event sink is active.
+pub(crate) fn stream_tool_call(terminal_io: &TerminalIO, tool_call: &ToolCall, live: bool) {
+    if !live {
+        print_tool_call(terminal_io, tool_call);
+    }
 }
 
 pub(crate) fn print_text(terminal_io: &TerminalIO, state: &mut StreamOutputState, text: &Text) {
@@ -156,6 +121,51 @@ fn format_tool_result(tool_result: &ToolResult) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!("[tool result: {}]", output.short(30))
+}
+
+/// Formats a complete tool result for the expanded transcript block without truncation.
+pub(crate) fn format_tool_result_full(tool_result: &ToolResult) -> String {
+    tool_result
+        .content
+        .iter()
+        .filter(|content| !is_recovery_marker(content))
+        .map(format_pretty_content)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_pretty_content(content: &ToolResultContent) -> String {
+    match content {
+        ToolResultContent::Text(text) => text.text.clone(),
+        ToolResultContent::Json { value } => {
+            serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+        }
+        ToolResultContent::Image(image) => format_image(image),
+    }
+}
+
+fn format_image(image: &rig::message::Image) -> String {
+    use rig::message::DocumentSourceKind;
+    let source = match &image.data {
+        DocumentSourceKind::Url(url) => format!("url={url}"),
+        DocumentSourceKind::Base64(data) => format!("base64, {} bytes", data.len()),
+        DocumentSourceKind::FileId(id) => format!("file_id={id}"),
+        DocumentSourceKind::Raw(data) => format!("raw, {} bytes", data.len()),
+        DocumentSourceKind::String(_) => "source=unknown".to_string(),
+        _ => "source=unknown".to_string(),
+    };
+    let media_type = image
+        .media_type
+        .as_ref()
+        .map(|media| format!("{media:?}"))
+        .unwrap_or_else(|| "unknown".to_string());
+    format!("<image {media_type}; {source}>")
+}
+
+fn is_recovery_marker(content: &ToolResultContent) -> bool {
+    content
+        .as_json()
+        .is_some_and(|value| value.get("rigel_tool_status").is_some())
 }
 
 fn format_tool_result_content(content: &ToolResultContent) -> String {

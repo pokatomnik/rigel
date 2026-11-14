@@ -2,73 +2,24 @@ use std::sync::Arc;
 
 use clap::Parser;
 
+#[rustfmt::skip]
 use crate::{
     cmd::{cli::Cli, commands::Commands},
     controllers::{
-        chat_controller::{command_parser::CommandParser, controller::ChatController},
-        configuration::{
-            policy_repository::FileToolPolicyRepository, repository::FileConfigurationRepository,
-        },
-        init_controller::controller::InitController,
-        mcp_registry::registry::McpRegistry,
-        model_runtime::{
-            agent::{
-                agent_config::AgentConfig, agent_tool_set::RegisteredToolSet,
-                dependencies::AgentWiring,
-            },
-            history::{chat_history::ChatHistory, persistence::History},
-            http_fetcher::ReqwestSafeHttpFetcher,
-            model_selector::selection::TerminalModelSelector,
-            model_session::RigModelSessionFactory,
-            subagent_session_factory::RigSubagentSessionFactory,
-        },
-        network::http_client::build_client,
-        skills::catalog::SkillCatalog,
-        terminal::{
-            command_executor::{CommandUsageTelemetry, ProcessCommandExecutor},
-            terminal_io::TerminalIO,
-            user_interaction::TerminalInteraction,
-        },
+        configuration::{policy_repository::FileToolPolicyRepository, repository::FileConfigurationRepository},
+        init_controller::controller::InitController, mcp_registry::registry::McpRegistry,
+        model_runtime::{agent::{agent_config::AgentConfig, agent_tool_set::RegisteredToolSet, dependencies::AgentWiring}, cancellation::TurnCancellation, history::chat_history::ChatHistory, http_fetcher::ReqwestSafeHttpFetcher, session::{factory::RigModelSessionFactory, unconfigured::UnconfiguredModelSession}, subagent_session_factory::RigSubagentSessionFactory},
+        network::http_client::build_client, skills::catalog::SkillCatalog, storage::{history::JsonlHistory, store::bootstrap},
+        terminal::{clipboard::Osc52Clipboard, command_executor::{CommandUsageTelemetry, ProcessCommandExecutor}, terminal_io::TerminalIO},
+        tui::{event_loop::{TuiDependencies, TuiEventLoop}, input::CrosstermInput, lifecycle::TuiLifecycle, renderer::Renderer},
+        ui_bridge::{broker::EventInteractionBroker, channel::open, permission::EventPermissionPrompter, question::EventUserInteraction},
         workspace::filesystem::WorkspaceCapabilities,
     },
-    entities::{
-        application::{chat_request::ChatRequest, init_request::InitRequest},
-        goal::goal_state::GoalState,
-        model::model_session_kind::ModelSessionKind,
-    },
-    infrastructure::{
-        application::ConfigurationInitializer,
-        configuration::ConfigurationRepository,
-        model::ModelSessionFactory,
-        tools::{network::SafeHttpFetcher, permissions::ToolPermissionEvaluator},
-    },
+    entities::{agent_event::{event::AgentEvent, payload::InteractionOrigin}, application::{chat_request::ChatRequest, init_request::InitRequest, input_event::TerminalSize}, goal::goal_state::GoalState, model::model_session_kind::ModelSessionKind, selected_model::selection::SelectedModel, theme::palette::Palette},
+    infrastructure::{application::ConfigurationInitializer, configuration::ConfigurationRepository, model::ModelSessionFactory, skills::repository::SkillRepository, tools::{network::SafeHttpFetcher, permissions::ToolPermissionEvaluator}, ui::gateway::EventSink},
     prompts::provider::StaticPromptProvider,
-    tools::{
-        tool_ask_user::ask_user::AskUser,
-        tool_edit_file::edit_file::EditFile,
-        tool_fetch_url::{fetch_url::FetchUrl, policy::is_allowed_network_target},
-        tool_glob_files::glob_files::GlobFiles,
-        tool_mark_goal_complete::mark_goal_complete::MarkGoalComplete,
-        tool_read_file::read_file::ReadFile,
-        tool_run_command::run_command::RunCommand,
-        tool_search_files::search_files::SearchFiles,
-        tool_spawn_subagent::spawn_subagent::SpawnSubagent,
-        tool_write_file::write_file::WriteFile,
-    },
-    use_cases::{
-        chat::{
-            compaction::compact_context::CompactContext,
-            recovery::policy::DefaultToolRecoveryPolicyFactory,
-        },
-        chat::{
-            history::conversation_history::ConversationHistory as DomainConversationHistory,
-            recovery::turn_recovery_workflow::TurnRecoveryWorkflow, workflow::Chat,
-        },
-        goal::goal_completer::GoalStateCompleter,
-        init::initialize::InitializeConfiguration,
-        permissions::manager::ToolPermissionManager,
-        subagent::workflow::RunSubagent,
-    },
+    tools::{tool_ask_user::ask_user::AskUser, tool_edit_file::edit_file::EditFile, tool_fetch_url::{fetch_url::FetchUrl, policy::is_allowed_network_target}, tool_glob_files::glob_files::GlobFiles, tool_mark_goal_complete::mark_goal_complete::MarkGoalComplete, tool_read_file::read_file::ReadFile, tool_run_command::run_command::RunCommand, tool_search_files::search_files::SearchFiles, tool_spawn_subagent::spawn_subagent::SpawnSubagent, tool_write_file::write_file::WriteFile},
+    use_cases::{chat::{compaction::compact_context::CompactContext, history::conversation_history::ConversationHistory as DomainConversationHistory, recovery::policy::DefaultToolRecoveryPolicyFactory, recovery::turn_recovery_workflow::TurnRecoveryWorkflow, workflow::Chat}, goal::goal_completer::GoalStateCompleter, init::initialize::InitializeConfiguration, permissions::manager::ToolPermissionManager, subagent::workflow::RunSubagent, ui::workflow::UiWorkflow},
 };
 
 pub mod cmd;
@@ -109,60 +60,162 @@ async fn run_chat(
     args: crate::cmd::commands::ChatArgs,
     terminal_io: Arc<TerminalIO>,
 ) -> anyhow::Result<()> {
-    let (request, wiring, agent_config, goal_state) =
-        prepare_chat(args, terminal_io.clone()).await?;
-
-    let (history, messages) = History::bootstrap().await?;
+    TuiLifecycle::ensure_interactive()?;
+    let bootstrapped = bootstrap().await?;
+    let system_prompt = bootstrapped.system_prompt.clone();
+    let endpoints = open();
+    let broker = Arc::new(EventInteractionBroker::new());
+    let cancellation = Arc::new(TurnCancellation::new());
+    let composition = ChatComposition {
+        terminal_io: terminal_io.clone(),
+        events: endpoints.events.clone(),
+        broker: broker.clone(),
+        cancellation: cancellation.clone(),
+    };
+    let (wiring, agent_config, goal_state, models) =
+        prepare_chat(args, composition, system_prompt).await?;
+    let skill_repository = Arc::new(SkillCatalog::from_environment());
+    let skills = SkillRepository::discover(skill_repository.as_ref()).await?;
+    if let Some(prompt) = agent_config.system_prompt() {
+        bootstrapped.history.ensure_system_prompt(prompt).await?;
+    }
+    let history = bootstrapped.history;
+    let messages = bootstrapped.messages;
+    let entries = bootstrapped.entries;
+    let skipped_lines = bootstrapped.skipped_lines;
+    let _history_lock = bootstrapped.lock_guard;
+    #[rustfmt::skip]
+    let last_id = entries.iter().map(|entry| entry.id.value()).max().unwrap_or(0);
+    let next_entry_id = last_id.saturating_add(1);
     let domain_history = Arc::new(DomainConversationHistory::new(messages, history));
-    let provider_history = Arc::new(ChatHistory::<History>::new(domain_history.clone()));
-    let session_factory = Arc::new(RigModelSessionFactory::new(
-        agent_config.clone(),
-        wiring.clone(),
-        provider_history,
-    ));
-    let session = session_factory.create(ModelSessionKind::Chat, None).await?;
-    let chat = Chat::from_session(session, domain_history, terminal_io.clone())
-        .with_command_parser(Arc::new(CommandParser))
-        .with_skill_repository(Arc::new(SkillCatalog::from_environment()))
+    let provider_history = Arc::new(ChatHistory::<JsonlHistory>::new(domain_history.clone()));
+    let factory = RigModelSessionFactory::new(agent_config.clone(), wiring, provider_history);
+    let session_factory = Arc::new(factory);
+    #[rustfmt::skip]
+    let session: Box<dyn crate::infrastructure::model::ModelSession> = if models.is_empty() { Box::new(UnconfiguredModelSession::new()) } else { session_factory.create(ModelSessionKind::Chat, None).await? };
+    let chat = Chat::from_session(session, domain_history)
+        .with_command_source(endpoints.commands.clone())
+        .with_event_sink(endpoints.events.clone())
+        .with_interaction_broker(broker)
+        .with_cancellation(cancellation)
+        .with_next_entry_id(next_entry_id)
+        .with_skill_repository(skill_repository)
         .with_prompt_provider(Arc::new(StaticPromptProvider))
         .with_goal_state(goal_state)
         .with_model_session_factory(session_factory)
         .await;
-    ChatController::new(Arc::new(chat), terminal_io)
-        .handle(request)
-        .await
+    endpoints.events.emit(AgentEvent::HistoryLoaded {
+        entries,
+        skipped_lines,
+    });
+    let mut lifecycle = TuiLifecycle::enter()?;
+    let terminal = lifecycle.take_terminal()?;
+    let size = terminal.size()?;
+    TerminalIO::install_tui_sink(endpoints.events.clone());
+    let renderer = Renderer::new(terminal, Palette::rigel_night());
+    let input = Arc::new(CrosstermInput::start());
+    let workflow = Box::new(
+        UiWorkflow::new(TerminalSize::new(size.width, size.height))
+            .with_clipboard(Arc::new(Osc52Clipboard::new()))
+            .with_skills(skills)
+            .with_startup_models(models),
+    );
+    let mut tui = TuiEventLoop::new(
+        TuiDependencies {
+            input,
+            events: endpoints.incoming.clone(),
+            gateway: endpoints.gateway.clone(),
+            workflow,
+        },
+        renderer,
+    );
+    let chat = Arc::new(chat);
+    let agent = tokio::spawn(async move { chat.run().await });
+    let ui_result = tui.run().await;
+    if ui_result.is_err() {
+        endpoints
+            .gateway
+            .send(crate::entities::agent_command::command::AgentCommand::Exit);
+    }
+    TerminalIO::uninstall_tui_sink();
+    lifecycle.restore();
+    let agent_result = agent.await;
+    ui_result?;
+    agent_result??;
+    Ok(())
 }
-async fn prepare_chat(
-    args: crate::cmd::commands::ChatArgs,
+
+struct ChatComposition {
     terminal_io: Arc<TerminalIO>,
-) -> anyhow::Result<(ChatRequest, Arc<AgentWiring>, AgentConfig, Arc<GoalState>)> {
+    events: Arc<dyn EventSink>,
+    broker: Arc<EventInteractionBroker>,
+    cancellation: Arc<TurnCancellation>,
+}
+
+#[rustfmt::skip]
+async fn prepare_chat(args: crate::cmd::commands::ChatArgs, composition: ChatComposition, saved_system_prompt: Option<String>) -> anyhow::Result<(Arc<AgentWiring>, AgentConfig, Arc<GoalState>, Vec<SelectedModel>)> {
     let request = map_chat_request(args);
     let repository = FileConfigurationRepository::new();
     let profile_path = request.profile_path();
     let permission_paths = repository.paths(profile_path)?;
     let config = Arc::new(repository.load(profile_path).await?);
+    let models = config.configured_models();
     let http_client = build_client(is_allowed_network_target).await?;
-    let mcp_registry = Arc::new(McpRegistry::from_config(config.clone()).await?);
+    let mcp_registry = Arc::new(McpRegistry::from_config(config.clone()).await);
+    let mcp_statuses = mcp_registry.statuses();
+    composition.events.emit(AgentEvent::McpStatusChanged(mcp_statuses));
     let workspace = workspace_capabilities().await?;
     let goal_state = Arc::new(GoalState::new());
     let goal_completer = Arc::new(GoalStateCompleter::new(goal_state.clone()));
     let policy_repository = Arc::new(FileToolPolicyRepository::new());
     let permission_factory = permission_factory(permission_paths, policy_repository);
-    let agent_config = AgentConfig::new(config);
-    let wiring = AgentWiring::new(terminal_io.clone(), http_client.clone(), mcp_registry)
-        .with_goal_completer(goal_completer.clone())
-        .with_prompt_provider(Arc::new(StaticPromptProvider))
-        .with_model_selector(Arc::new(TerminalModelSelector::new(terminal_io.clone())))
-        .with_permission_manager(permission_factory)
-        .with_recovery_policy_factory(Arc::new(DefaultToolRecoveryPolicyFactory::new()))
-        .with_turn_recovery(Arc::new(TurnRecoveryWorkflow::new(Arc::new(
-            StaticPromptProvider,
-        ))))
-        .with_context_compaction(Arc::new(CompactContext));
+    let system_prompt = StaticPromptProvider::effective_chat_system(saved_system_prompt).await?;
+    let agent_config = AgentConfig::new(config).with_system_prompt(system_prompt);
+    let agent_config = match models.first().cloned() {
+        Some(model) => agent_config.with_selected_model(model)?,
+        None => agent_config,
+    };
+    let prompter_broker = composition.broker.clone();
+    let prompter_events = composition.events.clone();
+    let prompter_factory: Arc<
+        dyn Fn(
+                InteractionOrigin,
+            ) -> Arc<dyn crate::infrastructure::interaction::ToolPermissionPrompter>
+            + Send
+            + Sync,
+    > = Arc::new(move |origin| {
+        Arc::new(EventPermissionPrompter::new(
+            prompter_broker.clone(),
+            prompter_events.clone(),
+            origin,
+        ))
+    });
+    let user_interaction = Arc::new(EventUserInteraction::new(
+        composition.broker.clone(),
+        composition.events.clone(),
+        InteractionOrigin::MainAgent,
+    ));
+    let wiring = AgentWiring::new(
+        composition.terminal_io.clone(),
+        http_client.clone(),
+        mcp_registry,
+    )
+    .with_goal_completer(goal_completer.clone())
+    .with_prompt_provider(Arc::new(StaticPromptProvider))
+    .with_permission_manager(permission_factory)
+    .with_permission_prompter_factory(prompter_factory)
+    .with_user_interaction(user_interaction)
+    .with_recovery_policy_factory(Arc::new(DefaultToolRecoveryPolicyFactory::new()))
+    .with_turn_recovery(Arc::new(TurnRecoveryWorkflow::new(Arc::new(
+        StaticPromptProvider,
+    ))))
+    .with_context_compaction(Arc::new(CompactContext))
+    .with_event_sink(composition.events.clone())
+    .with_run_cancellation(composition.cancellation);
     let (chat_tools, subagent_tools) =
         build_tool_sets(&wiring, workspace.as_ref(), &agent_config).await?;
     let wiring = Arc::new(wiring.with_tool_sets(chat_tools, subagent_tools));
-    Ok((request, wiring, agent_config, goal_state))
+    Ok((wiring, agent_config, goal_state, models))
 }
 async fn build_tool_sets(
     wiring: &AgentWiring,
@@ -179,29 +232,23 @@ async fn build_tool_sets(
             .clone()
             .with_tool_sets(Arc::new(RegisteredToolSet::new()), subagent.clone()),
     );
-    let runner = Arc::new(RunSubagent::new(
-        Arc::new(RigSubagentSessionFactory::new(
-            config.clone(),
-            subagent_wiring,
-        )),
-        wiring.prompt_provider()?,
-        wiring.terminal_io(),
+    let factory = Arc::new(RigSubagentSessionFactory::new(
+        config.clone(),
+        subagent_wiring,
     ));
+    let runner = RunSubagent::new(factory, wiring.prompt_provider()?, wiring.terminal_io());
+    let runner = Arc::new(runner.with_events(wiring.event_sink()?));
     let mut chat = RegisteredToolSet::new();
-    chat.add(AskUser::with_interaction(Arc::new(
-        TerminalInteraction::new(wiring.terminal_io()),
-    )));
+    chat.add(AskUser::with_interaction(wiring.user_interaction()?));
     add_workspace_tools(&mut chat, workspace, recorder).await?;
     chat.add(FetchUrl::with_fetcher(fetcher));
     chat.add(SpawnSubagent::with_runner(runner));
     chat.add(MarkGoalComplete::new(wiring.goal_completer()?));
     Ok((Arc::new(chat), subagent))
 }
+#[rustfmt::skip]
 fn map_init_request(args: crate::cmd::commands::InitArgs) -> InitRequest {
-    InitRequest::new(
-        args.base_url().to_string(),
-        args.api_key_env().map(ToOwned::to_owned),
-    )
+    InitRequest::new(args.base_url().to_string(), args.api_key_env().map(ToOwned::to_owned))
 }
 async fn workspace_capabilities() -> anyhow::Result<Arc<WorkspaceCapabilities>> {
     let current_dir = std::env::current_dir()?;
@@ -211,72 +258,37 @@ async fn workspace_capabilities() -> anyhow::Result<Arc<WorkspaceCapabilities>> 
 fn map_chat_request(args: crate::cmd::commands::ChatArgs) -> ChatRequest {
     ChatRequest::new(args.profile_path().map(ToOwned::to_owned))
 }
-fn permission_factory(
-    paths: crate::entities::configuration::paths::ConfigurationPaths,
-    repository: Arc<FileToolPolicyRepository>,
-) -> Arc<dyn Fn() -> Arc<dyn ToolPermissionEvaluator> + Send + Sync> {
-    Arc::new(move || {
-        Arc::new(ToolPermissionManager::new(
-            paths.clone(),
-            repository.clone(),
-        )) as Arc<dyn ToolPermissionEvaluator>
-    })
+#[rustfmt::skip]
+fn permission_factory(paths: crate::entities::configuration::paths::ConfigurationPaths, repository: Arc<FileToolPolicyRepository>) -> Arc<dyn Fn() -> Arc<dyn ToolPermissionEvaluator> + Send + Sync> {
+    Arc::new(move || Arc::new(ToolPermissionManager::new(paths.clone(), repository.clone())) as Arc<dyn ToolPermissionEvaluator>)
 }
 
-async fn build_subagent_tools(
-    workspace: &WorkspaceCapabilities,
-    fetcher: Arc<dyn SafeHttpFetcher>,
-    recorder: Arc<CommandUsageTelemetry>,
-) -> anyhow::Result<RegisteredToolSet> {
+#[rustfmt::skip]
+async fn build_subagent_tools(workspace: &WorkspaceCapabilities, fetcher: Arc<dyn SafeHttpFetcher>, recorder: Arc<CommandUsageTelemetry>) -> anyhow::Result<RegisteredToolSet> {
     let mut tools = RegisteredToolSet::new();
     add_workspace_tools(&mut tools, workspace, recorder).await?;
     tools.add(FetchUrl::with_fetcher(fetcher));
     Ok(tools)
 }
 
-async fn add_workspace_tools(
-    tools: &mut RegisteredToolSet,
-    workspace: &WorkspaceCapabilities,
-    recorder: Arc<CommandUsageTelemetry>,
-) -> anyhow::Result<()> {
-    tools.add(RunCommand::with_adapters(
-        workspace.root(),
-        Arc::new(ProcessCommandExecutor::new_default()),
-        recorder,
-    ));
+#[rustfmt::skip]
+async fn add_workspace_tools(tools: &mut RegisteredToolSet, workspace: &WorkspaceCapabilities, recorder: Arc<CommandUsageTelemetry>) -> anyhow::Result<()> {
+    tools.add(RunCommand::with_adapters(workspace.root(), Arc::new(ProcessCommandExecutor::new_default()), recorder));
     add_file_tools(tools, workspace).await?;
     add_search_tools(tools, workspace).await
 }
 
-async fn add_file_tools(
-    tools: &mut RegisteredToolSet,
-    workspace: &WorkspaceCapabilities,
-) -> anyhow::Result<()> {
+#[rustfmt::skip]
+async fn add_file_tools(tools: &mut RegisteredToolSet, workspace: &WorkspaceCapabilities) -> anyhow::Result<()> {
     tools.add(ReadFile::new(workspace.path_resolver.clone(), workspace.reader.clone()).await?);
-    tools.add(
-        EditFile::new(
-            workspace.path_resolver.clone(),
-            workspace.reader.clone(),
-            workspace.writer.clone(),
-        )
-        .await?,
-    );
+    tools.add(EditFile::new(workspace.path_resolver.clone(), workspace.reader.clone(), workspace.writer.clone()).await?);
     tools.add(WriteFile::new(workspace.path_resolver.clone(), workspace.writer.clone()).await?);
     Ok(())
 }
 
-async fn add_search_tools(
-    tools: &mut RegisteredToolSet,
-    workspace: &WorkspaceCapabilities,
-) -> anyhow::Result<()> {
-    tools.add(
-        SearchFiles::new(
-            workspace.path_resolver.clone(),
-            workspace.reader.clone(),
-            workspace.scanner.clone(),
-        )
-        .await?,
-    );
+#[rustfmt::skip]
+async fn add_search_tools(tools: &mut RegisteredToolSet, workspace: &WorkspaceCapabilities) -> anyhow::Result<()> {
+    tools.add(SearchFiles::new(workspace.path_resolver.clone(), workspace.reader.clone(), workspace.scanner.clone()).await?);
     tools.add(GlobFiles::new(workspace.path_resolver.clone(), workspace.scanner.clone()).await?);
     Ok(())
 }
@@ -378,11 +390,18 @@ mod tests {
     struct FakeInteraction;
 
     impl UserInteraction for FakeInteraction {
-        fn select(&self, _: &str, _: &[String]) -> anyhow::Result<Option<usize>> {
-            Ok(None)
+        fn select<'a>(
+            &'a self,
+            _: &'a str,
+            _: &'a [String],
+        ) -> futures::future::BoxFuture<'a, anyhow::Result<Option<usize>>> {
+            Box::pin(async { Ok(None) })
         }
-        fn readline(&self, _: ContextUsage) -> anyhow::Result<InputOutcome> {
-            Ok(InputOutcome::Eof)
+        fn readline<'a>(
+            &'a self,
+            _: ContextUsage,
+        ) -> futures::future::BoxFuture<'a, anyhow::Result<InputOutcome>> {
+            Box::pin(async { Ok(InputOutcome::Eof) })
         }
     }
 

@@ -15,7 +15,10 @@ mod legacy {
                 history_persistence::NonPersistentHistory,
             },
             recovery::turn_recovery::TurnRecoverer,
-            streaming::streamed_turn::{StreamRunOutcome, StreamedTurn, StreamedTurnContext},
+            streaming::{
+                streamed_turn::{StreamRunOutcome, StreamedTurn},
+                turn_context::StreamedTurnContext,
+            },
         },
         controllers::terminal::terminal_io::TerminalIO,
         entities::{
@@ -148,6 +151,7 @@ mod legacy {
             let context_usage = match &outcome {
                 StreamRunOutcome::Completed(completion) => completion.context_usage(),
                 StreamRunOutcome::Failed(failure) => failure.context_usage(),
+                StreamRunOutcome::Cancelled { context_usage } => *context_usage,
             };
             let request = self.recovery_request(&outcome);
             let Some(request) = request else {
@@ -180,7 +184,7 @@ mod legacy {
                 StreamRunOutcome::Completed(completion) if !completion.has_output() => {
                     Some(RecoveryRequest::MissingAnswer)
                 }
-                StreamRunOutcome::Completed(_) => None,
+                StreamRunOutcome::Completed(_) | StreamRunOutcome::Cancelled { .. } => None,
             }
         }
 
@@ -192,6 +196,9 @@ mod legacy {
                 }),
                 StreamRunOutcome::Failed(failure) => {
                     anyhow::bail!("subagent failed: {}", failure.error())
+                }
+                StreamRunOutcome::Cancelled { context_usage } => {
+                    Ok(TurnStatus::Stopped { context_usage })
                 }
             }
         }

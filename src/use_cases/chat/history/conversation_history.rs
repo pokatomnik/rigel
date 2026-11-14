@@ -61,6 +61,22 @@ where
         *messages = candidate;
         Ok(())
     }
+
+    /// Commits a compaction summary and replaces the context with that summary.
+    async fn commit_compaction_transition(&self, summary: String) -> anyhow::Result<()> {
+        let mut messages = self.messages.lock().await;
+        self.persistence.commit_compaction(summary.clone()).await?;
+        *messages = vec![ConversationMessage::Assistant(summary)];
+        Ok(())
+    }
+
+    /// Deletes every durable segment before clearing the in-memory snapshot.
+    pub(crate) async fn reset_messages(&self) -> anyhow::Result<()> {
+        let mut messages = self.messages.lock().await;
+        self.persistence.reset().await?;
+        messages.clear();
+        Ok(())
+    }
 }
 
 impl<P> crate::infrastructure::conversation::ConversationHistory for ConversationHistory<P>
@@ -78,6 +94,13 @@ where
         Box::pin(async move { self.update_messages(update).await })
     }
 
+    fn commit_compaction(
+        &self,
+        summary: String,
+    ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '_>> {
+        Box::pin(async move { self.commit_compaction_transition(summary).await })
+    }
+
     fn begin_compaction(&self) {
         self.begin_compaction();
     }
@@ -88,6 +111,10 @@ where
 
     fn is_compaction_in_progress(&self) -> bool {
         self.is_compaction_in_progress()
+    }
+
+    fn reset(&self) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '_>> {
+        Box::pin(async move { self.reset_messages().await })
     }
 }
 
@@ -147,6 +174,35 @@ mod tests {
         }
     }
 
+    struct CompactionPersistence {
+        calls: Arc<Mutex<usize>>,
+        fail: bool,
+    }
+
+    impl ConversationPersistence for CompactionPersistence {
+        fn save(
+            &self,
+            _messages: &[ConversationMessage],
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+            Box::pin(async { anyhow::bail!("ordinary save must not run for compaction") })
+        }
+
+        fn commit_compaction(
+            &self,
+            _summary: String,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+            let calls = self.calls.clone();
+            let fail = self.fail;
+            Box::pin(async move {
+                *calls.lock().await += 1;
+                if fail {
+                    anyhow::bail!("write failed");
+                }
+                Ok(())
+            })
+        }
+    }
+
     #[tokio::test]
     async fn persistence_commits_before_memory_changes() -> Result<()> {
         let snapshots = Arc::new(Mutex::new(Vec::new()));
@@ -187,6 +243,53 @@ mod tests {
         ensure!(
             history.snapshot_messages().await == [ConversationMessage::User("before".to_string())]
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn compaction_uses_the_storage_transition_and_replaces_memory() -> Result<()> {
+        let calls = Arc::new(Mutex::new(0));
+        let history = ConversationHistory::new(
+            vec![ConversationMessage::User("before".to_string())],
+            CompactionPersistence {
+                calls: calls.clone(),
+                fail: false,
+            },
+        );
+
+        history
+            .commit_compaction_transition("summary".to_string())
+            .await?;
+
+        ensure!(
+            history.snapshot_messages().await
+                == [ConversationMessage::Assistant("summary".to_string())]
+        );
+        ensure!(*calls.lock().await == 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_compaction_keeps_the_previous_snapshot() -> Result<()> {
+        let calls = Arc::new(Mutex::new(0));
+        let history = ConversationHistory::new(
+            vec![ConversationMessage::User("before".to_string())],
+            CompactionPersistence {
+                calls: calls.clone(),
+                fail: true,
+            },
+        );
+
+        ensure!(
+            history
+                .commit_compaction_transition("summary".to_string())
+                .await
+                .is_err()
+        );
+        ensure!(
+            history.snapshot_messages().await == [ConversationMessage::User("before".to_string())]
+        );
+        ensure!(*calls.lock().await == 1);
         Ok(())
     }
 }

@@ -41,6 +41,9 @@ the project layer remains optional.
 baseUrl = "http://127.0.0.1:1234/v1"
 envKey = "OPENAI_API_KEY"
 
+[models."exact-model-id"]
+context_size = 128000
+
 [models."exact-model-id".params]
 reasoning_effort = "high"
 
@@ -63,6 +66,12 @@ allow = true
 `envKey` is the name of the environment variable from which Rigel reads the
 API key. Keep the secret in the environment rather than in `config.toml`.
 
+`context_size` is required for every selectable model and is expressed in
+tokens. Rigel does not query `/models` and does not derive a context size from
+the provider. Models without `context_size` are hidden from the model palette;
+if no configured model has it, Rigel shows that it is not configured and offers
+only exit. There is no default or fallback context size.
+
 ## Tool permissions
 
 Policies are keyed by the runtime tool name. The project policy takes
@@ -83,11 +92,22 @@ choices are never saved. `rigel init` does not add policies.
 
 ## Model parameters
 
-The key under `models` must exactly match the model ID, including letter case.
+The key under `models` must exactly match the model ID used by the provider,
+including letter case. Every entry needs `context_size` to appear in the model
+palette:
+
+```toml
+[models."exact-model-id"]
+context_size = 128000
+
+[models."exact-model-id".params]
+reasoning_effort = "high"
+```
+
 The `params` table is forwarded as additional top-level JSON request fields.
 Values can be TOML strings, booleans, numbers, arrays, or nested tables. Rigel
 does not normalize provider-specific parameters; the provider defines their
-meaning.
+meaning. A zero `context_size` is rejected when the configuration is loaded.
 
 Do not put `model`, `messages`, `tools`, `tool_choice`, `temperature`,
 `max_tokens`, or `stream` in `params`. These fields belong to Rigel's request
@@ -97,9 +117,10 @@ transport and are rejected when configured there.
 
 An `stdio` server starts a local process. `command` is required; `args` and
 `env` are optional. An `http` server uses the required `url` field. Rigel
-connects to every configured MCP server and lists its tools while creating
-`McpRegistry` at startup, before the chat begins. MCP tools are then available
-to the agent according to the server selection flow.
+connects to every configured MCP server at startup. Servers that fail to start
+are skipped, their tools are absent, and their status is shown in the header
+and the MCP-server palette level. Successfully connected servers keep working
+for the session; there is no server-selection flow.
 
 ## Adding skills
 
@@ -118,8 +139,8 @@ unavailable.
 
 ## Using skills
 
-Enter `/skills` in the interactive chat to see the available skills and choose
-one from the interactive selector. `/skill` is a compatible alias for
-`/skills`. Only the skill selected by the user is sent to the agent; discovered
-skills are not all added automatically to every request. The built-in
-`configure-rigel` skill is always available and is compiled into Rigel.
+Open the command palette in the interactive chat (`Ctrl+K`, or `/` in an empty
+composer), choose **Use a skill…**, and select one from the list. Only the skill
+selected by the user is sent to the agent; discovered skills are not all added
+automatically to every request. The built-in `configure-rigel` skill is always
+available and is compiled into Rigel.

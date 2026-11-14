@@ -1,11 +1,17 @@
+pub mod agent_command;
+pub mod agent_event;
 pub mod application;
 pub mod configuration;
 pub mod conversation;
 pub mod goal;
 pub mod model;
+pub mod palette;
 pub mod recovery;
+pub mod render_model;
 pub mod selected_model;
 pub mod skill;
+pub mod theme;
 pub mod tool;
 pub mod tool_confirm_result;
+pub mod transcript;
 pub mod workspace;

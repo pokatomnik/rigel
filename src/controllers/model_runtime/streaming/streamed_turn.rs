@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use rig::{
     Agent,
-    agent::{MultiTurnStreamItem, PromptResponse, StreamingError},
+    agent::{PromptResponse, StreamingError},
     completion::CompletionModel,
     message::Message,
     streaming::StreamingChat,
@@ -22,13 +22,16 @@ use crate::{
             recovery_error::recovery_context_from_streaming_error,
             tool_recovery::MAX_INVALID_TOOL_CALL_ATTEMPTS,
         },
-        streaming::{progress::StreamProgress, stream_output_state::StreamOutputState},
+        streaming::{
+            progress::StreamProgress, stream_output_state::StreamOutputState,
+            turn_context::StreamedTurnContext,
+        },
     },
     controllers::terminal::terminal_io::TerminalIO,
     entities::{
         conversation::context_usage::ContextUsage, selected_model::selection::SelectedModel,
     },
-    shared::terminal::loader::SpinnerGuard,
+    infrastructure::ui::{cancellation::RunCancellation, gateway::EventSink},
 };
 
 pub(crate) struct StreamCompletion {
@@ -62,6 +65,11 @@ impl StreamCompletion {
 pub(crate) enum StreamRunOutcome {
     Completed(StreamCompletion),
     Failed(StreamFailure),
+    /// A soft stop interrupted the stream before a final response arrived.
+    Cancelled {
+        /// Usage observed before the interruption.
+        context_usage: ContextUsage,
+    },
 }
 
 pub(crate) struct StreamFailure {
@@ -79,34 +87,6 @@ impl StreamFailure {
     }
 }
 
-pub(crate) struct StreamedTurnContext<'a, P>
-where
-    P: HistoryPersistence,
-{
-    history: &'a ChatHistory<P>,
-    context_usage: ContextUsage,
-    selected_model: Option<SelectedModel>,
-}
-
-impl<'a, P> StreamedTurnContext<'a, P>
-where
-    P: HistoryPersistence,
-{
-    pub(crate) fn new(history: &'a ChatHistory<P>, context_usage: ContextUsage) -> Self {
-        Self {
-            history,
-            context_usage,
-            selected_model: None,
-        }
-    }
-
-    /// Adds the selected model metadata for tools that create delegated sessions.
-    pub(crate) fn with_selected_model(mut self, model: SelectedModel) -> Self {
-        self.selected_model = Some(model);
-        self
-    }
-}
-
 /// Executes one streamed model turn and commits its durable boundaries.
 pub(crate) struct StreamedTurn<'a, CM, P>
 where
@@ -119,6 +99,9 @@ where
     max_context_tokens: Option<u64>,
     context_usage: ContextUsage,
     selected_model: Option<SelectedModel>,
+    events: Option<Arc<dyn EventSink>>,
+    cancellation: Option<Arc<dyn RunCancellation>>,
+    turn_id: u64,
 }
 
 impl<'a, CM, P> StreamedTurn<'a, CM, P>
@@ -151,6 +134,9 @@ where
             max_context_tokens: context.context_usage.max_context_tokens(),
             context_usage: context.context_usage,
             selected_model: context.selected_model,
+            events: context.events,
+            cancellation: context.cancellation,
+            turn_id: context.turn_id,
         }
     }
 
@@ -176,8 +162,12 @@ where
         self.history
             .update(HistoryUpdate::Append(Message::user(prompt.clone())))
             .await?;
-        let mut progress = StreamProgress::new(base.clone(), prompt.clone());
-        let mut loader = SpinnerGuard::start();
+        let mut progress = StreamProgress::new(
+            base.clone(),
+            prompt.clone(),
+            self.events.clone(),
+            self.turn_id,
+        );
         let request = {
             let agent = self.agent.lock().await;
             agent
@@ -188,12 +178,10 @@ where
         let mut stream = request.await;
 
         while let Some(item) = stream.next().await {
-            if matches!(
-                &item,
-                Ok(MultiTurnStreamItem::StreamAssistantItem(_))
-                    | Ok(MultiTurnStreamItem::StreamUserItem(_))
-            ) {
-                loader.hide();
+            if self.is_cancelled() {
+                return Ok(StreamRunOutcome::Cancelled {
+                    context_usage: progress.context_usage(self.max_context_tokens),
+                });
             }
             if !progress
                 .accept(item, self.terminal_io, self.history)
@@ -204,6 +192,12 @@ where
         }
 
         self.finish(progress, base).await
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_some_and(|cancellation| cancellation.is_cancelled())
     }
 
     async fn finish(
@@ -291,7 +285,8 @@ mod tests {
     };
     use tokio::sync::Mutex;
 
-    use super::{StreamRunOutcome, StreamedTurn, StreamedTurnContext};
+    use super::{StreamRunOutcome, StreamedTurn};
+    use crate::controllers::model_runtime::streaming::turn_context::StreamedTurnContext;
     use crate::{
         controllers::model_runtime::history_sync::HistorySyncHook,
         controllers::model_runtime::{

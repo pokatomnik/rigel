@@ -103,6 +103,9 @@ impl TurnRecoveryWorkflow {
         context_usage: &mut ContextUsage,
         last_error: &mut Option<String>,
     ) -> Option<TurnStatus> {
+        if let RecoveryOutcome::Cancelled { context_usage } = outcome {
+            return Some(TurnStatus::Stopped { context_usage });
+        }
         if outcome.has_output() {
             return outcome.into_completed_status().ok();
         }

@@ -72,7 +72,7 @@ impl AskUser {
         Ok(())
     }
 
-    fn answer(
+    async fn answer(
         &self,
         args: &AskUserArgs,
         context: &ToolContext,
@@ -81,10 +81,11 @@ impl AskUser {
         let selection = self
             .interaction
             .select(&args.question, &items)
+            .await
             .map_err(interaction_error)?;
         match selection {
             Some(index) if index < args.answers.len() => Ok(args.answers[index].clone()),
-            Some(index) if index == args.answers.len() => self.free_answer(context),
+            Some(index) if index == args.answers.len() => self.free_answer(context).await,
             Some(_) => Err(interaction_unavailable(
                 "the selection UI returned an invalid item.",
             )),
@@ -92,12 +93,13 @@ impl AskUser {
         }
     }
 
-    fn free_answer(&self, context: &ToolContext) -> Result<String, ToolExecutionError> {
+    async fn free_answer(&self, context: &ToolContext) -> Result<String, ToolExecutionError> {
         let context_usage = context_usage(context)?;
         loop {
             match self
                 .interaction
                 .readline(context_usage)
+                .await
                 .map_err(interaction_error)?
             {
                 InputOutcome::Text(answer) if answer.trim().is_empty() => continue,
@@ -177,7 +179,7 @@ impl Tool for AskUser {
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
         Self::validate_arguments(&args)?;
-        let answer = self.answer(&args, context)?;
+        let answer = self.answer(&args, context).await?;
         Ok(Self::output(answer))
     }
 }
@@ -288,30 +290,37 @@ mod tests {
     }
 
     impl UserInteraction for StubInteraction {
-        fn select(
-            &self,
-            _question: &str,
-            items: &[String],
-        ) -> Result<Option<usize>, anyhow::Error> {
+        fn select<'a>(
+            &'a self,
+            _question: &'a str,
+            items: &'a [String],
+        ) -> futures::future::BoxFuture<'a, Result<Option<usize>, anyhow::Error>> {
             if let Ok(mut captured) = self.items.lock() {
                 *captured = items.to_vec();
             }
-            self.selections
+            let selection = self
+                .selections
                 .lock()
                 .ok()
                 .and_then(|mut selections| selections.pop_front())
-                .unwrap_or_else(|| Err(anyhow::Error::new(InteractionFailure::Unavailable)))
+                .unwrap_or_else(|| Err(anyhow::Error::new(InteractionFailure::Unavailable)));
+            Box::pin(async move { selection })
         }
 
-        fn readline(&self, context_usage: ContextUsage) -> Result<InputOutcome, anyhow::Error> {
+        fn readline<'a>(
+            &'a self,
+            context_usage: ContextUsage,
+        ) -> futures::future::BoxFuture<'a, Result<InputOutcome, anyhow::Error>> {
             if let Ok(mut contexts) = self.contexts.lock() {
                 contexts.push(context_usage);
             }
-            self.inputs
+            let outcome = self
+                .inputs
                 .lock()
                 .ok()
                 .and_then(|mut inputs| inputs.pop_front())
-                .unwrap_or_else(|| Err(anyhow::Error::new(InteractionFailure::Unavailable)))
+                .unwrap_or_else(|| Err(anyhow::Error::new(InteractionFailure::Unavailable)));
+            Box::pin(async move { outcome })
         }
     }
 

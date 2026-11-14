@@ -13,6 +13,16 @@ use crate::{
 /// Runtime adapter that composes the static prompt assets for provider clients.
 pub(crate) struct StaticPromptProvider;
 
+impl StaticPromptProvider {
+    /// Reuses the saved prompt for an existing history or builds the current default.
+    pub(crate) async fn effective_chat_system(saved: Option<String>) -> anyhow::Result<String> {
+        match saved {
+            Some(prompt) => Ok(prompt),
+            None => Ok(chat_system_prompt().await),
+        }
+    }
+}
+
 impl PromptProvider for StaticPromptProvider {
     fn chat_system(
         &self,

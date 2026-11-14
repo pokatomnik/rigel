@@ -5,8 +5,6 @@ use futures::future::BoxFuture;
 #[cfg(test)]
 use rig::message::Message;
 
-use super::persistence::History;
-
 pub(crate) trait HistoryPersistence: Send + Sync + 'static {
     #[cfg(test)]
     fn save<'a>(&'a self, messages: &'a [Message]) -> BoxFuture<'a, anyhow::Result<()>>;
@@ -19,13 +17,6 @@ impl HistoryPersistence for NonPersistentHistory {
     #[cfg(test)]
     fn save<'a>(&'a self, _messages: &'a [Message]) -> BoxFuture<'a, anyhow::Result<()>> {
         Box::pin(async { Ok(()) })
-    }
-}
-
-impl HistoryPersistence for History {
-    #[cfg(test)]
-    fn save<'a>(&'a self, messages: &'a [Message]) -> BoxFuture<'a, anyhow::Result<()>> {
-        Box::pin(async move { History::save_provider(self, messages).await })
     }
 }
 

@@ -32,12 +32,15 @@ impl CompactContext {
         history: &dyn ConversationHistory,
     ) -> anyhow::Result<CompactionResult> {
         let original = history.snapshot().await;
-        history.begin_compaction();
+        let guard = CompactionGuard::begin(history);
         let summary = summarizer.summarize(original.as_slice()).await;
-        history.end_compaction();
+        guard.finish();
         match summary {
             Ok(text) => self.commit_summary(kind, text, history).await,
-            Err(_) => self.restore_original(kind, original, history).await,
+            Err(error) => {
+                self.restore_original(original, history).await?;
+                Err(error)
+            }
         }
     }
 
@@ -47,22 +50,49 @@ impl CompactContext {
         summary: String,
         history: &dyn ConversationHistory,
     ) -> anyhow::Result<CompactionResult> {
-        history
-            .update(HistoryUpdate::Replace(vec![
-                ConversationMessage::Assistant(summary),
-            ]))
-            .await?;
+        history.commit_compaction(summary).await?;
         Ok(CompactionResult::new(kind, true))
     }
 
     async fn restore_original(
         &self,
-        kind: CompactionKind,
         original: Vec<ConversationMessage>,
         history: &dyn ConversationHistory,
-    ) -> anyhow::Result<CompactionResult> {
-        history.update(HistoryUpdate::Replace(original)).await?;
-        Ok(CompactionResult::new(kind, false))
+    ) -> anyhow::Result<()> {
+        history.update(HistoryUpdate::Replace(original)).await
+    }
+}
+
+/// Releases the compaction marker even when the future is cancelled.
+struct CompactionGuard<'a> {
+    history: &'a dyn ConversationHistory,
+    released: bool,
+}
+
+impl<'a> CompactionGuard<'a> {
+    fn begin(history: &'a dyn ConversationHistory) -> Self {
+        history.begin_compaction();
+        Self {
+            history,
+            released: false,
+        }
+    }
+
+    fn finish(mut self) {
+        self.release();
+    }
+
+    fn release(&mut self) {
+        if !self.released {
+            self.history.end_compaction();
+            self.released = true;
+        }
+    }
+}
+
+impl Drop for CompactionGuard<'_> {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -195,22 +225,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn summarizer_failure_restores_original_and_reports_not_compacted() -> anyhow::Result<()>
-    {
+    async fn summarizer_failure_restores_original_and_returns_the_cause() -> anyhow::Result<()> {
         let original = original_messages();
         let history = Arc::new(FakeHistory::new(original.clone()));
         let summarizer = FakeSummarizer::new(Err("model failed".to_string()), history.clone());
         let result = compactor()
             .compact(CompactionKind::Automatic, &summarizer, history.as_ref())
-            .await?;
+            .await;
+        let error = match result {
+            Ok(_) => anyhow::bail!("summarizer failure was reported as success"),
+            Err(error) => error,
+        };
 
-        assert!(!result.compacted());
-        assert_eq!(result.kind(), CompactionKind::Automatic);
+        assert!(error.to_string().contains("model failed"));
         assert_eq!(history.messages.lock().await.as_slice(), original);
         assert!(summarizer.observed_compaction.load(Ordering::SeqCst));
         assert!(!history.is_compaction_in_progress());
         assert_eq!(history.begins.load(Ordering::SeqCst), 1);
         assert_eq!(history.ends.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn empty_summary_is_committed_as_an_explicit_risk() -> anyhow::Result<()> {
+        let history = Arc::new(FakeHistory::new(original_messages()));
+        let summarizer = FakeSummarizer::new(Ok(String::new()), history.clone());
+        let result = compactor()
+            .compact(CompactionKind::Manual, &summarizer, history.as_ref())
+            .await?;
+
+        assert!(result.compacted());
+        assert_eq!(
+            history.messages.lock().await.as_slice(),
+            [ConversationMessage::Assistant(String::new())]
+        );
         Ok(())
     }
 

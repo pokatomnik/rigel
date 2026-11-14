@@ -98,7 +98,7 @@ impl ToolPermissionManager {
         if requirement == PermissionRequirement::Automatic {
             return ToolPermissionDecision::Allow;
         }
-        self.apply_confirmation(request, prompter.confirm(request))
+        self.apply_confirmation(request, prompter.confirm(request).await)
             .await
     }
 
@@ -238,15 +238,20 @@ mod tests {
     }
 
     impl ToolPermissionPrompter for StubPrompter {
-        fn confirm(&self, _request: &ToolPermissionRequest) -> ToolConfirmResult {
+        fn confirm<'a>(
+            &'a self,
+            _request: &'a ToolPermissionRequest,
+        ) -> futures::future::BoxFuture<'a, ToolConfirmResult> {
             if let Ok(mut prompts) = self.prompts.lock() {
                 *prompts += 1;
             }
-            self.results
+            let result = self
+                .results
                 .lock()
                 .ok()
                 .and_then(|mut results| results.pop())
-                .unwrap_or_default()
+                .unwrap_or_default();
+            Box::pin(async move { result })
         }
     }
 
@@ -257,10 +262,10 @@ mod tests {
             ToolConfirmResult::Deny,
             ToolConfirmResult::AllowForSession,
         ]);
-        let request = ToolPermissionRequest::new("run_command".to_string());
+        let request = ToolPermissionRequest::new("run_command".to_string(), serde_json::json!({}));
 
         let first = manager
-            .apply_confirmation(&request, prompter.confirm(&request))
+            .apply_confirmation(&request, prompter.confirm(&request).await)
             .await;
         let second = manager.session_action(&request).await;
 
@@ -273,7 +278,7 @@ mod tests {
     async fn explicit_deny_skips_even_automatic_tools_without_prompting() {
         let manager = manager();
         let prompter = StubPrompter::new(vec![ToolConfirmResult::Deny]);
-        let request = ToolPermissionRequest::new("fetch_url".to_string());
+        let request = ToolPermissionRequest::new("fetch_url".to_string(), serde_json::json!({}));
 
         let action = manager.action_for_policy(&request, false);
 
@@ -287,7 +292,7 @@ mod tests {
     async fn automatic_tools_run_without_policy_or_prompt() {
         let manager = manager();
         let prompter = StubPrompter::new(vec![ToolConfirmResult::Deny]);
-        let request = ToolPermissionRequest::new("fetch_url".to_string());
+        let request = ToolPermissionRequest::new("fetch_url".to_string(), serde_json::json!({}));
 
         let action = manager
             .decide_without_policy(&request, PermissionRequirement::Automatic, &prompter)
@@ -302,7 +307,7 @@ mod tests {
         let manager = manager();
         let prompter =
             StubPrompter::new(vec![ToolConfirmResult::Deny, ToolConfirmResult::AllowOnce]);
-        let request = ToolPermissionRequest::new("run_command".to_string());
+        let request = ToolPermissionRequest::new("run_command".to_string(), serde_json::json!({}));
 
         let first = manager
             .decide_without_policy(

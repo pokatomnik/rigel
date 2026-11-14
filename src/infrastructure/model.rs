@@ -10,23 +10,8 @@ use crate::entities::{
     model::model_session_kind::ModelSessionKind,
     selected_model::selection::SelectedModel,
 };
-
-/// Lists provider models without exposing transport response DTOs.
-pub(crate) trait ModelCatalog: Send + Sync {
-    /// Fetches available models; an empty result is a user-visible selection error.
-    fn models(
-        &self,
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Vec<SelectedModel>>> + Send + '_>>;
-}
-
-/// Selects one model from a domain list using a presentation adapter.
-pub(crate) trait ModelSelector: Send + Sync {
-    /// Chooses a model while preserving provider context length metadata.
-    fn select(
-        &self,
-        models: &[SelectedModel],
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<SelectedModel>> + Send + '_>>;
-}
+use crate::infrastructure::ui::gateway::EventSink;
+use std::sync::Arc;
 
 /// Runs model operations without exposing `rig::Agent` to use cases.
 pub(crate) trait ModelSession: Send + Sync {
@@ -45,6 +30,17 @@ pub(crate) trait ModelSession: Send + Sync {
 
     /// Returns the selected model's context limit for compaction decisions.
     fn max_context_tokens(&self) -> Option<u64>;
+
+    /// Returns the model identity chosen for this session, if known.
+    fn selected_model(&self) -> Option<SelectedModel> {
+        None
+    }
+
+    /// Redirects this session's live events to a scoped sink before the first turn.
+    ///
+    /// Child sessions use it to translate provider progress into parent-visible subagent
+    /// activity. Sessions that do not stream progress keep the default no-op behavior.
+    fn attach_events(&mut self, _events: Arc<dyn EventSink>) {}
 }
 
 /// Creates complete model sessions transactionally; failed creation must not replace the old one.

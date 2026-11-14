@@ -6,19 +6,22 @@ use rig::{Agent as RigAgent, completion::CompletionModel as CompletionModelTrait
 use super::agent_tool_set::RegisteredToolSet;
 use crate::{
     controllers::{mcp_registry::registry::McpRegistry, terminal::terminal_io::TerminalIO},
-    entities::selected_model::selection::SelectedModel,
+    entities::{agent_event::payload::InteractionOrigin, selected_model::selection::SelectedModel},
     infrastructure::{
         conversation::ContextCompaction,
-        model::ModelSelector,
+        interaction::{ToolPermissionPrompter, UserInteraction},
         prompts::PromptProvider,
         recovery::{ToolRecoveryPolicyFactory, TurnRecovery},
         tools::{goal::GoalCompleter, permissions::ToolPermissionEvaluator},
+        ui::{cancellation::RunCancellation, gateway::EventSink},
     },
 };
 
 pub(crate) struct ConfiguredAgent<M: CompletionModelTrait> {
     /// The provider agent configured with the selected tools and runtime hooks.
     pub(crate) agent: RigAgent<M>,
+    /// A tool-free agent used only for context summarization.
+    pub(crate) summarizer: Option<RigAgent<M>>,
     /// The selected model inherited by tools and child sessions.
     pub(crate) selected_model: Option<SelectedModel>,
     /// The context limit used by the session's compaction policy, if known.
@@ -31,6 +34,7 @@ impl<M: CompletionModelTrait> ConfiguredAgent<M> {
     pub(crate) fn from_agent(agent: RigAgent<M>) -> Self {
         Self {
             agent,
+            summarizer: None,
             selected_model: None,
             max_context_tokens: None,
         }
@@ -44,13 +48,17 @@ pub(crate) struct AgentWiring {
     pub(super) mcp_registry: Arc<McpRegistry>,
     goal_completer: Option<Arc<dyn GoalCompleter>>,
     prompt_provider: Option<Arc<dyn PromptProvider>>,
-    model_selector: Option<Arc<dyn ModelSelector>>,
     permission_manager: Option<Arc<dyn Fn() -> Arc<dyn ToolPermissionEvaluator> + Send + Sync>>,
     recovery_policy_factory: Option<Arc<dyn ToolRecoveryPolicyFactory>>,
     turn_recovery: Option<Arc<dyn TurnRecovery>>,
     context_compaction: Option<Arc<dyn ContextCompaction>>,
     chat_tools: Option<Arc<RegisteredToolSet>>,
     subagent_tools: Option<Arc<RegisteredToolSet>>,
+    event_sink: Option<Arc<dyn EventSink>>,
+    permission_prompter_factory:
+        Option<Arc<dyn Fn(InteractionOrigin) -> Arc<dyn ToolPermissionPrompter> + Send + Sync>>,
+    user_interaction: Option<Arc<dyn UserInteraction>>,
+    run_cancellation: Option<Arc<dyn RunCancellation>>,
 }
 
 impl AgentWiring {
@@ -66,13 +74,16 @@ impl AgentWiring {
             mcp_registry,
             goal_completer: None,
             prompt_provider: None,
-            model_selector: None,
             permission_manager: None,
             recovery_policy_factory: None,
             turn_recovery: None,
             context_compaction: None,
             chat_tools: None,
             subagent_tools: None,
+            event_sink: None,
+            permission_prompter_factory: None,
+            user_interaction: None,
+            run_cancellation: None,
         }
     }
 
@@ -85,12 +96,6 @@ impl AgentWiring {
     /// Supplies the prompt capability used to configure and compact sessions.
     pub(crate) fn with_prompt_provider(mut self, provider: Arc<dyn PromptProvider>) -> Self {
         self.prompt_provider = Some(provider);
-        self
-    }
-
-    /// Supplies the model presentation capability used for interactive selection.
-    pub(crate) fn with_model_selector(mut self, selector: Arc<dyn ModelSelector>) -> Self {
-        self.model_selector = Some(selector);
         self
     }
 
@@ -142,6 +147,65 @@ impl AgentWiring {
         self
     }
 
+    /// Supplies the event boundary used by chat streaming and workflow status.
+    pub(crate) fn with_event_sink(mut self, sink: Arc<dyn EventSink>) -> Self {
+        self.event_sink = Some(sink);
+        self
+    }
+
+    /// Supplies a factory that binds permission prompts to the asking agent scope.
+    pub(crate) fn with_permission_prompter_factory(
+        mut self,
+        factory: Arc<dyn Fn(InteractionOrigin) -> Arc<dyn ToolPermissionPrompter> + Send + Sync>,
+    ) -> Self {
+        self.permission_prompter_factory = Some(factory);
+        self
+    }
+
+    /// Supplies the interaction adapter used by `ask_user`.
+    pub(crate) fn with_user_interaction(mut self, interaction: Arc<dyn UserInteraction>) -> Self {
+        self.user_interaction = Some(interaction);
+        self
+    }
+
+    /// Supplies the soft-stop flag shared by the chat workflow and child sessions.
+    pub(crate) fn with_run_cancellation(mut self, cancellation: Arc<dyn RunCancellation>) -> Self {
+        self.run_cancellation = Some(cancellation);
+        self
+    }
+
+    /// Returns the event sink or reports missing interactive composition.
+    pub(crate) fn event_sink(&self) -> anyhow::Result<Arc<dyn EventSink>> {
+        self.event_sink
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("event sink was not configured"))
+    }
+
+    /// Returns the permission prompter for one agent scope or reports missing composition.
+    pub(crate) fn permission_prompter(
+        &self,
+        origin: InteractionOrigin,
+    ) -> anyhow::Result<Arc<dyn ToolPermissionPrompter>> {
+        self.permission_prompter_factory
+            .as_ref()
+            .map(|factory| factory(origin))
+            .ok_or_else(|| anyhow::anyhow!("permission prompter was not configured"))
+    }
+
+    /// Returns the `ask_user` interaction adapter or reports missing composition.
+    pub(crate) fn user_interaction(&self) -> anyhow::Result<Arc<dyn UserInteraction>> {
+        self.user_interaction
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("user interaction was not configured"))
+    }
+
+    /// Returns the soft-stop flag or reports missing interactive composition.
+    pub(crate) fn run_cancellation(&self) -> anyhow::Result<Arc<dyn RunCancellation>> {
+        self.run_cancellation
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("run cancellation was not configured"))
+    }
+
     /// Returns the terminal boundary used by the configured session hooks.
     pub(crate) fn terminal_io(&self) -> Arc<TerminalIO> {
         self.terminal_io.clone()
@@ -173,12 +237,6 @@ impl AgentWiring {
         tools
             .clone()
             .ok_or_else(|| anyhow::anyhow!("agent tools were not configured"))
-    }
-
-    pub(super) fn model_selector(&self) -> anyhow::Result<Arc<dyn ModelSelector>> {
-        self.model_selector
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("model selector was not configured"))
     }
 
     pub(crate) fn prompt_provider(&self) -> anyhow::Result<Arc<dyn PromptProvider>> {

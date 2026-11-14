@@ -6,4 +6,6 @@ pub mod model;
 pub mod prompts;
 pub mod recovery;
 pub mod skills;
+pub mod storage;
 pub mod tools;
+pub mod ui;

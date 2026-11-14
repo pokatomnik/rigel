@@ -7,7 +7,7 @@ use crate::{
             chat_history::{ChatHistory, InMemoryHistory},
             history_persistence::NonPersistentHistory,
         },
-        model_session::RigModelSession,
+        session::chat::RigModelSession,
     },
     entities::{
         model::model_session_kind::ModelSessionKind, selected_model::selection::SelectedModel,
@@ -48,6 +48,7 @@ impl RigSubagentSessionFactory {
                 .with_turn_recovery(self.dependencies.turn_recovery()?)
                 .with_prompt_provider(self.dependencies.prompt_provider()?)
                 .with_context_compaction(self.dependencies.context_compaction()?)
+                .with_cancellation(self.dependencies.run_cancellation()?)
                 .requiring_answer();
         Ok(Box::new(session))
     }

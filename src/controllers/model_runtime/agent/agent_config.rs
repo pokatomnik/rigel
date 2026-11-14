@@ -16,6 +16,7 @@ pub(crate) struct AgentConfig {
     pub(super) tool_set: AgentToolSet,
     pub(super) model_id: Option<String>,
     pub(super) model_context_length: Option<u64>,
+    pub(super) system_prompt: Option<String>,
     pub(super) additional_params: Option<Value>,
     config: Arc<RigelConfig>,
 }
@@ -30,6 +31,7 @@ impl AgentConfig {
             tool_set: AgentToolSet::Chat,
             model_id: None,
             model_context_length: None,
+            system_prompt: None,
             additional_params: None,
             config,
         }
@@ -50,6 +52,24 @@ impl AgentConfig {
         self = self.with_model_id(selected_model.id)?;
         self.model_context_length = selected_model.context_length;
         Ok(self)
+    }
+
+    /// Stores the effective system prompt that continuation sessions must reuse.
+    pub(crate) fn with_system_prompt(mut self, prompt: String) -> Self {
+        self.system_prompt = Some(prompt);
+        self
+    }
+
+    /// Returns the model selected for this session, if one has been assigned.
+    pub(crate) fn selected_model(&self) -> Option<SelectedModel> {
+        self.model_id
+            .clone()
+            .map(|id| SelectedModel::new(id, self.model_context_length))
+    }
+
+    /// Returns the effective chat system prompt selected for this session.
+    pub(crate) fn system_prompt(&self) -> Option<&str> {
+        self.system_prompt.as_deref()
     }
 
     pub(super) fn with_tool_set(mut self, tool_set: AgentToolSet) -> Self {
@@ -113,6 +133,21 @@ mod tests {
 
         assert_eq!(config.model_id.as_deref(), Some("parent-model"));
         assert_eq!(config.model_context_length, Some(4_096));
+        Ok(())
+    }
+
+    #[test]
+    fn saved_system_prompt_survives_model_and_tool_set_changes() -> anyhow::Result<()> {
+        let model = crate::entities::selected_model::selection::SelectedModel::new(
+            "model-a".to_string(),
+            Some(1_024),
+        );
+        let config = AgentConfig::new(Arc::new(RigelConfig::default()))
+            .with_system_prompt("saved rules".to_string())
+            .with_selected_model(model)?
+            .with_tool_set(AgentToolSet::Subagent);
+
+        assert_eq!(config.system_prompt(), Some("saved rules"));
         Ok(())
     }
 
