@@ -6,29 +6,49 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
 };
 
-use crate::{
-    controllers::tui::theme,
-    entities::{
-        palette::{item::ItemTone, level::PaletteLevel},
-        render_model::palette::PaletteView,
-        theme::{palette::Palette, token::ColorToken},
-    },
+use super::{Presentation, visible_offset};
+use crate::controllers::tui::theme;
+use crate::entities::{
+    palette::{item::ItemTone, level::PaletteLevel},
+    render_model::palette::PaletteView,
+    theme::{palette::Palette, token::ColorToken},
 };
 
+const DEFAULT_HINT: &str = "↑/↓ j/k · Enter/l · h back · Esc";
+
 /// Renders the command palette as a centered list.
-pub(crate) fn render(frame: &mut Frame<'_>, area: Rect, view: &PaletteView, palette: &Palette) {
-    let height = (view.items.len() as u16 + 4)
+pub(crate) fn render(frame: &mut Frame<'_>, area: Rect, presentation: &Presentation<'_>) {
+    let Some(view) = presentation.model.palette.as_ref() else {
+        return;
+    };
+    let palette = presentation.palette;
+    let popup = popup_area(area, view.items.len());
+    frame.render_widget(Clear, popup);
+    let block = palette_block(view, palette);
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+    render_items(frame, chunks[0], presentation);
+    render_hint(frame, chunks[1], presentation);
+}
+
+fn popup_area(area: Rect, item_count: usize) -> Rect {
+    let height = u16::try_from(item_count)
+        .unwrap_or(u16::MAX)
+        .saturating_add(4)
         .max(5)
         .min(area.height.saturating_mul(3) / 4);
     let width = area.width.saturating_mul(3) / 5;
-    let popup = Rect {
+    Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
         width,
         height,
-    };
-    frame.render_widget(Clear, popup);
-    let block = Block::default()
+    }
+}
+
+fn palette_block(view: &PaletteView, palette: &Palette) -> Block<'static> {
+    Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(color(palette, ColorToken::Border)))
         .title(Span::styled(
@@ -37,27 +57,38 @@ pub(crate) fn render(frame: &mut Frame<'_>, area: Rect, view: &PaletteView, pale
                 .fg(color(palette, ColorToken::Accent))
                 .add_modifier(Modifier::BOLD),
         ))
-        .style(Style::default().bg(color(palette, ColorToken::Surface)));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+        .style(Style::default().bg(color(palette, ColorToken::Surface)))
+}
+
+fn render_items(frame: &mut Frame<'_>, area: Rect, presentation: &Presentation<'_>) {
+    let Some(view) = presentation.model.palette.as_ref() else {
+        return;
+    };
+    let palette = presentation.palette;
+    let visible = usize::from(area.height);
+    let offset = visible_offset(view.items.len(), view.selected, visible);
     let lines = view
         .items
         .iter()
         .enumerate()
-        .map(|(index, item)| item_line(item, index == view.selected, palette, chunks[0].width))
+        .skip(offset)
+        .take(visible)
+        .map(|(index, item)| item_line(item, index == view.selected, palette, area.width))
         .collect::<Vec<_>>();
-    frame.render_widget(Paragraph::new(lines), chunks[0]);
-    let status = view
-        .status
-        .clone()
-        .unwrap_or_else(|| "↑/↓ navigate · Enter select · Esc close".to_string());
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_hint(frame: &mut Frame<'_>, area: Rect, presentation: &Presentation<'_>) {
+    let Some(view) = presentation.model.palette.as_ref() else {
+        return;
+    };
+    let hint = view.status.as_deref().unwrap_or(DEFAULT_HINT);
     frame.render_widget(
         Paragraph::new(Span::styled(
-            status,
-            Style::default().fg(color(palette, ColorToken::Muted)),
+            hint,
+            Style::default().fg(color(presentation.palette, ColorToken::Muted)),
         )),
-        chunks[1],
+        area,
     );
 }
 

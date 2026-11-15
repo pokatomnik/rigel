@@ -37,11 +37,6 @@ pub(super) fn render(
             chunks[1],
         );
     }
-    frame.render_widget(
-        hint(
-            "Enter: newline · Ctrl/Cmd+Enter: start · Esc: cancel",
-            palette,
-        ),
-        chunks[2],
-    );
+    let shortcut = "Enter: start · Alt+Enter: line · Esc: cancel";
+    frame.render_widget(hint(shortcut, palette), chunks[2]);
 }

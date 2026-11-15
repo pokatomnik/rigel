@@ -52,10 +52,15 @@ impl PaletteState {
     ///
     /// With no configured models this is the "not configured" state: only exit is available.
     pub(crate) fn startup(models: Vec<SelectedModel>, current_model: Option<String>) -> Self {
-        let selected = current_model
-            .as_deref()
-            .and_then(|current| models.iter().position(|model| model.id == current))
-            .unwrap_or(0);
+        let selected = if models.is_empty() {
+            0
+        } else {
+            current_model
+                .as_deref()
+                .and_then(|current| models.iter().position(|model| model.id == current))
+                .map(|index| index + 1)
+                .unwrap_or(1)
+        };
         Self {
             level: PaletteLevel::Models,
             selected,
@@ -118,10 +123,12 @@ impl PaletteState {
         self.selected = next as usize;
     }
 
-    /// Opens a nested level with the first item selected.
+    /// Opens a nested level with the first item after `← Back` selected.
     pub(crate) fn open(&mut self, level: PaletteLevel) {
         self.level = level;
-        self.selected = 0;
+        let items = self.items();
+        let has_back = items.first().is_some_and(|item| item.id == "back");
+        self.selected = usize::from(has_back && items.len() > 1);
         self.status = None;
     }
 
@@ -136,6 +143,11 @@ impl PaletteState {
             }
             None => false,
         }
+    }
+
+    /// Reports whether the current level has a parent level.
+    pub(crate) fn has_parent(&self) -> bool {
+        self.level.parent().is_some()
     }
 
     /// Returns the highlighted action, if it is enabled.
@@ -296,21 +308,19 @@ mod tests {
         assert_eq!(palette.view().level, PaletteLevel::Models);
         let items = palette.items();
 
-        assert_eq!(items[0].label, "a");
-        assert_eq!(items[0].detail.as_deref(), Some("32K"));
-        assert!(items[0].detail_right);
-        assert!(matches!(items[0].action, PaletteAction::Command(_)));
-        assert_eq!(items[1].detail.as_deref(), Some("1M"));
-        assert!(matches!(
-            items.last().map(|item| &item.action),
-            Some(PaletteAction::Back)
-        ));
+        assert_eq!(items[0].label, "← Back");
+        assert_eq!(items[1].label, "a");
+        assert_eq!(items[1].detail.as_deref(), Some("32K"));
+        assert!(items[1].detail_right);
+        assert!(matches!(items[1].action, PaletteAction::Command(_)));
+        assert_eq!(items[2].detail.as_deref(), Some("1M"));
+        assert!(matches!(items[0].action, PaletteAction::Back));
     }
 
     #[test]
     fn current_model_uses_the_success_tone() {
         let palette = PaletteState::startup(vec![model("a", 32_000)], Some("a".to_string()));
-        let item = palette.items().into_iter().next();
+        let item = palette.items().into_iter().nth(1);
 
         assert!(item.is_some_and(|item| {
             item.tone == ItemTone::Success && item.detail.as_deref() == Some("current · 32K")
@@ -329,6 +339,15 @@ mod tests {
                 .iter()
                 .any(|item| matches!(item.action, PaletteAction::Back))
         );
+    }
+
+    #[test]
+    fn opening_a_nested_level_selects_the_first_item_after_back() {
+        let mut palette =
+            PaletteState::root(AgentActivity::Idle, Vec::new()).with_models(vec![model("a", 1)]);
+        palette.open(PaletteLevel::Models);
+
+        assert_eq!(palette.view().selected, 1);
     }
 
     #[test]

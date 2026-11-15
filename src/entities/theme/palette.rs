@@ -1,7 +1,6 @@
-use super::{
-    rgb::{Rgb, contrast_ratio},
-    token::ColorToken,
-};
+#[cfg(test)]
+use super::rgb::contrast_ratio;
+use super::{rgb::Rgb, token::ColorToken};
 
 /// Immutable semantic palette owned by one UI theme.
 ///
@@ -54,6 +53,7 @@ impl Palette {
     }
 
     /// Returns the WCAG contrast ratio between two semantic tokens.
+    #[cfg(test)]
     pub(crate) fn contrast(&self, foreground: ColorToken, background: ColorToken) -> f64 {
         contrast_ratio(self.color(foreground), self.color(background))
     }

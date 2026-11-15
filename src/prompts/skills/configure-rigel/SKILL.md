@@ -23,7 +23,9 @@ Rigel reads the default configuration from `~/.rigel/config.toml` when no
 profile is supplied. Run `rigel init` to create or overwrite that file. Use
 `rigel init --base-url <URL>` to set the OpenAI-compatible API base URL and
 `rigel init --api-key-env <NAME>` to tell Rigel which environment variable
-contains the API key. The key itself is not stored in TOML.
+contains the API key. Alternatively, set `apiKey` to the literal key; `apiKey`
+takes precedence over `envKey`, and a blank `apiKey` is ignored. Prefer `envKey`
+when the configuration file is shared.
 
 Use `rigel chat --profile <PATH>` (or `-p <PATH>`) to load a specific TOML
 file as the global layer. The project layer at
@@ -39,6 +41,7 @@ the project layer remains optional.
 
 ```toml
 baseUrl = "http://127.0.0.1:1234/v1"
+apiKey = ""
 envKey = "OPENAI_API_KEY"
 
 [models."exact-model-id"]
@@ -63,8 +66,10 @@ url = "https://example.com/mcp"
 allow = true
 ```
 
-`envKey` is the name of the environment variable from which Rigel reads the
-API key. Keep the secret in the environment rather than in `config.toml`.
+`apiKey` stores the provider key literally, and `envKey` names the environment
+variable that contains it. `apiKey` takes precedence when both are set, and a
+blank `apiKey` is ignored. Prefer `envKey` and keep the secret out of
+`config.toml` when the file is shared.
 
 `context_size` is required for every selectable model and is expressed in
 tokens. Rigel does not query `/models` and does not derive a context size from

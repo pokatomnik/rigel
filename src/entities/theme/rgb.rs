@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+#[cfg(test)]
 const HEX_DIGITS_PER_CHANNEL: usize = 2;
+#[cfg(test)]
 const HEX_LENGTH: usize = 6;
 
 /// An explicit 24-bit RGB color that never depends on terminal defaults.
@@ -21,6 +23,7 @@ impl Rgb {
     }
 
     /// Parses `#RRGGBB` or `RRGGBB` and rejects anything that is not six hex digits.
+    #[cfg(test)]
     pub(crate) fn from_hex(value: &str) -> anyhow::Result<Self> {
         let digits = value.strip_prefix('#').unwrap_or(value);
         if digits.len() != HEX_LENGTH || !digits.is_ascii() {
@@ -34,11 +37,13 @@ impl Rgb {
     }
 
     /// Returns the color as an uppercase `#RRGGBB` string for diagnostics and tests.
+    #[cfg(test)]
     pub(crate) fn to_hex(self) -> String {
         format!("#{:02X}{:02X}{:02X}", self.red, self.green, self.blue)
     }
 
     /// Returns the WCAG 2.1 relative luminance in the inclusive range `0.0..=1.0`.
+    #[cfg(test)]
     pub(crate) fn relative_luminance(self) -> f64 {
         let red = linearize(self.red);
         let green = linearize(self.green);
@@ -48,6 +53,7 @@ impl Rgb {
 }
 
 /// Computes the WCAG contrast ratio between two explicit colors.
+#[cfg(test)]
 pub(crate) fn contrast_ratio(left: Rgb, right: Rgb) -> f64 {
     let left = left.relative_luminance();
     let right = right.relative_luminance();
@@ -59,6 +65,7 @@ pub(crate) fn contrast_ratio(left: Rgb, right: Rgb) -> f64 {
     (lighter + 0.05) / (darker + 0.05)
 }
 
+#[cfg(test)]
 fn parse_channel(digits: &str, start: usize) -> anyhow::Result<u8> {
     let end = start + HEX_DIGITS_PER_CHANNEL;
     let channel = digits
@@ -67,6 +74,7 @@ fn parse_channel(digits: &str, start: usize) -> anyhow::Result<u8> {
     Ok(u8::from_str_radix(channel, 16)?)
 }
 
+#[cfg(test)]
 fn linearize(channel: u8) -> f64 {
     let channel = f64::from(channel) / 255.0;
     if channel <= 0.04045 {

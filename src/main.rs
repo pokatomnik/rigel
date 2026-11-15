@@ -401,7 +401,7 @@ mod tests {
             &'a self,
             _: ContextUsage,
         ) -> futures::future::BoxFuture<'a, anyhow::Result<InputOutcome>> {
-            Box::pin(async { Ok(InputOutcome::Eof) })
+            Box::pin(async { Ok(InputOutcome::Cancelled) })
         }
     }
 

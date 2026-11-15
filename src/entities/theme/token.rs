@@ -27,6 +27,7 @@ pub(crate) enum ColorToken {
 
 impl ColorToken {
     /// Every token in the order documented by the accepted palette.
+    #[cfg(test)]
     pub(crate) const ALL: [Self; 10] = [
         Self::Background,
         Self::Surface,
@@ -41,6 +42,7 @@ impl ColorToken {
     ];
 
     /// Returns the stable index of the token inside palette storage.
+    #[cfg(test)]
     pub(crate) const fn index(self) -> usize {
         match self {
             Self::Background => 0,
@@ -57,6 +59,7 @@ impl ColorToken {
     }
 
     /// Returns the documented token name used by diagnostics and future theme files.
+    #[cfg(test)]
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Background => "background",

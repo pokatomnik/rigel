@@ -21,12 +21,8 @@ impl PaletteState {
                 PaletteItem::new("exit", "Exit Rigel", PaletteAction::ConfirmExit),
             ];
         }
-        let mut items = self
-            .models
-            .iter()
-            .map(|model| self.model_item(model))
-            .collect::<Vec<_>>();
-        items.push(back_item());
+        let mut items = vec![back_item()];
+        items.extend(self.models.iter().map(|model| self.model_item(model)));
         items
     }
 

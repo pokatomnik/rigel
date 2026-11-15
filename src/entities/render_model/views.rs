@@ -98,6 +98,7 @@ pub(crate) struct ComposerView {
 
 impl ComposerView {
     /// Creates a composer containing the provided draft.
+    #[cfg(test)]
     pub(crate) fn new(text: String) -> Self {
         Self {
             text,

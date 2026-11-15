@@ -16,10 +16,13 @@ impl TerminalSize {
     }
 }
 
+/// Primary submit chord shown in the UI.
+pub(crate) const SUBMIT_KEY_LABEL: &str = "Enter";
+
 /// Terminal-independent key identity interpreted by the UI workflow.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum KeyStroke {
-    /// Line break in the composer.
+    /// Submit in the composer; confirm in modals.
     Enter,
     /// Focus or activation movement.
     Tab,
@@ -45,19 +48,33 @@ pub(crate) enum KeyStroke {
     PageUp,
     /// Scroll one page down.
     PageDown,
-    /// Submit on Windows and Linux.
+    /// Insert a line break in the composer and goal editor.
     CtrlEnter,
-    /// Submit on macOS.
+    /// Insert a line break in the composer and goal editor.
     CmdEnter,
+    /// Insert a line break when the terminal reports Shift+Enter.
+    ShiftEnter,
     /// A control chord identified by its lowercase character.
     Ctrl(char),
+}
+
+impl KeyStroke {
+    /// Reports whether this key confirms the active modal selection.
+    pub(crate) const fn confirms_modal(self) -> bool {
+        matches!(
+            self,
+            Self::Enter | Self::CtrlEnter | Self::CmdEnter | Self::ShiftEnter
+        )
+    }
 }
 
 /// Provider-neutral user input delivered to the UI workflow.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum InputEvent {
-    /// Printable text inserted into the composer, including pasted blocks.
+    /// Printable text produced by a key press.
     Text(String),
+    /// Clipboard text that must never be interpreted as a key chord.
+    Paste(String),
     /// A key press interpreted by the UI workflow.
     Key(KeyStroke),
     /// The terminal reported a new size.
@@ -78,13 +95,28 @@ mod tests {
     }
 
     #[test]
+    fn modal_confirmation_accepts_plain_and_modified_enter() {
+        for key in [
+            KeyStroke::Enter,
+            KeyStroke::CtrlEnter,
+            KeyStroke::CmdEnter,
+            KeyStroke::ShiftEnter,
+        ] {
+            assert!(key.confirms_modal());
+        }
+        assert!(!KeyStroke::Ctrl('c').confirms_modal());
+    }
+
+    #[test]
     fn key_events_round_trip_through_json() -> anyhow::Result<()> {
         for event in [
             InputEvent::Key(KeyStroke::CtrlEnter),
             InputEvent::Key(KeyStroke::CmdEnter),
+            InputEvent::Key(KeyStroke::ShiftEnter),
             InputEvent::Key(KeyStroke::Ctrl('k')),
             InputEvent::Key(KeyStroke::Escape),
             InputEvent::Text("hello".to_string()),
+            InputEvent::Paste("pasted".to_string()),
             InputEvent::Closed,
         ] {
             let json = serde_json::to_value(&event)?;

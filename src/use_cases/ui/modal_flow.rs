@@ -1,5 +1,6 @@
 use crate::entities::{
     agent_command::command::AgentCommand,
+    application::input_event::KeyStroke,
     application::input_reaction::InputReaction,
     render_model::modal::{ExitChoice, ModalView},
     tool_confirm_result::outcome::ToolConfirmResult,
@@ -17,18 +18,16 @@ impl UiWorkflow {
             ModalView::ConfirmExit { .. } => self.handle_exit_text(text.as_str()),
             ModalView::ConfirmNew { .. } => self.handle_new_text(text.as_str()),
             ModalView::Goal { .. } => self.handle_goal_text(text.as_str()),
+            ModalView::Permission { .. } => self.handle_permission_text(text.as_str()),
             ModalView::Question {
-                request,
-                selected,
-                input,
+                request, selected, ..
             } if is_free_form(&request.answers, selected) => {
                 if let Some(ModalView::Question { input, .. }) = self.state.active_modal_mut() {
                     input.push_str(text.as_str());
                 }
-                let _ = input;
                 InputReaction::consumed()
             }
-            ModalView::Permission { .. } | ModalView::Question { .. } => InputReaction::consumed(),
+            ModalView::Question { .. } => self.handle_question_text(text.as_str()),
         }
     }
 
@@ -49,22 +48,45 @@ impl UiWorkflow {
         }
     }
 
-    fn handle_exit_text(&mut self, text: &str) -> InputReaction {
-        match text {
-            "y" | "Y" => self.finish_exit(ExitChoice::Exit),
-            "n" | "N" => self.finish_exit(ExitChoice::Cancel),
+    /// Handles clipboard text without interpreting it as a key chord.
+    pub(super) fn handle_modal_paste(&mut self, text: &str) -> InputReaction {
+        let Some(modal) = self.state.active_modal().cloned() else {
+            return InputReaction::consumed();
+        };
+        match modal {
+            ModalView::Goal { .. } => self.handle_goal_text(text),
+            ModalView::Question {
+                request, selected, ..
+            } if is_free_form(&request.answers, selected) => {
+                if let Some(ModalView::Question { input, .. }) = self.state.active_modal_mut() {
+                    input.push_str(text);
+                }
+                InputReaction::consumed()
+            }
             _ => InputReaction::consumed(),
         }
     }
 
-    fn handle_exit_key(
+    /// Handles printable confirmation text for exiting the chat.
+    pub(super) fn handle_exit_text(&mut self, text: &str) -> InputReaction {
+        match text {
+            "y" | "Y" => self.finish_exit(ExitChoice::Exit),
+            "n" | "N" => self.finish_exit(ExitChoice::Cancel),
+            "j" => self.handle_exit_key(KeyStroke::Down),
+            "k" => self.handle_exit_key(KeyStroke::Up),
+            "l" => self.handle_exit_key(KeyStroke::Enter),
+            _ => InputReaction::consumed(),
+        }
+    }
+
+    /// Handles one key in the exit confirmation.
+    pub(super) fn handle_exit_key(
         &mut self,
         key: crate::entities::application::input_event::KeyStroke,
     ) -> InputReaction {
-        use crate::entities::application::input_event::KeyStroke;
         match key {
             KeyStroke::Escape => self.finish_exit(ExitChoice::Cancel),
-            KeyStroke::Enter => {
+            key if key.confirms_modal() => {
                 let choice = match self.state.active_modal() {
                     Some(ModalView::ConfirmExit { selected }) => *selected,
                     _ => ExitChoice::Cancel,
@@ -105,7 +127,7 @@ impl UiWorkflow {
         use crate::entities::application::input_event::KeyStroke;
         match key {
             KeyStroke::Escape => self.resolve_permission(ToolConfirmResult::Deny),
-            KeyStroke::Enter => {
+            key if key.confirms_modal() => {
                 let decision = self
                     .state
                     .active_modal()
@@ -117,6 +139,15 @@ impl UiWorkflow {
             KeyStroke::Down | KeyStroke::Tab => self.move_permission(1),
             KeyStroke::PageUp => self.scroll_permission(-5),
             KeyStroke::PageDown => self.scroll_permission(5),
+            _ => InputReaction::consumed(),
+        }
+    }
+
+    fn handle_permission_text(&mut self, text: &str) -> InputReaction {
+        match text {
+            "j" => self.move_permission(1),
+            "k" => self.move_permission(-1),
+            "l" => self.handle_permission_key(KeyStroke::Enter),
             _ => InputReaction::consumed(),
         }
     }
@@ -156,7 +187,6 @@ impl UiWorkflow {
         &mut self,
         key: crate::entities::application::input_event::KeyStroke,
     ) -> InputReaction {
-        use crate::entities::application::input_event::KeyStroke;
         let Some(ModalView::Question {
             request,
             selected,
@@ -168,16 +198,27 @@ impl UiWorkflow {
         let free_form = is_free_form(&request.answers, selected);
         match key {
             KeyStroke::Escape => self.cancel_question(),
-            KeyStroke::Enter if free_form => self.finish_question(input),
-            KeyStroke::Backspace if free_form => {
-                if let Some(ModalView::Question { input, .. }) = self.state.active_modal_mut() {
-                    input.pop();
-                }
-                InputReaction::consumed()
-            }
+            key if key.confirms_modal() && free_form => self.finish_question(input),
+            KeyStroke::Backspace if free_form => self.backspace_question(),
             KeyStroke::Up => self.move_question(-1),
             KeyStroke::Down | KeyStroke::Tab => self.move_question(1),
-            KeyStroke::Enter => self.choose_question_answer(),
+            key if key.confirms_modal() => self.choose_question_answer(),
+            _ => InputReaction::consumed(),
+        }
+    }
+
+    fn backspace_question(&mut self) -> InputReaction {
+        if let Some(ModalView::Question { input, .. }) = self.state.active_modal_mut() {
+            input.pop();
+        }
+        InputReaction::consumed()
+    }
+
+    fn handle_question_text(&mut self, text: &str) -> InputReaction {
+        match text {
+            "j" => self.move_question(1),
+            "k" => self.move_question(-1),
+            "l" => self.handle_question_key(KeyStroke::Enter),
             _ => InputReaction::consumed(),
         }
     }
@@ -283,6 +324,111 @@ mod tests {
                 crate::entities::agent_command::command::AgentCommand::AnswerQuestion {
                     correlation_id: 4,
                     answer: "1".to_string(),
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn vim_keys_move_the_question_selection() {
+        let mut workflow = workflow_with_question();
+        workflow.handle_input(InputEvent::Text("j".to_string()), "");
+        let result = workflow.handle_input(InputEvent::Key(KeyStroke::Enter), "");
+
+        assert_eq!(
+            result.commands,
+            [
+                crate::entities::agent_command::command::AgentCommand::AnswerQuestion {
+                    correlation_id: 4,
+                    answer: "1".to_string(),
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn vim_l_confirms_the_question_selection() {
+        let mut workflow = workflow_with_question();
+        let result = workflow.handle_input(InputEvent::Text("l".to_string()), "");
+
+        assert_eq!(
+            result.commands,
+            [
+                crate::entities::agent_command::command::AgentCommand::AnswerQuestion {
+                    correlation_id: 4,
+                    answer: "0".to_string(),
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn modified_enter_confirms_the_question_selection() {
+        let mut workflow = workflow_with_question();
+        let result = workflow.handle_input(InputEvent::Key(KeyStroke::CtrlEnter), "");
+
+        assert_eq!(
+            result.commands,
+            [
+                crate::entities::agent_command::command::AgentCommand::AnswerQuestion {
+                    correlation_id: 4,
+                    answer: "0".to_string(),
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn shift_enter_confirms_the_question_selection() {
+        let mut workflow = workflow_with_question();
+        let result = workflow.handle_input(InputEvent::Key(KeyStroke::ShiftEnter), "");
+
+        assert_eq!(
+            result.commands,
+            [
+                crate::entities::agent_command::command::AgentCommand::AnswerQuestion {
+                    correlation_id: 4,
+                    answer: "0".to_string(),
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn vim_letters_remain_text_in_free_form_mode() {
+        let mut workflow = workflow_with_question();
+        workflow.handle_input(InputEvent::Key(KeyStroke::Down), "");
+        workflow.handle_input(InputEvent::Key(KeyStroke::Down), "");
+        workflow.handle_input(InputEvent::Key(KeyStroke::Enter), "");
+        workflow.handle_input(InputEvent::Text("j".to_string()), "");
+        let result = workflow.handle_input(InputEvent::Key(KeyStroke::Enter), "");
+
+        assert_eq!(
+            result.commands,
+            [
+                crate::entities::agent_command::command::AgentCommand::AnswerQuestion {
+                    correlation_id: 4,
+                    answer: "j".to_string(),
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn pasted_text_is_appended_in_free_form_mode() {
+        let mut workflow = workflow_with_question();
+        workflow.handle_input(InputEvent::Key(KeyStroke::Down), "");
+        workflow.handle_input(InputEvent::Key(KeyStroke::Down), "");
+        workflow.handle_input(InputEvent::Key(KeyStroke::Enter), "");
+        workflow.handle_input(InputEvent::Paste("custom".to_string()), "");
+        let result = workflow.handle_input(InputEvent::Key(KeyStroke::Enter), "");
+
+        assert_eq!(
+            result.commands,
+            [
+                crate::entities::agent_command::command::AgentCommand::AnswerQuestion {
+                    correlation_id: 4,
+                    answer: "custom".to_string(),
                 }
             ]
         );

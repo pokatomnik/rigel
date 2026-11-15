@@ -16,6 +16,7 @@ impl QueuedPrompt {
     }
 
     /// Returns the stable queue identifier.
+    #[cfg(test)]
     pub(crate) const fn id(&self) -> u64 {
         self.id
     }
@@ -66,6 +67,7 @@ impl PromptQueue {
     }
 
     /// Reports whether no prompts are waiting.
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.prompts.is_empty()
     }

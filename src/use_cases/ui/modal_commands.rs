@@ -1,5 +1,6 @@
 use crate::entities::{
     agent_command::command::AgentCommand,
+    application::input_event::KeyStroke,
     application::input_reaction::InputReaction,
     render_model::modal::{ExitChoice, ModalView},
 };
@@ -12,6 +13,9 @@ impl UiWorkflow {
         match text {
             "y" | "Y" => self.finish_new(ExitChoice::Exit),
             "n" | "N" => self.finish_new(ExitChoice::Cancel),
+            "j" => self.handle_new_key(KeyStroke::Down),
+            "k" => self.handle_new_key(KeyStroke::Up),
+            "l" => self.handle_new_key(KeyStroke::Enter),
             _ => InputReaction::consumed(),
         }
     }
@@ -21,17 +25,20 @@ impl UiWorkflow {
         &mut self,
         key: crate::entities::application::input_event::KeyStroke,
     ) -> InputReaction {
-        use crate::entities::application::input_event::KeyStroke;
         match key {
             KeyStroke::Escape => self.finish_new(ExitChoice::Cancel),
-            KeyStroke::Enter => {
+            key if key.confirms_modal() => {
                 let choice = match self.state.active_modal() {
                     Some(ModalView::ConfirmNew { selected }) => *selected,
                     _ => ExitChoice::Cancel,
                 };
                 self.finish_new(choice)
             }
-            KeyStroke::Up | KeyStroke::Down | KeyStroke::Tab => {
+            KeyStroke::Up
+            | KeyStroke::Down
+            | KeyStroke::Left
+            | KeyStroke::Right
+            | KeyStroke::Tab => {
                 if let Some(ModalView::ConfirmNew { selected }) = self.state.active_modal_mut() {
                     *selected = selected.next();
                 }
@@ -69,8 +76,8 @@ impl UiWorkflow {
                 self.state.pop_modal();
                 InputReaction::consumed()
             }
-            KeyStroke::CtrlEnter | KeyStroke::CmdEnter => self.submit_goal(),
-            KeyStroke::Enter => {
+            KeyStroke::Enter => self.submit_goal(),
+            KeyStroke::CtrlEnter | KeyStroke::CmdEnter | KeyStroke::ShiftEnter => {
                 if let Some(ModalView::Goal { input, .. }) = self.state.active_modal_mut() {
                     input.push('\n');
                 }

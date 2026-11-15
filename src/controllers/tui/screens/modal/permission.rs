@@ -64,10 +64,7 @@ pub(super) fn render(
         );
     }
     frame.render_widget(
-        hint(
-            "↑/↓ select · PgUp/PgDn scroll · Enter confirm · Esc deny",
-            palette,
-        ),
+        hint("↑/↓ j/k · PgUp/PgDn · Enter · Esc", palette),
         chunks[3],
     );
 }

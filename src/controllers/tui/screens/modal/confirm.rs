@@ -12,7 +12,7 @@ use crate::entities::{
 
 use super::{color, hint, modal_block, option_line};
 
-const EXIT_HINT: &str = "↑/↓ select · Enter confirm · Esc cancel";
+const EXIT_HINT: &str = "↑/↓ j/k · Enter · Esc";
 
 pub(super) fn render_exit(
     frame: &mut Frame<'_>,

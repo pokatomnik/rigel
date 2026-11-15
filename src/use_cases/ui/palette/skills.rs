@@ -10,25 +10,21 @@ impl PaletteState {
     pub(super) fn skill_items(&self) -> Vec<PaletteItem> {
         if self.skills.is_empty() {
             return vec![
-                PaletteItem::new("skills-empty", "No skills found", PaletteAction::Info).disabled(),
                 back_item(),
+                PaletteItem::new("skills-empty", "No skills found", PaletteAction::Info).disabled(),
             ];
         }
-        let mut items = self
-            .skills
-            .iter()
-            .map(|skill| {
-                PaletteItem::new(
-                    format!("skill-{}", skill.name()),
-                    skill.to_string(),
-                    PaletteAction::Command(AgentCommand::UseSkill {
-                        skill: skill.clone(),
-                    }),
-                )
-                .with_detail(skill.origin().label())
-            })
-            .collect::<Vec<_>>();
-        items.push(back_item());
+        let mut items = vec![back_item()];
+        items.extend(self.skills.iter().map(|skill| {
+            PaletteItem::new(
+                format!("skill-{}", skill.name()),
+                skill.to_string(),
+                PaletteAction::Command(AgentCommand::UseSkill {
+                    skill: skill.clone(),
+                }),
+            )
+            .with_detail(skill.origin().label())
+        }));
         items
     }
 }
@@ -50,13 +46,10 @@ mod tests {
         palette.open(PaletteLevel::Skills);
         let items = palette.items();
 
-        assert_eq!(items[0].label, "alpha");
-        assert_eq!(items[0].detail.as_deref(), Some("builtin"));
-        assert!(matches!(items[0].action, PaletteAction::Command(_)));
-        assert!(matches!(
-            items.last().map(|item| &item.action),
-            Some(PaletteAction::Back)
-        ));
+        assert_eq!(items[0].label, "← Back");
+        assert_eq!(items[1].label, "alpha");
+        assert_eq!(items[1].detail.as_deref(), Some("builtin"));
+        assert!(matches!(items[1].action, PaletteAction::Command(_)));
     }
 
     #[test]

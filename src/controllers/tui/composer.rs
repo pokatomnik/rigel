@@ -7,11 +7,15 @@ pub(crate) struct Composer {
     textarea: TextArea<'static>,
 }
 
+fn placeholder() -> String {
+    "Enter sends · Alt+Enter: newline".to_string()
+}
+
 impl Composer {
     /// Creates an empty no-wrap editor.
     pub(crate) fn new() -> Self {
         let mut textarea = TextArea::new(vec![String::new()]);
-        textarea.set_placeholder_text("Type a message. Enter adds a line; Ctrl/Cmd+Enter sends.");
+        textarea.set_placeholder_text(placeholder());
         Self { textarea }
     }
 
@@ -19,6 +23,9 @@ impl Composer {
     pub(crate) fn apply(&mut self, event: &InputEvent) {
         match event {
             InputEvent::Text(text) => {
+                self.textarea.insert_str(text);
+            }
+            InputEvent::Paste(text) => {
                 self.textarea.insert_str(text);
             }
             InputEvent::Key(key) => self.apply_key(*key),
@@ -32,6 +39,7 @@ impl Composer {
     }
 
     /// Reports whether the draft has no characters.
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.textarea.is_empty()
     }
@@ -39,8 +47,7 @@ impl Composer {
     /// Removes every character after a successful submission.
     pub(crate) fn clear(&mut self) {
         self.textarea = TextArea::new(vec![String::new()]);
-        self.textarea
-            .set_placeholder_text("Type a message. Enter adds a line; Ctrl/Cmd+Enter sends.");
+        self.textarea.set_placeholder_text(placeholder());
     }
 
     /// Returns the number of authored lines, including the current empty line.
@@ -74,7 +81,9 @@ impl Composer {
 
     fn apply_key(&mut self, key: KeyStroke) {
         match key {
-            KeyStroke::Enter => self.textarea.insert_newline(),
+            KeyStroke::CtrlEnter | KeyStroke::CmdEnter | KeyStroke::ShiftEnter => {
+                self.textarea.insert_newline();
+            }
             KeyStroke::Tab => {
                 self.textarea.insert_tab();
             }
@@ -92,8 +101,7 @@ impl Composer {
             KeyStroke::End => self.textarea.move_cursor(CursorMove::End),
             KeyStroke::PageUp => self.textarea.move_cursor(CursorMove::Top),
             KeyStroke::PageDown => self.textarea.move_cursor(CursorMove::Bottom),
-            KeyStroke::Escape | KeyStroke::CtrlEnter | KeyStroke::CmdEnter | KeyStroke::Ctrl(_) => {
-            }
+            KeyStroke::Enter | KeyStroke::Escape | KeyStroke::Ctrl(_) => {}
         }
     }
 }
@@ -104,14 +112,29 @@ mod tests {
     use crate::entities::application::input_event::{InputEvent, KeyStroke};
 
     #[test]
-    fn enter_adds_a_line_and_the_draft_keeps_it() {
+    fn newline_chords_add_a_line_and_the_draft_keeps_it() {
+        for chord in [
+            KeyStroke::CtrlEnter,
+            KeyStroke::CmdEnter,
+            KeyStroke::ShiftEnter,
+        ] {
+            let mut composer = Composer::new();
+            composer.apply(&InputEvent::Text("first".to_string()));
+            composer.apply(&InputEvent::Key(chord));
+            composer.apply(&InputEvent::Text("second".to_string()));
+
+            assert_eq!(composer.text(), "first\nsecond");
+            assert_eq!(composer.line_count(), 2);
+        }
+    }
+
+    #[test]
+    fn plain_enter_is_not_inserted_by_the_editor() {
         let mut composer = Composer::new();
         composer.apply(&InputEvent::Text("first".to_string()));
         composer.apply(&InputEvent::Key(KeyStroke::Enter));
-        composer.apply(&InputEvent::Text("second".to_string()));
 
-        assert_eq!(composer.text(), "first\nsecond");
-        assert_eq!(composer.line_count(), 2);
+        assert_eq!(composer.text(), "first");
     }
 
     #[test]
@@ -124,6 +147,14 @@ mod tests {
         assert_eq!(composer.text(), "b");
         composer.apply(&InputEvent::Key(KeyStroke::Delete));
         assert!(composer.is_empty());
+    }
+
+    #[test]
+    fn pasted_text_is_inserted_verbatim() {
+        let mut composer = Composer::new();
+        composer.apply(&InputEvent::Paste("/note".to_string()));
+
+        assert_eq!(composer.text(), "/note");
     }
 
     #[test]

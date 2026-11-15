@@ -93,8 +93,8 @@ fn render_frame(
     header::render(frame, chunks[0], &presentation);
     chat::render(frame, chunks[1], &presentation, composer, scroll);
     status::render(frame, chunks[2], &presentation);
-    if let Some(palette_view) = model.palette.as_ref() {
-        palette::render(frame, area, palette_view, palette);
+    if model.palette.is_some() {
+        palette::render(frame, area, &presentation);
     }
     if let Some(modal_view) = model.modal.as_ref() {
         modal::render(frame, area, modal_view, palette);
@@ -169,6 +169,37 @@ mod tests {
         assert!(text.contains("Terminal too small to display the UI."));
         assert!(!text.contains("Rigel"));
         assert!(!text.contains("Message"));
+        Ok(())
+    }
+
+    #[test]
+    fn palette_viewport_keeps_the_selected_item_visible() -> anyhow::Result<()> {
+        use crate::entities::{
+            palette::{
+                item::{PaletteAction, PaletteItem},
+                level::PaletteLevel,
+            },
+            render_model::palette::PaletteView,
+        };
+
+        let mut items = vec![PaletteItem::new("back", "← Back", PaletteAction::Back)];
+        items.extend((0..16).map(|index| {
+            PaletteItem::new(
+                format!("model-{index}"),
+                format!("model-{index}"),
+                PaletteAction::Info,
+            )
+        }));
+        let view = PaletteView::new(PaletteLevel::Models, items);
+        let last = RenderModel::empty(TerminalSize::new(60, 20))
+            .with_palette(Some(view.clone().with_selected(16)));
+        let last_text = buffer_text(&render(&last)?);
+        assert!(last_text.contains("› model-15"));
+
+        let first =
+            RenderModel::empty(TerminalSize::new(60, 20)).with_palette(Some(view.with_selected(0)));
+        let first_text = buffer_text(&render(&first)?);
+        assert!(first_text.contains("› ← Back"));
         Ok(())
     }
 
@@ -334,7 +365,8 @@ mod tests {
         assert!(text.contains("Set a goal"));
         assert!(text.contains("finish the task"));
         assert!(text.contains("Goal cannot be empty."));
-        assert!(text.contains("Ctrl/Cmd+Enter"));
+        assert!(text.contains("Enter: start"));
+        assert!(text.contains("Alt+Enter: line"));
         Ok(())
     }
 

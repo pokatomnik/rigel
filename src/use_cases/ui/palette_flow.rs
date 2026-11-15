@@ -19,9 +19,18 @@ impl UiWorkflow {
         match key {
             KeyStroke::Up => self.move_palette(-1),
             KeyStroke::Down | KeyStroke::Tab => self.move_palette(1),
-            KeyStroke::PageUp => self.move_palette(-5),
-            KeyStroke::PageDown => self.move_palette(5),
-            KeyStroke::Enter => self.activate_palette(),
+            key if key.confirms_modal() => self.activate_palette(),
+            _ => InputReaction::consumed(),
+        }
+    }
+
+    /// Handles printable vim navigation while the palette is open.
+    pub(super) fn handle_palette_text(&mut self, text: &str) -> InputReaction {
+        match text {
+            "j" => self.move_palette(1),
+            "k" => self.move_palette(-1),
+            "h" => self.leave_palette_if_nested(),
+            "l" => self.activate_palette(),
             _ => InputReaction::consumed(),
         }
     }
@@ -55,17 +64,7 @@ impl UiWorkflow {
                 }
                 InputReaction::consumed()
             }
-            PaletteAction::Back => {
-                let returned = self
-                    .state
-                    .palette_mut()
-                    .is_some_and(super::palette::PaletteState::back);
-                if !returned {
-                    self.state.set_palette(None);
-                    self.startup_palette = false;
-                }
-                InputReaction::consumed()
-            }
+            PaletteAction::Back => self.leave_palette_level(),
             PaletteAction::ConfirmExit => {
                 self.state.set_palette(None);
                 self.state.push_modal(ModalView::confirm_exit());
@@ -109,6 +108,30 @@ impl UiWorkflow {
         }
     }
 
+    fn leave_palette_if_nested(&mut self) -> InputReaction {
+        if self
+            .state
+            .palette()
+            .is_some_and(|palette| palette.has_parent())
+        {
+            self.leave_palette_level()
+        } else {
+            InputReaction::consumed()
+        }
+    }
+
+    fn leave_palette_level(&mut self) -> InputReaction {
+        let returned = self
+            .state
+            .palette_mut()
+            .is_some_and(super::palette::PaletteState::back);
+        if !returned {
+            self.state.set_palette(None);
+            self.startup_palette = false;
+        }
+        InputReaction::consumed()
+    }
+
     fn copy_to_clipboard(&mut self, target: crate::entities::palette::item::CopyTarget) {
         use crate::entities::agent_event::status::NoticeLevel;
         let Some(payload) = self.state.copy_payload(target) else {
@@ -140,7 +163,7 @@ mod tests {
     use crate::entities::{
         agent_event::event::AgentEvent,
         application::input_event::{InputEvent, KeyStroke, TerminalSize},
-        palette::{item::PaletteAction, level::PaletteLevel},
+        palette::level::PaletteLevel,
         transcript::entry::{EntryId, TranscriptEntry, TranscriptEntryKind},
     };
     use crate::infrastructure::ui::clipboard::Clipboard;
@@ -210,6 +233,74 @@ mod tests {
     }
 
     #[test]
+    fn vim_keys_navigate_and_page_keys_do_not_move_the_selection() {
+        let mut workflow = palette_workflow();
+        workflow.handle_input(InputEvent::Text("j".to_string()), "");
+        assert_eq!(
+            workflow
+                .render_model()
+                .palette
+                .map(|palette| palette.selected),
+            Some(1)
+        );
+
+        workflow.handle_input(InputEvent::Key(KeyStroke::PageDown), "");
+        assert_eq!(
+            workflow
+                .render_model()
+                .palette
+                .map(|palette| palette.selected),
+            Some(1)
+        );
+
+        workflow.handle_input(InputEvent::Text("k".to_string()), "");
+        assert_eq!(
+            workflow
+                .render_model()
+                .palette
+                .map(|palette| palette.selected),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn pasted_vim_letter_does_not_move_the_palette_selection() {
+        let mut workflow = palette_workflow();
+        workflow.handle_input(InputEvent::Paste("j".to_string()), "");
+
+        assert_eq!(
+            workflow
+                .render_model()
+                .palette
+                .map(|palette| palette.selected),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn vim_h_does_not_close_the_root_palette() {
+        let mut workflow = palette_workflow();
+        workflow.handle_input(InputEvent::Text("h".to_string()), "");
+
+        assert_eq!(
+            workflow.render_model().palette.map(|palette| palette.level),
+            Some(PaletteLevel::Root)
+        );
+    }
+
+    #[test]
+    fn vim_l_opens_the_selected_level() {
+        let mut workflow = palette_workflow();
+        workflow.handle_input(InputEvent::Text("j".to_string()), "");
+        workflow.handle_input(InputEvent::Text("l".to_string()), "");
+
+        assert_eq!(
+            workflow.render_model().palette.map(|palette| palette.level),
+            Some(PaletteLevel::Models)
+        );
+    }
+
+    #[test]
     fn back_item_returns_to_the_parent_level() {
         let mut workflow = palette_workflow();
         workflow.handle_input(InputEvent::Key(KeyStroke::Down), "");
@@ -219,7 +310,7 @@ mod tests {
             Some(PaletteLevel::Models)
         );
 
-        workflow.handle_input(InputEvent::Key(KeyStroke::Down), "");
+        workflow.handle_input(InputEvent::Key(KeyStroke::Up), "");
         let _ = workflow.handle_input(InputEvent::Key(KeyStroke::Enter), "");
         assert_eq!(
             workflow.render_model().palette.map(|palette| palette.level),
@@ -239,19 +330,12 @@ mod tests {
 
     #[test]
     fn disabled_items_do_nothing_when_activated() {
-        let mut workflow = palette_workflow();
-        workflow.handle_input(InputEvent::Key(KeyStroke::Down), "");
-        workflow.handle_input(InputEvent::Key(KeyStroke::Enter), "");
-        let items = workflow
-            .render_model()
-            .palette
-            .map(|palette| palette.items)
-            .unwrap_or_default();
-        assert!(
-            items
-                .iter()
-                .any(|item| matches!(item.action, PaletteAction::Back))
-        );
+        let mut workflow =
+            UiWorkflow::new(TerminalSize::new(80, 24)).with_startup_models(Vec::new());
+        let result = workflow.handle_input(InputEvent::Key(KeyStroke::Enter), "");
+
+        assert!(result.commands.is_empty());
+        assert!(workflow.render_model().palette.is_some());
     }
 
     #[test]

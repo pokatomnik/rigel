@@ -1,4 +1,10 @@
-use std::io::{self, IsTerminal, Stdout};
+use std::{
+    io::{self, IsTerminal, Stdout},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use ratatui::{
     Terminal,
@@ -14,7 +20,7 @@ use ratatui::{
 /// Owns terminal modes and restores them on every normal and error exit path.
 pub(crate) struct TuiLifecycle {
     terminal: Option<Terminal<CrosstermBackend<Stdout>>>,
-    active: bool,
+    active: Arc<AtomicBool>,
 }
 
 impl TuiLifecycle {
@@ -31,17 +37,25 @@ impl TuiLifecycle {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         if let Err(error) = execute!(stdout, EnterAlternateScreen, EnableBracketedPaste) {
-            let _ = disable_raw_mode();
+            restore_terminal_best_effort();
             return Err(error.into());
         }
+        // Keyboard enhancement is intentionally not requested. Crossterm 0.29
+        // does not parse the Kitty base-layout key or associated text, so full
+        // CSI-u reporting breaks Ctrl shortcuts and text input on non-Latin
+        // layouts. Legacy encoding keeps Ctrl+C/Q/K layout-independent, while
+        // Alt+Enter still reports a newline as ESC CR.
         match Terminal::new(CrosstermBackend::new(stdout)) {
-            Ok(terminal) => Ok(Self {
-                terminal: Some(terminal),
-                active: true,
-            }),
+            Ok(terminal) => {
+                let active = Arc::new(AtomicBool::new(true));
+                install_panic_hook(active.clone());
+                Ok(Self {
+                    terminal: Some(terminal),
+                    active,
+                })
+            }
             Err(error) => {
-                let _ = disable_raw_mode();
-                let _ = execute!(io::stdout(), DisableBracketedPaste, LeaveAlternateScreen);
+                restore_terminal_best_effort();
                 Err(error.into())
             }
         }
@@ -56,17 +70,34 @@ impl TuiLifecycle {
 
     /// Restores the terminal explicitly; dropping the guard repeats the best-effort restore.
     pub(crate) fn restore(&mut self) {
-        if !self.active {
+        if !self.active.swap(false, Ordering::SeqCst) {
             return;
         }
-        self.active = false;
         if let Some(terminal) = self.terminal.as_mut() {
             let _ = terminal.show_cursor();
         }
-        let mut stdout = io::stdout();
-        let _ = execute!(stdout, Show, DisableBracketedPaste, LeaveAlternateScreen);
-        let _ = disable_raw_mode();
+        restore_terminal_best_effort();
     }
+}
+
+fn restore_terminal_best_effort() {
+    let _ = execute!(
+        io::stdout(),
+        Show,
+        DisableBracketedPaste,
+        LeaveAlternateScreen
+    );
+    let _ = disable_raw_mode();
+}
+
+fn install_panic_hook(active: Arc<AtomicBool>) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if active.swap(false, Ordering::SeqCst) {
+            restore_terminal_best_effort();
+        }
+        previous(info);
+    }));
 }
 
 impl Drop for TuiLifecycle {

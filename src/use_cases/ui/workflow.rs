@@ -94,6 +94,7 @@ impl UiWorkflow {
             }
             InputEvent::Closed => InputReaction::commands(vec![AgentCommand::Exit]),
             InputEvent::Text(text) => self.handle_text(text, draft),
+            InputEvent::Paste(text) => self.handle_paste(text),
             InputEvent::Key(key) => self.handle_key(key, draft),
         }
     }
@@ -120,18 +121,41 @@ impl UiWorkflow {
     }
 
     fn handle_text(&mut self, text: String, draft: &str) -> InputReaction {
+        if self.state.is_fallback() {
+            return self.handle_fallback_text(text);
+        }
         if self.state.active_modal().is_some() {
             return self.handle_modal_text(text);
         }
-        if self.state.is_fallback() {
-            return InputReaction::consumed();
-        }
         if self.state.palette().is_some() {
-            return InputReaction::consumed();
+            return self.handle_palette_text(text.as_str());
+        }
+        if self.submit_focused {
+            self.focus_composer();
         }
         if text == "/" && draft.is_empty() {
             self.open_palette();
             return InputReaction::consumed();
+        }
+        if self.composer_accepts_text() {
+            InputReaction::composer()
+        } else {
+            InputReaction::consumed()
+        }
+    }
+
+    fn handle_paste(&mut self, text: String) -> InputReaction {
+        if self.state.is_fallback() {
+            return InputReaction::consumed();
+        }
+        if self.state.active_modal().is_some() {
+            return self.handle_modal_paste(text.as_str());
+        }
+        if self.state.palette().is_some() {
+            return InputReaction::consumed();
+        }
+        if self.submit_focused {
+            self.focus_composer();
         }
         if self.composer_accepts_text() {
             InputReaction::composer()
@@ -145,18 +169,22 @@ impl UiWorkflow {
             self.open_exit_confirmation();
             return InputReaction::consumed();
         }
+        if self.state.is_fallback() {
+            return self.handle_fallback_key(key);
+        }
         if self.state.active_modal().is_some() {
             return self.handle_modal_key(key);
-        }
-        if self.state.is_fallback() {
-            return match key {
-                KeyStroke::Escape => self.request_stop(),
-                _ => InputReaction::consumed(),
-            };
         }
         if self.state.palette().is_some() {
             return self.handle_palette_key(key);
         }
+        if self.submit_focused && !matches!(key, KeyStroke::Tab | KeyStroke::Enter) {
+            self.focus_composer();
+        }
+        self.handle_root_key(key, draft)
+    }
+
+    fn handle_root_key(&mut self, key: KeyStroke, draft: &str) -> InputReaction {
         match key {
             KeyStroke::Ctrl('k') => {
                 self.open_palette();
@@ -167,8 +195,14 @@ impl UiWorkflow {
                 self.toggle_focus();
                 InputReaction::consumed()
             }
-            KeyStroke::Enter if self.submit_focused => self.submit(draft),
-            KeyStroke::CtrlEnter | KeyStroke::CmdEnter => self.submit(draft),
+            KeyStroke::Enter => self.submit(draft),
+            KeyStroke::CtrlEnter | KeyStroke::CmdEnter | KeyStroke::ShiftEnter => {
+                if self.composer_accepts_text() {
+                    InputReaction::composer()
+                } else {
+                    InputReaction::consumed()
+                }
+            }
             KeyStroke::Ctrl('o') => {
                 self.state.toggle_last_block();
                 InputReaction::consumed()
@@ -180,9 +214,9 @@ impl UiWorkflow {
             _ => InputReaction::consumed(),
         }
     }
-
     fn submit(&mut self, draft: &str) -> InputReaction {
-        if draft.trim().is_empty() {
+        let blocked = self.stop_sent || self.state.activity() == AgentActivity::Stopping;
+        if draft.trim().is_empty() || blocked {
             return InputReaction::consumed();
         }
         self.state.clear_notices();
@@ -190,7 +224,8 @@ impl UiWorkflow {
         InputReaction::submitted(draft.to_string())
     }
 
-    fn request_stop(&mut self) -> InputReaction {
+    /// Requests one soft stop for the active agent run.
+    pub(super) fn request_stop(&mut self) -> InputReaction {
         if self.stop_sent
             || self.state.activity().is_idle()
             || self.state.activity() == AgentActivity::Stopping
@@ -209,6 +244,11 @@ impl UiWorkflow {
             self.composer_focused = false;
             self.submit_focused = true;
         }
+    }
+
+    fn focus_composer(&mut self) {
+        self.composer_focused = true;
+        self.submit_focused = false;
     }
 
     fn open_palette(&mut self) {
@@ -305,9 +345,9 @@ mod tests {
     }
 
     #[test]
-    fn submit_chord_sends_the_exact_draft_and_clears_the_editor() {
+    fn enter_sends_the_exact_draft_and_clears_the_editor() {
         let mut workflow = workflow();
-        let result = workflow.handle_input(InputEvent::Key(KeyStroke::CtrlEnter), "hello");
+        let result = workflow.handle_input(InputEvent::Key(KeyStroke::Enter), "hello");
 
         assert_eq!(
             result.commands,
@@ -318,6 +358,59 @@ mod tests {
             ]
         );
         assert!(result.clear_composer);
+    }
+
+    #[test]
+    fn enter_on_the_focused_send_control_submits_once() {
+        let mut workflow = workflow();
+        workflow.handle_input(InputEvent::Key(KeyStroke::Tab), "");
+        let result = workflow.handle_input(InputEvent::Key(KeyStroke::Enter), "hello");
+
+        assert_eq!(
+            result.commands,
+            [
+                crate::entities::agent_command::command::AgentCommand::SubmitPrompt {
+                    text: "hello".to_string()
+                }
+            ]
+        );
+        assert!(result.clear_composer);
+    }
+
+    #[test]
+    fn modified_enter_is_forwarded_to_the_composer_as_a_newline() {
+        let mut workflow = workflow();
+        let result = workflow.handle_input(InputEvent::Key(KeyStroke::CtrlEnter), "hello");
+
+        assert!(result.commands.is_empty());
+        assert!(result.forward_to_composer);
+        assert!(!result.clear_composer);
+    }
+
+    #[test]
+    fn enter_is_ignored_after_stop_request_before_the_stopping_event() {
+        let mut workflow = workflow();
+        workflow.apply_agent_event(AgentEvent::ActivityChanged(AgentActivity::Running));
+        let stop = workflow.handle_input(InputEvent::Key(KeyStroke::Escape), "");
+        let result = workflow.handle_input(InputEvent::Key(KeyStroke::Enter), "hello");
+
+        assert_eq!(
+            stop.commands,
+            [crate::entities::agent_command::command::AgentCommand::Stop]
+        );
+        assert!(result.commands.is_empty());
+        assert!(!result.clear_composer);
+    }
+
+    #[test]
+    fn enter_is_ignored_while_stopping_and_keeps_the_draft() {
+        let mut workflow = workflow();
+        workflow.apply_agent_event(AgentEvent::ActivityChanged(AgentActivity::Stopping));
+        let result = workflow.handle_input(InputEvent::Key(KeyStroke::Enter), "hello");
+
+        assert!(result.commands.is_empty());
+        assert!(!result.clear_composer);
+        assert!(!result.forward_to_composer);
     }
 
     #[test]
@@ -354,6 +447,55 @@ mod tests {
     }
 
     #[test]
+    fn vim_l_confirms_the_permission_selection() {
+        let mut workflow = workflow();
+        workflow.apply_agent_event(AgentEvent::PermissionRequested(permission()));
+        let result = workflow.handle_input(InputEvent::Text("l".to_string()), "");
+
+        assert_eq!(
+            result.commands,
+            [
+                crate::entities::agent_command::command::AgentCommand::ResolvePermission {
+                    correlation_id: 7,
+                    decision:
+                        crate::entities::tool_confirm_result::outcome::ToolConfirmResult::Deny,
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn modified_enter_confirms_the_permission_selection() {
+        let mut workflow = workflow();
+        workflow.apply_agent_event(AgentEvent::PermissionRequested(permission()));
+        let result = workflow.handle_input(InputEvent::Key(KeyStroke::CtrlEnter), "");
+
+        assert_eq!(
+            result.commands,
+            [
+                crate::entities::agent_command::command::AgentCommand::ResolvePermission {
+                    correlation_id: 7,
+                    decision:
+                        crate::entities::tool_confirm_result::outcome::ToolConfirmResult::Deny,
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn vim_l_confirms_the_exit_selection() {
+        let mut workflow = workflow();
+        workflow.handle_input(InputEvent::Key(KeyStroke::Ctrl('c')), "");
+        workflow.handle_input(InputEvent::Text("j".to_string()), "");
+        let result = workflow.handle_input(InputEvent::Text("l".to_string()), "");
+
+        assert_eq!(
+            result.commands,
+            [crate::entities::agent_command::command::AgentCommand::Exit]
+        );
+    }
+
+    #[test]
     fn ctrl_c_opens_and_confirms_exit_without_stopping_immediately() {
         let mut workflow = workflow();
         workflow.apply_agent_event(AgentEvent::ActivityChanged(AgentActivity::Running));
@@ -378,6 +520,73 @@ mod tests {
         let mut other = UiWorkflow::new(TerminalSize::new(80, 24));
         let typed = other.handle_input(InputEvent::Text("/".to_string()), "draft");
         assert!(typed.forward_to_composer);
+    }
+
+    #[test]
+    fn pasted_slash_is_composer_text() {
+        let mut workflow = workflow();
+        let result = workflow.handle_input(InputEvent::Paste("/".to_string()), "");
+
+        assert!(result.forward_to_composer);
+        assert!(workflow.render_model().palette.is_none());
+    }
+
+    #[test]
+    fn paste_does_not_confirm_an_exit_modal() {
+        let mut workflow = workflow();
+        workflow.handle_input(InputEvent::Key(KeyStroke::Ctrl('c')), "");
+        let result = workflow.handle_input(InputEvent::Paste("y".to_string()), "");
+
+        assert!(result.commands.is_empty());
+        assert!(workflow.render_model().modal.is_some());
+    }
+
+    #[test]
+    fn fallback_ignores_input_for_a_hidden_permission_modal() {
+        let mut workflow = workflow();
+        workflow.apply_agent_event(AgentEvent::PermissionRequested(permission()));
+        workflow.handle_input(InputEvent::Resize(TerminalSize::new(59, 20)), "");
+
+        let enter = workflow.handle_input(InputEvent::Key(KeyStroke::Enter), "");
+        let answer = workflow.handle_input(InputEvent::Text("y".to_string()), "");
+
+        assert!(enter.commands.is_empty());
+        assert!(answer.commands.is_empty());
+        assert!(matches!(
+            workflow.render_model().modal,
+            Some(crate::entities::render_model::modal::ModalView::Permission { .. })
+        ));
+
+        workflow.handle_input(InputEvent::Resize(TerminalSize::new(80, 24)), "");
+        assert!(matches!(
+            workflow.render_model().modal,
+            Some(crate::entities::render_model::modal::ModalView::Permission { .. })
+        ));
+    }
+
+    #[test]
+    fn fallback_still_handles_the_visible_exit_confirmation() {
+        let mut workflow = workflow();
+        workflow.handle_input(InputEvent::Resize(TerminalSize::new(59, 20)), "");
+        workflow.handle_input(InputEvent::Key(KeyStroke::Ctrl('c')), "");
+        let result = workflow.handle_input(InputEvent::Text("y".to_string()), "");
+
+        assert_eq!(
+            result.commands,
+            [crate::entities::agent_command::command::AgentCommand::Exit]
+        );
+    }
+
+    #[test]
+    fn typing_while_send_is_focused_returns_focus_to_the_composer() {
+        let mut workflow = workflow();
+        workflow.handle_input(InputEvent::Key(KeyStroke::Tab), "");
+        let typed = workflow.handle_input(InputEvent::Text("a".to_string()), "");
+        let model = workflow.render_model();
+
+        assert!(typed.forward_to_composer);
+        assert!(model.composer.focused);
+        assert!(!model.composer.submit_focused);
     }
 
     #[test]
@@ -465,7 +674,7 @@ mod tests {
             Some(crate::entities::render_model::modal::ModalView::Goal { .. })
         ));
 
-        let empty = workflow.handle_input(InputEvent::Key(KeyStroke::CtrlEnter), "");
+        let empty = workflow.handle_input(InputEvent::Key(KeyStroke::Enter), "");
         assert!(empty.commands.is_empty());
         assert!(matches!(
             workflow.render_model().modal,
@@ -473,7 +682,7 @@ mod tests {
         ));
 
         workflow.handle_input(InputEvent::Text("finish the task".to_string()), "");
-        let sent = workflow.handle_input(InputEvent::Key(KeyStroke::CtrlEnter), "");
+        let sent = workflow.handle_input(InputEvent::Key(KeyStroke::Enter), "");
         assert_eq!(
             sent.commands,
             [
@@ -481,6 +690,58 @@ mod tests {
                     goal: "finish the task".to_string(),
                 }
             ]
+        );
+    }
+
+    #[test]
+    fn pasted_text_is_accepted_by_the_goal_modal() {
+        let mut workflow = workflow();
+        workflow.handle_input(InputEvent::Key(KeyStroke::Ctrl('k')), "");
+        activate_palette_item(&mut workflow, "goal");
+        workflow.handle_input(InputEvent::Paste("finish".to_string()), "");
+        let result = workflow.handle_input(InputEvent::Key(KeyStroke::Enter), "");
+
+        assert_eq!(
+            result.commands,
+            [
+                crate::entities::agent_command::command::AgentCommand::StartGoal {
+                    goal: "finish".to_string(),
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn modified_enter_adds_a_line_inside_the_goal() {
+        let mut workflow = workflow();
+        workflow.handle_input(InputEvent::Key(KeyStroke::Ctrl('k')), "");
+        activate_palette_item(&mut workflow, "goal");
+        workflow.handle_input(InputEvent::Text("first".to_string()), "");
+        workflow.handle_input(InputEvent::Key(KeyStroke::CtrlEnter), "");
+        workflow.handle_input(InputEvent::Text("second".to_string()), "");
+        let result = workflow.handle_input(InputEvent::Key(KeyStroke::Enter), "");
+
+        assert_eq!(
+            result.commands,
+            [
+                crate::entities::agent_command::command::AgentCommand::StartGoal {
+                    goal: "first\nsecond".to_string(),
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn vim_l_confirms_the_new_conversation_selection() {
+        let mut workflow = workflow();
+        workflow.handle_input(InputEvent::Key(KeyStroke::Ctrl('k')), "");
+        activate_palette_item(&mut workflow, "new");
+        workflow.handle_input(InputEvent::Text("j".to_string()), "");
+        let result = workflow.handle_input(InputEvent::Text("l".to_string()), "");
+
+        assert_eq!(
+            result.commands,
+            [crate::entities::agent_command::command::AgentCommand::NewConversation]
         );
     }
 

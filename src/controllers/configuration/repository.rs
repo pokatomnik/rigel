@@ -68,11 +68,19 @@ impl FileConfigurationRepository {
     }
 
     fn parse(content: &str) -> anyhow::Result<RigelConfig> {
-        let config: RigelConfig = toml::from_str(content)?;
+        let config: RigelConfig =
+            toml::from_str(content).map_err(|error| Self::parse_error(content, error))?;
         for (model_id, model) in &config.models {
             model.validate(model_id)?;
         }
         Ok(config)
+    }
+
+    fn parse_error(content: &str, error: toml::de::Error) -> anyhow::Error {
+        if content.contains("apiKey") {
+            return anyhow::anyhow!("invalid Rigel configuration TOML: {}", error.message());
+        }
+        error.into()
     }
 
     fn missing_file_error(path: &Path) -> anyhow::Error {
@@ -191,6 +199,18 @@ mod tests {
         )?;
         assert!(result.is_none());
         Ok(())
+    }
+
+    #[test]
+    fn malformed_api_key_errors_do_not_echo_the_secret() {
+        let error = match FileConfigurationRepository::parse("apiKey = \"sk-secret\n") {
+            Ok(_) => return,
+            Err(error) => error,
+        };
+        let message = error.to_string();
+
+        assert!(!message.contains("sk-secret"));
+        assert!(message.contains("invalid Rigel configuration TOML"));
     }
 
     #[test]

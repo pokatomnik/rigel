@@ -11,6 +11,7 @@ use crate::entities::{
 };
 
 use super::{color, hint, modal_block, option_line};
+use crate::controllers::tui::screens::visible_offset;
 
 pub(super) fn render(
     frame: &mut Frame<'_>,
@@ -55,10 +56,19 @@ pub(super) fn render(
             selected == request.answers.len(),
             palette,
         ));
-        frame.render_widget(Paragraph::new(lines), chunks[1]);
+        let visible = usize::from(chunks[1].height);
+        let offset = visible_offset(lines.len(), selected, visible);
+        let visible_lines = lines
+            .into_iter()
+            .skip(offset)
+            .take(visible)
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(visible_lines), chunks[1]);
     }
-    frame.render_widget(
-        hint("↑/↓ select · Enter confirm · Esc cancel", palette),
-        chunks[3],
-    );
+    let hint_text = if free_form {
+        "Enter submit · Esc cancel"
+    } else {
+        "↑/↓ j/k · Enter · Esc"
+    };
+    frame.render_widget(hint(hint_text, palette), chunks[3]);
 }

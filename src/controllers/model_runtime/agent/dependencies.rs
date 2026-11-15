@@ -17,6 +17,10 @@ use crate::{
     },
 };
 
+/// Builds a permission prompter bound to the agent scope that requested it.
+type PermissionPrompterFactory =
+    Arc<dyn Fn(InteractionOrigin) -> Arc<dyn ToolPermissionPrompter> + Send + Sync>;
+
 pub(crate) struct ConfiguredAgent<M: CompletionModelTrait> {
     /// The provider agent configured with the selected tools and runtime hooks.
     pub(crate) agent: RigAgent<M>,
@@ -55,8 +59,7 @@ pub(crate) struct AgentWiring {
     chat_tools: Option<Arc<RegisteredToolSet>>,
     subagent_tools: Option<Arc<RegisteredToolSet>>,
     event_sink: Option<Arc<dyn EventSink>>,
-    permission_prompter_factory:
-        Option<Arc<dyn Fn(InteractionOrigin) -> Arc<dyn ToolPermissionPrompter> + Send + Sync>>,
+    permission_prompter_factory: Option<PermissionPrompterFactory>,
     user_interaction: Option<Arc<dyn UserInteraction>>,
     run_cancellation: Option<Arc<dyn RunCancellation>>,
 }
@@ -156,7 +159,7 @@ impl AgentWiring {
     /// Supplies a factory that binds permission prompts to the asking agent scope.
     pub(crate) fn with_permission_prompter_factory(
         mut self,
-        factory: Arc<dyn Fn(InteractionOrigin) -> Arc<dyn ToolPermissionPrompter> + Send + Sync>,
+        factory: PermissionPrompterFactory,
     ) -> Self {
         self.permission_prompter_factory = Some(factory);
         self

@@ -10,13 +10,16 @@ use crate::{
     controllers::tui::theme,
     entities::{
         agent_event::status::{AgentActivity, NoticeLevel},
+        application::input_event::SUBMIT_KEY_LABEL,
         theme::{palette::Palette, token::ColorToken},
     },
 };
 
 use super::Presentation;
 
-const IDLE_HINT: &str = "Enter: newline · Ctrl/Cmd+Enter: send · Ctrl+K: commands";
+fn idle_hint() -> String {
+    format!("{SUBMIT_KEY_LABEL}: send · Alt+Enter: newline · Ctrl+K")
+}
 
 /// Renders the single-line status, notice, or read-only banner.
 pub(crate) fn render(frame: &mut Frame<'_>, area: Rect, presentation: &Presentation<'_>) {
@@ -53,7 +56,10 @@ fn color(palette: &Palette, token: ColorToken) -> Color {
 
 fn activity_text(activity: AgentActivity, hint: Option<&str>) -> (String, ColorToken) {
     match activity {
-        AgentActivity::Idle => (hint.unwrap_or(IDLE_HINT).to_string(), ColorToken::Muted),
+        AgentActivity::Idle => (
+            hint.map(ToOwned::to_owned).unwrap_or_else(idle_hint),
+            ColorToken::Muted,
+        ),
         AgentActivity::Running => ("Working... Esc to stop".to_string(), ColorToken::Accent),
         AgentActivity::Stopping => ("Stopping...".to_string(), ColorToken::Warning),
         AgentActivity::Compacting => ("Compacting...".to_string(), ColorToken::Warning),

@@ -145,6 +145,7 @@ impl ReadOnlyState {
     }
 
     /// Creates a blocked state with the persistence failure reason.
+    #[cfg(test)]
     pub(crate) fn read_only(reason: impl Into<String>) -> Self {
         Self {
             active: true,

@@ -117,7 +117,7 @@ impl UiState {
     fn status_view(&self) -> StatusView {
         let hint = if self.queue_len > 0 {
             Some(format!(
-                "{} queued · Enter: newline · Ctrl/Cmd+Enter: send",
+                "{} queued · Enter: send · Alt+Enter: newline",
                 self.queue_len
             ))
         } else {

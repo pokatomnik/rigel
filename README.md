@@ -35,6 +35,11 @@ valid layer, or defaults if neither is usable. An explicit `--profile` is
 required, so its read or parse errors are reported; project configuration remains
 optional.
 
+The provider key can be configured in two ways. `apiKey` stores the key itself;
+`envKey` names an environment variable that contains it. `apiKey` takes
+precedence when both are set, and a blank `apiKey` is ignored. Prefer `envKey`
+when the configuration file is shared or version-controlled.
+
 The MCP servers whose tools are exposed to the agent are declared in TOML:
 
 ```toml
@@ -130,7 +135,9 @@ specified.
 
 During `rigel chat`, Rigel renders a full-screen Ratatui interface. Press `Ctrl+K`
 (or type `/` in an empty composer) to open the command palette; navigate with
-`↑`/`↓`, confirm with `Enter`, and go back with `Esc`. The palette provides:
+`↑`/`↓` or `j`/`k`, confirm with `Enter` or `l`, and go back with `h` or
+`Esc`. The `← Back` item is the first entry on nested levels. The palette
+provides:
 
 - **Change model** — switch the active model; the list shows each configured
   model's `context_size`
@@ -142,11 +149,39 @@ During `rigel chat`, Rigel renders a full-screen Ratatui interface. Press `Ctrl+
 - **Copy last answer / block / summary**, **Jump to latest**, **Dismiss notices**
 - **Exit Rigel** — exit after confirmation
 
+A typed `/` in an empty composer opens the palette. To send a message that
+starts with `/`, paste the slash from the clipboard: pasted text is inserted
+literally and never opens the palette.
+
 Palette commands that change state are available only while the agent is idle
 and no goal is active. While the agent runs, `Esc` requests a soft stop;
 `Ctrl+C` and `Ctrl+Q` open the exit confirmation, and the agent stops before
-Rigel exits. In the composer, `Enter` inserts a newline and
-`Ctrl+Enter` (`Cmd+Enter` on macOS) sends the message.
+Rigel exits. In the composer, `Enter` sends the message. Insert a newline with
+`Alt+Enter`: it is the terminal-independent chord and works in Zed, Ghostty,
+iTerm2 and legacy terminals because the terminal sends it as `ESC CR`.
+`Cmd+Enter` on macOS or `Ctrl+Enter` on Windows/Linux also insert a newline when
+the terminal reports the modified key as a CSI-u sequence; many terminals and
+IDE-embedded terminals do not. `Shift+Enter` is accepted where the terminal
+reports it separately, but it is not reliable in Zed. Rigel intentionally uses legacy keyboard
+encoding: crossterm 0.29 does not parse the Kitty base-layout key or associated
+text, and `REPORT_ALL_KEYS_AS_ESCAPE_CODES` would break `Ctrl+C`/`Ctrl+Q`/`Ctrl+K`
+and text input on non-Latin layouts.
+
+As of Zed 1.28.1, Zed's embedded terminal does not implement the Kitty keyboard
+protocol and binds `Ctrl+Enter`/`Cmd+Enter` itself, so those chords do not reach
+a TUI running inside it. `Enter` sends and `Alt+Enter` inserts a newline there.
+To use `Cmd/Ctrl+Enter` for newlines in Zed, add this binding to Zed's user
+keymap to forward the chords to the terminal application (it sends `Alt+Enter`):
+
+```json
+{
+  "context": "Terminal",
+  "bindings": {
+    "cmd-enter": ["terminal::SendKeystroke", "alt-enter"],
+    "ctrl-enter": ["terminal::SendKeystroke", "alt-enter"]
+  }
+}
+```
 
 After a successful provider request, Rigel automatically compacts the chat or
 subagent history when the last request used at least 80% of the selected
