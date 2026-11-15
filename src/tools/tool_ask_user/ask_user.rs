@@ -5,9 +5,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     entities::{
-        application::input_outcome::InputOutcome,
-        conversation::context_usage::ContextUsage,
-        tool::{interaction_failure::InteractionFailure, tool_entities::PermissionRequirement},
+        application::input_outcome::InputOutcome, conversation::context_usage::ContextUsage,
+        tool::tool_entities::PermissionRequirement,
     },
     infrastructure::{interaction::UserInteraction, tools::permissions::ToolPermissionMetadata},
     tools::{action::Action, error_codes},
@@ -72,7 +71,7 @@ impl AskUser {
         Ok(())
     }
 
-    fn answer(
+    async fn answer(
         &self,
         args: &AskUserArgs,
         context: &ToolContext,
@@ -81,10 +80,11 @@ impl AskUser {
         let selection = self
             .interaction
             .select(&args.question, &items)
+            .await
             .map_err(interaction_error)?;
         match selection {
             Some(index) if index < args.answers.len() => Ok(args.answers[index].clone()),
-            Some(index) if index == args.answers.len() => self.free_answer(context),
+            Some(index) if index == args.answers.len() => self.free_answer(context).await,
             Some(_) => Err(interaction_unavailable(
                 "the selection UI returned an invalid item.",
             )),
@@ -92,21 +92,19 @@ impl AskUser {
         }
     }
 
-    fn free_answer(&self, context: &ToolContext) -> Result<String, ToolExecutionError> {
+    async fn free_answer(&self, context: &ToolContext) -> Result<String, ToolExecutionError> {
         let context_usage = context_usage(context)?;
         loop {
             match self
                 .interaction
                 .readline(context_usage)
+                .await
                 .map_err(interaction_error)?
             {
                 InputOutcome::Text(answer) if answer.trim().is_empty() => continue,
                 InputOutcome::Text(answer) => {
                     validate_text("answer", &answer, MAX_ANSWER_BYTES)?;
                     return Ok(answer);
-                }
-                InputOutcome::Eof => {
-                    return Err(interaction_unavailable("the user input reached EOF."));
                 }
                 InputOutcome::Cancelled => {
                     return Err(user_cancelled("the user cancelled free-form input."));
@@ -177,7 +175,7 @@ impl Tool for AskUser {
         args: Self::Args,
     ) -> Result<Self::Output, Self::Error> {
         Self::validate_arguments(&args)?;
-        let answer = self.answer(&args, context)?;
+        let answer = self.answer(&args, context).await?;
         Ok(Self::output(answer))
     }
 }
@@ -216,12 +214,7 @@ fn invalid_argument(message: impl Into<String>) -> ToolExecutionError {
 }
 
 fn interaction_error(error: anyhow::Error) -> ToolExecutionError {
-    match error.downcast_ref::<InteractionFailure>() {
-        Some(InteractionFailure::Cancelled) => {
-            user_cancelled("the user cancelled the interaction.")
-        }
-        _ => interaction_unavailable("the user interaction is unavailable."),
-    }
+    interaction_unavailable(format!("the user interaction is unavailable: {error}"))
 }
 
 fn user_cancelled(message: impl Into<String>) -> ToolExecutionError {
@@ -244,9 +237,8 @@ mod tests {
     use super::{AskUser, AskUserArgs, SOMETHING_ELSE};
     use crate::{
         entities::{
-            application::input_outcome::InputOutcome,
-            conversation::context_usage::ContextUsage,
-            tool::{interaction_failure::InteractionFailure, tool_entities::PermissionRequirement},
+            application::input_outcome::InputOutcome, conversation::context_usage::ContextUsage,
+            tool::tool_entities::PermissionRequirement,
         },
         infrastructure::{
             interaction::UserInteraction, tools::permissions::ToolPermissionMetadata,
@@ -288,30 +280,37 @@ mod tests {
     }
 
     impl UserInteraction for StubInteraction {
-        fn select(
-            &self,
-            _question: &str,
-            items: &[String],
-        ) -> Result<Option<usize>, anyhow::Error> {
+        fn select<'a>(
+            &'a self,
+            _question: &'a str,
+            items: &'a [String],
+        ) -> futures::future::BoxFuture<'a, Result<Option<usize>, anyhow::Error>> {
             if let Ok(mut captured) = self.items.lock() {
                 *captured = items.to_vec();
             }
-            self.selections
+            let selection = self
+                .selections
                 .lock()
                 .ok()
                 .and_then(|mut selections| selections.pop_front())
-                .unwrap_or_else(|| Err(anyhow::Error::new(InteractionFailure::Unavailable)))
+                .unwrap_or_else(|| Err(anyhow::anyhow!("unavailable")));
+            Box::pin(async move { selection })
         }
 
-        fn readline(&self, context_usage: ContextUsage) -> Result<InputOutcome, anyhow::Error> {
+        fn readline<'a>(
+            &'a self,
+            context_usage: ContextUsage,
+        ) -> futures::future::BoxFuture<'a, Result<InputOutcome, anyhow::Error>> {
             if let Ok(mut contexts) = self.contexts.lock() {
                 contexts.push(context_usage);
             }
-            self.inputs
+            let outcome = self
+                .inputs
                 .lock()
                 .ok()
                 .and_then(|mut inputs| inputs.pop_front())
-                .unwrap_or_else(|| Err(anyhow::Error::new(InteractionFailure::Unavailable)))
+                .unwrap_or_else(|| Err(anyhow::anyhow!("unavailable")));
+            Box::pin(async move { outcome })
         }
     }
 
@@ -416,36 +415,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_eof_and_interaction_errors_are_not_successes() {
-        for (outcome, expected_code) in [
-            (
-                Err(anyhow::Error::new(InteractionFailure::Cancelled)),
-                error_codes::USER_CANCELLED,
-            ),
-            (Ok(None), error_codes::USER_CANCELLED),
-        ] {
-            let interaction = Arc::new(StubInteraction::new(outcome, Vec::new()));
-            let tool = tool(interaction);
+    async fn cancellation_and_interaction_errors_are_not_successes() {
+        {
+            let interaction = Arc::new(StubInteraction::new(Ok(None), Vec::new()));
+            let ask_user = tool(interaction);
             let mut context = ToolContext::new();
-            let result = tool.call(&mut context, args("Choose", &["first"])).await;
+            let result = ask_user
+                .call(&mut context, args("Choose", &["first"]))
+                .await;
 
             assert!(result.is_err());
             if let Err(error) = result {
-                assert_eq!(error.code(), Some(expected_code));
+                assert_eq!(error.code(), Some(error_codes::USER_CANCELLED));
             }
         }
 
-        let interaction = Arc::new(StubInteraction::new(
-            Ok(Some(1)),
-            vec![Ok(InputOutcome::Eof)],
-        ));
-        let tool = tool(interaction);
-        let mut context = context();
-        let result = tool.call(&mut context, args("Choose", &["first"])).await;
+        {
+            let interaction = Arc::new(StubInteraction::new(
+                Ok(Some(1)),
+                vec![Err(anyhow::anyhow!("unavailable"))],
+            ));
+            let ask_user = tool(interaction);
+            let mut context = context();
+            let result = ask_user
+                .call(&mut context, args("Choose", &["first"]))
+                .await;
 
-        assert!(result.is_err());
-        if let Err(error) = result {
-            assert_eq!(error.code(), Some(error_codes::INTERACTION_UNAVAILABLE));
+            assert!(result.is_err());
+            if let Err(error) = result {
+                assert_eq!(error.code(), Some(error_codes::INTERACTION_UNAVAILABLE));
+            }
         }
     }
 

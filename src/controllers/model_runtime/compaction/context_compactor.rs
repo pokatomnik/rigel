@@ -11,7 +11,6 @@ use crate::{
     controllers::model_runtime::history::message_codec::to_provider,
     entities::conversation::conversation_message::ConversationMessage,
     infrastructure::{conversation::ConversationSummarizer, prompts::PromptProvider},
-    shared::terminal::loader::WithLoader,
 };
 
 /// Adapts Rig chat summarization to the provider-neutral conversation boundary.
@@ -52,7 +51,6 @@ where
             let agent = self.agent.lock().await;
             agent
                 .chat(self.prompt_provider.summarization(), &mut provider_messages)
-                .with_spinner()
                 .await
                 .map_err(Into::into)
         })

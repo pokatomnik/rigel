@@ -4,12 +4,23 @@ use serde_json::Value;
 /// Model-specific provider parameters that do not replace transport-owned fields.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct ModelConfig {
+    /// Configured context window in tokens; models without it are hidden from selection.
+    #[serde(default, rename = "context_size")]
+    pub(crate) context_size: Option<u64>,
     /// Additional JSON-compatible request parameters.
     #[serde(default)]
     pub(crate) params: toml::Table,
 }
 
 impl ModelConfig {
+    /// Validates the configured context limit and provider-owned parameter names.
+    pub(crate) fn validate(&self, model_id: &str) -> anyhow::Result<()> {
+        if self.context_size == Some(0) {
+            anyhow::bail!("model `{model_id}` context_size must be greater than zero");
+        }
+        self.request_parameters(model_id).map(|_| ())
+    }
+
     /// Converts configured TOML parameters after validating provider-owned names.
     pub(crate) fn request_parameters(&self, model_id: &str) -> anyhow::Result<Option<Value>> {
         Self::validate_param_names(model_id, &self.params)?;
@@ -22,6 +33,7 @@ impl ModelConfig {
     /// Merges nested provider parameters while letting project values win.
     pub(crate) fn merge(global: Self, project: Self) -> Self {
         Self {
+            context_size: project.context_size.or(global.context_size),
             params: merge_tables(global.params, project.params),
         }
     }

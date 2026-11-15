@@ -1,7 +1,8 @@
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Identifies where a skill was discovered so duplicate names can be explained.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub(crate) enum SkillOrigin {
     /// A skill supplied by the current workspace.
     Project,
@@ -23,7 +24,7 @@ impl SkillOrigin {
 }
 
 /// Metadata for a skill; storage and filesystem handles stay outside the entity.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SkillDescriptor {
     name: String,
     origin: SkillOrigin,

@@ -4,11 +4,7 @@ use rig::agent::{AgentHook, HookContext, ToolCall, ToolCallAction};
 
 use crate::{
     controllers::model_runtime::permissions::catalog::ToolPermissionCatalog,
-    controllers::terminal::terminal_io::TerminalIO,
-    entities::{
-        tool::tool_entities::{ToolPermissionDecision, ToolPermissionRequest},
-        tool_confirm_result::outcome::ToolConfirmResult,
-    },
+    entities::tool::tool_entities::{ToolPermissionDecision, ToolPermissionRequest},
     infrastructure::{
         interaction::ToolPermissionPrompter, tools::permissions::ToolPermissionEvaluator,
     },
@@ -48,15 +44,11 @@ impl ToolPermissionHook {
     }
 }
 
-impl ToolPermissionPrompter for TerminalIO {
-    fn confirm(&self, request: &ToolPermissionRequest) -> ToolConfirmResult {
-        self.confirm_tool_call(format!("Allow tool call `{}`?", request.tool_name()).as_str())
-    }
-}
-
 impl AgentHook for ToolPermissionHook {
     async fn on_tool_call(&self, _ctx: &HookContext, event: ToolCall<'_>) -> ToolCallAction {
-        let request = ToolPermissionRequest::new(event.tool_name.to_string());
+        let arguments = serde_json::from_str(event.args)
+            .unwrap_or_else(|_| serde_json::Value::String(event.args.to_string()));
+        let request = ToolPermissionRequest::new(event.tool_name.to_string(), arguments);
         self.decide(&request).await
     }
 }

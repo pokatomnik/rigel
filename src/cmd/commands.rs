@@ -5,7 +5,7 @@ use clap::{Args, Subcommand};
 /// All CLI subcommands parsed before application request mapping.
 #[derive(Subcommand, Clone, Debug)]
 pub(crate) enum Commands {
-    /// Create or overwrite the default configuration.
+    /// Create the default configuration without overwriting an existing file.
     Init(InitArgs),
     /// Start an interactive chat session.
     Chat(ChatArgs),

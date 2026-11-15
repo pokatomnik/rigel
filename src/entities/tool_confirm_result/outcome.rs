@@ -1,6 +1,8 @@
 use std::fmt::Display;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) enum ToolConfirmResult {
     /// Do not execute the tool call.
     #[default]
@@ -17,6 +19,22 @@ pub(crate) enum ToolConfirmResult {
 
     /// Allow this tool globally.
     AllowForever,
+}
+
+impl ToolConfirmResult {
+    /// Every decision in the order shown by the permission modal.
+    pub(crate) const ALL: [Self; 5] = [
+        Self::Deny,
+        Self::AllowOnce,
+        Self::AllowForProject,
+        Self::AllowForSession,
+        Self::AllowForever,
+    ];
+
+    /// Resolves a zero-based modal selection, clamping unknown indices to `Deny`.
+    pub(crate) fn from_index(index: usize) -> Self {
+        Self::ALL.get(index).copied().unwrap_or_default()
+    }
 }
 
 impl Display for ToolConfirmResult {
@@ -38,6 +56,14 @@ mod tests {
     #[test]
     fn default_result_is_deny() {
         assert_eq!(ToolConfirmResult::default(), ToolConfirmResult::Deny);
+    }
+
+    #[test]
+    fn modal_indices_round_trip_through_every_decision() {
+        for (index, decision) in ToolConfirmResult::ALL.iter().enumerate() {
+            assert_eq!(ToolConfirmResult::from_index(index), *decision);
+        }
+        assert_eq!(ToolConfirmResult::from_index(99), ToolConfirmResult::Deny);
     }
 
     #[test]

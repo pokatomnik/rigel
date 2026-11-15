@@ -1,9 +1,11 @@
-pub mod chat_controller;
 pub mod configuration;
 pub mod init_controller;
 pub mod mcp_registry;
 pub mod model_runtime;
 pub mod network;
 pub mod skills;
+pub mod storage;
 pub mod terminal;
+pub mod tui;
+pub mod ui_bridge;
 pub mod workspace;

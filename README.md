@@ -35,6 +35,10 @@ valid layer, or defaults if neither is usable. An explicit `--profile` is
 required, so its read or parse errors are reported; project configuration remains
 optional.
 
+Rigel never stores the provider key in the configuration file. `envKey` names
+the environment variable that contains the key, and Rigel reads that variable
+when it builds the provider client.
+
 The MCP servers whose tools are exposed to the agent are declared in TOML:
 
 ```toml
@@ -68,19 +72,35 @@ session, or allow it forever. Project allowances are stored in
 allowances last until that agent is rebuilt, and deny/once decisions are not
 stored. `rigel init` creates the global file without any policies.
 
-Model-specific provider parameters can be configured under `models`. The model
-key must exactly match the ID returned by `/models` (including letter case):
+Model-specific provider parameters and the model's context window can be
+configured under `models`. The model key must exactly match the provider model
+ID (including letter case):
 
 ```toml
+[models."gpt-5.5"]
+context_size = 128000
+
 [models."gpt-5.5".params]
 reasoning_effort = "high"
+
+[models."qwen3"]
+context_size = 32768
 
 [models."qwen3".params]
 think = true
 
+[models."router-model"]
+context_size = 1000000
+
 [models."router-model".params.reasoning]
 effort = "high"
 ```
+
+`context_size` is required for a model to appear in the model palette; models
+without it are hidden, and there is no default or fallback. If no configured
+model has `context_size`, the palette shows that Rigel is not configured and
+offers only exit. Rigel does not query `/models` to discover models or context
+sizes.
 
 Values may be strings, booleans, numbers, arrays, or nested tables. Rigel does
 not determine provider or model capabilities and does not normalize these
@@ -112,36 +132,78 @@ specified.
 
 ### Interactive commands
 
-During `rigel chat`, the following commands are available:
+During `rigel chat`, Rigel renders a full-screen Ratatui interface. Press `Ctrl+K`
+(or type `/` in an empty composer) to open the command palette; navigate with
+`↑`/`↓` or `j`/`k`, confirm with `Enter` or `l`, and go back with `h` or
+`Esc`. The `← Back` item is the first entry on nested levels. The palette
+provides:
 
-- `/exit` — exit the chat
-- `/skills` — choose a skill and send its instructions to the agent; `/skill` is an alias
-- `/help` — show the command list
-- `/editor` — write a prompt in the default editor
-- `/new` — clear the conversation history
-- `/compact` — compact the conversation context
-- `/agent` — change agent preferences
-- `/goal <text>` — pursue the exact goal autonomously until the model calls `mark_goal_complete`
+- **Change model** — switch the active model; the list shows each configured
+  model's `context_size`
+- **Use a skill…** — choose a skill and send its instructions to the agent
+- **MCP servers** — inspect which configured servers are running
+- **New conversation** — clear the conversation history after confirmation
+- **Set a goal…** — pursue the exact goal autonomously until the model calls
+  `mark_goal_complete`
+- **Copy last answer / block / summary**, **Jump to latest**, **Dismiss notices**
+- **Exit Rigel** — exit after confirmation
+
+A typed `/` in an empty composer opens the palette. To send a message that
+starts with `/`, paste the slash from the clipboard: pasted text is inserted
+literally and never opens the palette.
+
+Palette commands that change state are available only while the agent is idle
+and no goal is active. While the agent runs, `Esc` requests a soft stop;
+`Ctrl+C` and `Ctrl+Q` open the exit confirmation, and the agent stops before
+Rigel exits. In the composer, `Enter` sends the message. Insert a newline with
+`Alt+Enter`: it is the terminal-independent chord and works in Zed, Ghostty,
+iTerm2 and legacy terminals because the terminal sends it as `ESC CR`.
+`Cmd+Enter` on macOS or `Ctrl+Enter` on Windows/Linux also insert a newline when
+the terminal reports the modified key as a CSI-u sequence; many terminals and
+IDE-embedded terminals do not. `Shift+Enter` is accepted where the terminal
+reports it separately, but it is not reliable in Zed. Rigel intentionally uses legacy keyboard
+encoding: crossterm 0.29 does not parse the Kitty base-layout key or associated
+text, and `REPORT_ALL_KEYS_AS_ESCAPE_CODES` would break `Ctrl+C`/`Ctrl+Q`/`Ctrl+K`
+and text input on non-Latin layouts.
+
+As of Zed 1.28.1, Zed's embedded terminal does not implement the Kitty keyboard
+protocol and binds `Ctrl+Enter`/`Cmd+Enter` itself, so those chords do not reach
+a TUI running inside it. `Enter` sends and `Alt+Enter` inserts a newline there.
+To use `Cmd/Ctrl+Enter` for newlines in Zed, add this binding to Zed's user
+keymap to forward the chords to the terminal application (it sends `Alt+Enter`):
+
+```json
+{
+  "context": "Terminal",
+  "bindings": {
+    "cmd-enter": ["terminal::SendKeystroke", "alt-enter"],
+    "ctrl-enter": ["terminal::SendKeystroke", "alt-enter"]
+  }
+}
+```
 
 After a successful provider request, Rigel automatically compacts the chat or
 subagent history when the last request used at least 80% of the selected
-model's context. It uses the provider's `total_tokens` and the selected model's
-explicit `context_length` from `/models`; if either value is unavailable, the
-automatic compaction is skipped. After compaction, the history is replaced by
-one assistant summary message and the next request starts with unknown usage
-again.
+model's context. It uses the provider's `total_tokens` and the configured
+`context_size`; if usage is unavailable, the automatic compaction is skipped.
+After compaction, the model context is replaced by one assistant summary message
+and the next request starts with unknown usage again.
 
-The prompt displays usage as `used/limit >`, using `K`, `M`, or `B` suffixes
-for large values. If only the context limit is known, the prompt shows `?/1M >`;
-if only usage is known, it shows `123K >`; if neither is known, it shows `> `.
-`/compact` remains available for manual compaction and uses the same summary behavior.
+The header displays usage as `context used/limit`, using `K`, `M`, or `B`
+suffixes for large values. If only the context limit is known, the header shows
+`context ?/1M`; if only usage is known, it shows `context 123K`; if neither is
+known, it shows `context unknown`. Manual compaction remains available from the
+palette and uses the same summary behavior.
 
-Chat history is persisted at `~/.rigel/<sha256-of-startup-directory>/history.json`;
-each startup working-directory path has its own history file. Delegated subagent
-calls start with fresh, nonpersistent history containing the delegated task,
-not the chat's history or context. Each delegation inherits the chat agent's
-currently selected model, including after `/agent` changes it, but not its
-conversation history. The built-in subagent tool set includes workspace,
+Chat history is persisted as JSONL at
+`~/.rigel/<sha256-of-startup-directory>/chat.jsonl`. Compaction seals the active
+file as `chat.<N>.jsonl` without deleting the original messages; the model sees
+only the summary and subsequent messages. Each startup working-directory path
+has its own history family. Delegated subagent calls start with fresh,
+nonpersistent history containing the delegated task, not the chat's history or
+context. Each delegation inherits the chat agent's
+currently selected model, including after the model is changed in the palette,
+but not its conversation history. The built-in subagent tool set includes workspace,
 command, and fetch tools; it excludes the built-in `ask_user`, `spawn_subagent`,
 and `mark_goal_complete` tools. Selected MCP tools are also registered for the
 provider runtime.
@@ -155,7 +217,7 @@ This completion tool is exposed only to the main chat agent, not to subagents.
 
 ### Built-in skills
 
-`configure-rigel` is always available in `/skills`. Its static source lives under
+`configure-rigel` is always available in the palette under **Use a skill…**. Its static source lives under
 `src/prompts/skills/configure-rigel/SKILL.md`; it documents the TOML configuration
 file, model parameters, MCP servers, and project and global skill directories. It
 is compiled into Rigel and does not require a file in the current project or home
@@ -230,7 +292,7 @@ rigel/
 The CLI entry point is defined in `src/cmd/cli.rs`. It provides the `init`
 and `chat` subcommands:
 
-- `rigel init [--base-url <URL>] [--api-key-env <NAME>]` — create the default configuration
+- `rigel init [--base-url <URL>] [--api-key-env <NAME>]` — create the default configuration; an existing file is never overwritten
 - `rigel chat [--profile <PATH>]` — start a chat, optionally with an explicit configuration
 
 ```bash
@@ -239,7 +301,7 @@ cargo run -- chat --profile ./config.toml
 
 ### CLI Controllers and Concrete Integrations
 
-`src/controllers/chat_controller/controller.rs` contains a thin `ChatController`. It receives a `ChatRequest`, writes the welcome message through `ApplicationOutput`, and invokes the provider-neutral chat workflow through `ChatRunner`. `InitController` follows the same contract-only boundary for configuration initialization.
+`src/controllers/init_controller/controller.rs` contains a thin `InitController`. It receives an `InitRequest` and invokes the provider-neutral configuration workflow through `ConfigurationInitializer`.
 
 Concrete configuration/history, terminal, workspace, MCP, and Rig/OpenAI integrations live under `src/controllers/`; application workflows live under `src/use_cases/`. `src/main.rs` selects and wires them. Controllers and use cases communicate through infrastructure traits and entities, never through concrete implementations owned by another layer.
 

@@ -77,6 +77,29 @@ impl RigelConfig {
             .map(|value| value.flatten())
     }
 
+    /// Returns models that have an explicit context limit, sorted by identifier.
+    ///
+    /// Models without `context_size` are intentionally omitted: they cannot participate in
+    /// compaction decisions and must not be selected through the UI.
+    pub(crate) fn configured_models(
+        &self,
+    ) -> Vec<crate::entities::selected_model::selection::SelectedModel> {
+        let mut models = self
+            .models
+            .iter()
+            .filter_map(|(id, config)| {
+                config.context_size.map(|size| {
+                    crate::entities::selected_model::selection::SelectedModel::new(
+                        id.clone(),
+                        Some(size),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        models.sort_by(|left, right| left.id.cmp(&right.id));
+        models
+    }
+
     /// Builds a config with a replacement endpoint for `init` requests.
     pub(crate) fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = Some(base_url.into());
@@ -163,6 +186,16 @@ mod tests {
         let config = RigelConfig::default();
         assert_eq!(config.base_url(), "http://127.0.0.1:1234/v1");
         assert_eq!(config.policy_for("missing"), None);
+    }
+
+    #[test]
+    fn project_env_key_overrides_the_global_env_key() -> anyhow::Result<()> {
+        let global: RigelConfig = toml::from_str("envKey = \"GLOBAL_KEY\"\n")?;
+        let project: RigelConfig = toml::from_str("envKey = \"PROJECT_KEY\"\n")?;
+        let merged = RigelConfig::merge(Some(global), Some(project));
+
+        assert_eq!(merged.api_key_env(), Some("PROJECT_KEY"));
+        Ok(())
     }
 
     #[test]
@@ -487,5 +520,44 @@ values = ["first", "second"]
     fn models_and_params_must_be_tables() {
         assert!(toml::from_str::<RigelConfig>("models = []").is_err());
         assert!(toml::from_str::<RigelConfig>("[models.test]\nparams = true").is_err());
+    }
+
+    #[test]
+    fn configured_models_require_context_size_and_are_sorted() -> anyhow::Result<()> {
+        let config: RigelConfig = toml::from_str(
+            r#"
+[models."z-model"]
+context_size = 128000
+[models."a-model"]
+context_size = 32000
+[models."hidden"]
+params = {}
+"#,
+        )?;
+        let models = config.configured_models();
+
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "a-model");
+        assert_eq!(models[0].context_length, Some(32_000));
+        assert_eq!(models[1].id, "z-model");
+        Ok(())
+    }
+
+    #[test]
+    fn project_context_size_overrides_the_global_layer() -> anyhow::Result<()> {
+        let global: RigelConfig = toml::from_str("[models.m]\ncontext_size = 1000\n")?;
+        let project: RigelConfig = toml::from_str("[models.m]\ncontext_size = 2000\n")?;
+        let merged = RigelConfig::merge(Some(global), Some(project));
+
+        assert_eq!(merged.configured_models()[0].context_length, Some(2_000));
+        Ok(())
+    }
+
+    #[test]
+    fn zero_context_size_is_rejected() -> anyhow::Result<()> {
+        let config: RigelConfig = toml::from_str("[models.zero]\ncontext_size = 0\n")?;
+
+        assert!(config.models["zero"].validate("zero").is_err());
+        Ok(())
     }
 }

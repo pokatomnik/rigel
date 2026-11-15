@@ -12,11 +12,11 @@ pub(crate) trait ConfigurationRepository: Send + Sync {
         profile: Option<&Path>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<RigelConfig>> + Send + '_>>;
 
-    /// Saves a newly initialized configuration, applying adapter-specific overwrite policy.
+    /// Saves a newly initialized configuration, refusing to replace an existing file.
     fn save_initial(
         &self,
         config: &RigelConfig,
-        confirm_override: bool,
+        protect_existing: bool,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + '_>>;
 
     /// Returns paths used by permission policy persistence for the selected profile.

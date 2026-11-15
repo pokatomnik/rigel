@@ -30,6 +30,11 @@ pub(crate) enum RecoveryOutcome {
         /// Most recent usage reported by this failure.
         context_usage: crate::entities::conversation::context_usage::ContextUsage,
     },
+    /// A soft stop interrupted the recovery prompt.
+    Cancelled {
+        /// Most recent usage observed before the interruption.
+        context_usage: crate::entities::conversation::context_usage::ContextUsage,
+    },
 }
 
 impl RecoveryOutcome {
@@ -67,6 +72,9 @@ impl RecoveryOutcome {
                 error,
                 context_usage,
             } => Err((error, context_usage)),
+            Self::Cancelled { context_usage } => {
+                Ok(crate::entities::conversation::turn::TurnStatus::Stopped { context_usage })
+            }
         }
     }
 }

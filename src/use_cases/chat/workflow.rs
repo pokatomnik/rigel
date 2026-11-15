@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 
 #[cfg(test)]
 use std::future::Future;
@@ -7,7 +10,6 @@ use tokio::sync::{Mutex, RwLock};
 
 #[cfg(test)]
 use crate::controllers::{
-    chat_controller::command_parser::CommandParser,
     model_runtime::history::{chat_history::ChatHistory, history_persistence::HistoryPersistence},
     terminal::terminal_io::TerminalIO,
 };
@@ -15,56 +17,70 @@ use crate::controllers::{
 #[cfg(test)]
 use crate::prompts::provider::StaticPromptProvider;
 
+use crate::entities::agent_command::queue::PromptQueue;
+
 use crate::{
     entities::{conversation::context_usage::ContextUsage, goal::goal_state::GoalState},
     infrastructure::{
-        application::{ChatCommandParser, ChatRunner},
         conversation::ConversationHistory,
-        interaction::ChatIO,
         model::{ModelSession, ModelSessionFactory},
         prompts::PromptProvider,
         skills::repository::SkillRepository,
+        ui::{
+            cancellation::RunCancellation,
+            gateway::{AgentCommandSource, EventSink},
+            interaction::InteractionBroker,
+        },
     },
 };
 
 /// Orchestrates interactive chat policy through infrastructure traits only.
 pub(crate) struct Chat {
     pub(super) session: Arc<Mutex<Box<dyn ModelSession>>>,
-    pub(super) io: Arc<dyn ChatIO>,
     pub(super) history: Arc<dyn ConversationHistory>,
-    pub(super) command_parser: Option<Arc<dyn ChatCommandParser>>,
     pub(super) model_factory: RwLock<Option<Arc<dyn ModelSessionFactory>>>,
     pub(super) goal_state: Option<Arc<GoalState>>,
     pub(super) skill_repository: Option<Arc<dyn SkillRepository>>,
     pub(super) prompt_provider: Option<Arc<dyn PromptProvider>>,
     pub(super) context_usage: Mutex<ContextUsage>,
+    pub(super) command_source: Option<Arc<dyn AgentCommandSource>>,
+    pub(super) events: Option<Arc<dyn EventSink>>,
+    pub(super) interaction_broker: Option<Arc<dyn InteractionBroker>>,
+    pub(super) cancellation: Option<Arc<dyn RunCancellation>>,
+    pub(super) queue: Mutex<PromptQueue>,
+    pub(super) next_entry_id: AtomicU64,
+    pub(super) stop_requested: AtomicBool,
+    pub(super) exit_requested: AtomicBool,
+    pub(super) selected_model:
+        RwLock<Option<crate::entities::selected_model::selection::SelectedModel>>,
 }
 
 impl Chat {
-    /// Creates a chat from one built session, domain history, and interactive boundary.
+    /// Creates a chat from one built session and domain history.
     pub(crate) fn from_session(
         session: Box<dyn ModelSession>,
         history: Arc<dyn ConversationHistory>,
-        io: Arc<dyn ChatIO>,
     ) -> Self {
         let max_context_tokens = session.max_context_tokens();
+        let selected_model = session.selected_model();
         Self {
             session: Arc::new(Mutex::new(session)),
-            io,
             history,
-            command_parser: None,
             model_factory: RwLock::new(None),
             goal_state: None,
             skill_repository: None,
             prompt_provider: None,
             context_usage: Mutex::new(ContextUsage::new(None, max_context_tokens)),
+            command_source: None,
+            events: None,
+            interaction_broker: None,
+            cancellation: None,
+            queue: Mutex::new(PromptQueue::new()),
+            next_entry_id: AtomicU64::new(1),
+            stop_requested: AtomicBool::new(false),
+            exit_requested: AtomicBool::new(false),
+            selected_model: RwLock::new(selected_model),
         }
-    }
-
-    /// Attaches the parser selected by the controller composition root.
-    pub(crate) fn with_command_parser(mut self, parser: Arc<dyn ChatCommandParser>) -> Self {
-        self.command_parser = Some(parser);
-        self
     }
 
     /// Attaches the factory used only after a complete replacement session is built.
@@ -76,7 +92,7 @@ impl Chat {
         self
     }
 
-    /// Attaches the repository used by the `/skills` application action.
+    /// Attaches the repository used when the UI selects a skill in the palette.
     pub(crate) fn with_skill_repository(mut self, repository: Arc<dyn SkillRepository>) -> Self {
         self.skill_repository = Some(repository);
         self
@@ -94,23 +110,77 @@ impl Chat {
         self
     }
 
-    /// Runs the interactive loop until `/exit` or input failure.
+    /// Attaches the command stream produced by the terminal UI.
+    pub(crate) fn with_command_source(mut self, source: Arc<dyn AgentCommandSource>) -> Self {
+        self.command_source = Some(source);
+        self
+    }
+
+    /// Attaches the event boundary used for all UI-visible facts.
+    pub(crate) fn with_event_sink(mut self, events: Arc<dyn EventSink>) -> Self {
+        self.events = Some(events);
+        self
+    }
+
+    /// Attaches the broker that resolves permission and question responses.
+    pub(crate) fn with_interaction_broker(mut self, broker: Arc<dyn InteractionBroker>) -> Self {
+        self.interaction_broker = Some(broker);
+        self
+    }
+
+    /// Attaches the soft-stop flag shared with the model session.
+    pub(crate) fn with_cancellation(mut self, cancellation: Arc<dyn RunCancellation>) -> Self {
+        self.cancellation = Some(cancellation);
+        self
+    }
+
+    /// Sets the first identifier allocated for live text entries.
+    pub(crate) fn with_next_entry_id(mut self, next_entry_id: u64) -> Self {
+        self.next_entry_id = AtomicU64::new(next_entry_id.max(1));
+        self
+    }
+
+    /// Allocates the next live transcript entry identity.
+    pub(super) fn allocate_entry_id(&self) -> crate::entities::transcript::entry::EntryId {
+        crate::entities::transcript::entry::EntryId::new(
+            self.next_entry_id.fetch_add(1, Ordering::SeqCst),
+        )
+    }
+
+    /// Runs the event-driven interactive loop until shutdown.
     pub async fn run(&self) -> anyhow::Result<()> {
-        self.display_history().await;
-        loop {
-            if !self.handle_command(self.next_command().await?).await? {
-                return Ok(());
-            }
+        self.emit_initial_model().await;
+        let result = self.run_commands().await;
+        self.emit(crate::entities::agent_event::event::AgentEvent::ShutdownComplete);
+        self.emit(
+            crate::entities::agent_event::event::AgentEvent::ActivityChanged(
+                crate::entities::agent_event::status::AgentActivity::Idle,
+            ),
+        );
+        result
+    }
+
+    async fn emit_initial_model(&self) {
+        if let Some(model) = self.selected_model.read().await.clone() {
+            self.emit(crate::entities::agent_event::event::AgentEvent::ModelChanged(model));
         }
     }
-}
 
-impl ChatRunner for Chat {
-    fn run(
+    /// Emits one UI event when the application boundary is configured.
+    pub(super) fn emit(&self, event: crate::entities::agent_event::event::AgentEvent) {
+        if let Some(events) = self.events.as_ref() {
+            events.emit(event);
+        }
+    }
+
+    /// Waits for the next UI command, or `None` when the UI closed.
+    pub(super) async fn next_agent_command(
         &self,
-        _request: crate::entities::application::chat_request::ChatRequest,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + '_>> {
-        Box::pin(self.run())
+    ) -> Option<crate::entities::agent_command::command::AgentCommand> {
+        match self.command_source.as_ref() {
+            Some(source) => source.next_command().await,
+            None => None,
+        }
     }
 }
 
@@ -136,7 +206,7 @@ impl Chat {
             + 'static,
     {
         let session =
-            crate::controllers::model_runtime::model_session::RigModelSession::from_configured(
+            crate::controllers::model_runtime::session::chat::RigModelSession::from_configured(
                 configured_agent,
                 terminal_io.clone(),
                 history.clone(),
@@ -147,8 +217,7 @@ impl Chat {
             history: history.clone(),
             change_model,
         };
-        let chat = Self::from_session(Box::new(session), history, terminal_io)
-            .with_command_parser(Arc::new(CommandParser))
+        let chat = Self::from_session(Box::new(session), history)
             .with_prompt_provider(Arc::new(StaticPromptProvider));
         futures::executor::block_on(chat.with_model_session_factory(Arc::new(factory)))
     }
@@ -192,7 +261,7 @@ where
         Box::pin(async move {
             let configured = (self.change_model)().await?;
             let session =
-                crate::controllers::model_runtime::model_session::RigModelSession::from_configured(
+                crate::controllers::model_runtime::session::chat::RigModelSession::from_configured(
                     configured,
                     self.terminal_io.clone(),
                     self.history.clone(),
@@ -207,7 +276,7 @@ where
 mod tests {
     use std::sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     };
 
     use anyhow::{Result, ensure};
@@ -224,7 +293,6 @@ mod tests {
 
     use super::Chat;
     use crate::{
-        controllers::chat_controller::command_parser::CommandParser,
         controllers::model_runtime::agent::dependencies::ConfiguredAgent,
         controllers::model_runtime::goal_completion_hook::GoalCompletionHook,
         controllers::model_runtime::history::{
@@ -234,18 +302,29 @@ mod tests {
         controllers::model_runtime::history_sync::HistorySyncHook,
         controllers::terminal::terminal_io::TerminalIO,
         entities::conversation::context_usage::ContextUsage,
+        entities::conversation::conversation_message::ConversationMessage,
         entities::conversation::turn::TurnStatus,
         entities::goal::goal_state::{GoalReport, GoalState, GoalStateError},
-        entities::{
-            application::chat_action::ChatAction,
-            conversation::conversation_message::ConversationMessage,
-        },
         infrastructure::conversation::ConversationPersistence,
         infrastructure::tools::goal::GoalCompleter,
+        infrastructure::ui::gateway::AgentCommandSource,
         prompts::summarization::summarization,
         tools::tool_mark_goal_complete::mark_goal_complete::MarkGoalComplete,
         use_cases::chat::history::conversation_history::ConversationHistory as DomainConversationHistory,
     };
+
+    struct PendingCommands;
+
+    impl AgentCommandSource for PendingCommands {
+        fn next_command(
+            &self,
+        ) -> futures::future::BoxFuture<
+            '_,
+            Option<crate::entities::agent_command::command::AgentCommand>,
+        > {
+            Box::pin(std::future::pending())
+        }
+    }
 
     struct TestGoalCompleter {
         state: Arc<GoalState>,
@@ -279,23 +358,42 @@ mod tests {
         }
     }
 
-    fn test_history(messages: Vec<Message>) -> Arc<ChatHistory<NonPersistentHistory>> {
-        let domain_messages = from_provider(&messages).unwrap_or_default();
-        let domain = Arc::new(DomainConversationHistory::new(
-            domain_messages,
-            NoopPersistence,
-        ));
-        Arc::new(ChatHistory::new(domain))
+    struct ResetPersistence {
+        resets: Arc<AtomicUsize>,
+    }
+
+    impl ConversationPersistence for ResetPersistence {
+        fn save(
+            &self,
+            _messages: &[ConversationMessage],
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>>
+        {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn reset(
+            &self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>>
+        {
+            self.resets.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(()) })
+        }
     }
 
     #[tokio::test]
-    async fn blank_prompt_does_not_request_model_or_update_history() -> Result<()> {
-        let model = MockCompletionModel::text("should not be requested");
-        let history = test_history(Vec::new());
+    async fn new_conversation_resets_every_durable_segment() -> Result<()> {
+        let resets = Arc::new(AtomicUsize::new(0));
+        let domain = Arc::new(DomainConversationHistory::new(
+            vec![ConversationMessage::User("old".to_string())],
+            ResetPersistence {
+                resets: resets.clone(),
+            },
+        ));
+        let history = Arc::new(ChatHistory::<NonPersistentHistory>::new(domain.clone()));
         let chat = Chat::from_history(
-            configured_agent(AgentBuilder::new(model.clone()).build()),
+            configured_agent(AgentBuilder::new(MockCompletionModel::text("unused")).build()),
             Arc::new(TerminalIO),
-            history.clone(),
+            history,
             || async {
                 Ok(configured_agent(
                     AgentBuilder::new(MockCompletionModel::text("replacement")).build(),
@@ -303,12 +401,20 @@ mod tests {
             },
         );
 
-        let command = CommandParser.parse(" \t", false);
-        ensure!(matches!(&command, ChatAction::Continue));
-        ensure!(chat.handle_command(command).await?);
-        assert_eq!(model.request_count(), 0);
-        assert!(history.snapshot().await.is_empty());
+        chat.handle_new().await?;
+
+        ensure!(resets.load(Ordering::SeqCst) == 1);
+        ensure!(domain.snapshot_messages().await.is_empty());
         Ok(())
+    }
+
+    fn test_history(messages: Vec<Message>) -> Arc<ChatHistory<NonPersistentHistory>> {
+        let domain_messages = from_provider(&messages).unwrap_or_default();
+        let domain = Arc::new(DomainConversationHistory::new(
+            domain_messages,
+            NoopPersistence,
+        ));
+        Arc::new(ChatHistory::new(domain))
     }
 
     #[tokio::test]
@@ -387,7 +493,11 @@ mod tests {
             },
         );
 
-        ensure!(!chat.compact_context().await?);
+        let error = chat.compact_context().await.err();
+        ensure!(
+            error.is_some_and(|error| error.to_string().contains("boom")),
+            "compaction failure was not propagated"
+        );
         ensure!(
             history.snapshot().await == vec![Message::user("keep me")],
             "failed compaction changed history"
@@ -452,7 +562,7 @@ mod tests {
             },
         );
 
-        chat.run_prompt("question".to_string(), false).await?;
+        chat.run_prompt("question".to_string()).await?;
 
         assert_eq!(
             history.snapshot().await,
@@ -512,7 +622,7 @@ mod tests {
             },
         );
 
-        chat.handle_change_model().await?;
+        chat.handle_change_model(None).await?;
         ensure!(changed.load(Ordering::SeqCst));
         assert_eq!(
             *chat.context_usage.lock().await,
@@ -537,7 +647,7 @@ mod tests {
             || async { anyhow::bail!("model selection failed") },
         );
 
-        ensure!(chat.handle_change_model().await.is_err());
+        ensure!(chat.handle_change_model(None).await.is_err());
         ensure!(chat.compact_context().await?);
         ensure!(
             history.snapshot().await == vec![Message::assistant("current summary")],
@@ -626,9 +736,10 @@ mod tests {
                 ))
             },
         )
-        .with_goal_state(state.clone());
+        .with_goal_state(state.clone())
+        .with_command_source(Arc::new(PendingCommands));
 
-        chat.pursue_goal("goal A".to_string()).await?;
+        chat.run_goal("goal A".to_string()).await?;
         assert!(!state.is_active());
         assert!(!state.has_pending_report());
         assert_eq!(model.request_count(), 3);
@@ -638,7 +749,7 @@ mod tests {
         ));
         assert_eq!(model.requests()[2].tool_choice, Some(ToolChoice::None));
 
-        chat.pursue_goal("goal B".to_string()).await?;
+        chat.run_goal("goal B".to_string()).await?;
         assert!(!state.is_active());
         assert_eq!(model.request_count(), 5);
         assert!(request_contains_user_text(&model.requests()[3], "goal B"));
@@ -671,6 +782,7 @@ mod tests {
     ) -> ConfiguredAgent<M> {
         ConfiguredAgent {
             agent,
+            summarizer: None,
             selected_model: None,
             max_context_tokens,
         }

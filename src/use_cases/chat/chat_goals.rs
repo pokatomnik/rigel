@@ -9,7 +9,7 @@ impl Chat {
             .and_then(|goal_state| goal_state.take_report())
     }
 
-    fn activate_goal(&self, goal: String) -> anyhow::Result<()> {
+    pub(super) fn activate_goal(&self, goal: String) -> anyhow::Result<()> {
         let goal_state = self
             .goal_state
             .as_ref()
@@ -18,7 +18,7 @@ impl Chat {
         Ok(())
     }
 
-    fn next_goal_prompt(&self) -> anyhow::Result<String> {
+    pub(super) fn next_goal_prompt(&self) -> anyhow::Result<String> {
         let goal_state = self
             .goal_state
             .as_ref()
@@ -38,19 +38,18 @@ impl Chat {
         Ok(provider.goal_follow_up(goal.as_str()))
     }
 
-    pub(super) async fn pursue_goal(&self, goal: String) -> anyhow::Result<()> {
-        self.activate_goal(goal.clone())?;
-        let mut prompt = goal;
-        loop {
-            if self.run_prompt(prompt, false).await?.is_some() {
-                return Ok(());
-            }
-            prompt = self.next_goal_prompt()?;
-        }
-    }
-
-    pub(super) async fn handle_goal(&self, goal: String) -> anyhow::Result<bool> {
-        self.pursue_goal(goal).await?;
-        Ok(true)
+    /// Clears an active goal after a stop or model failure.
+    pub(super) fn abandon_goal(&self) -> anyhow::Result<()> {
+        let goal_state = self
+            .goal_state
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("goal state was not configured for the chat"))?;
+        goal_state.cancel();
+        self.emit(
+            crate::entities::agent_event::event::AgentEvent::GoalChanged(
+                crate::entities::agent_event::status::GoalView::inactive(),
+            ),
+        );
+        Ok(())
     }
 }

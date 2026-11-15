@@ -5,15 +5,25 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
+base64 = "0.22"
 clap = { version = "4.6.4", features = ["derive"] }
 console = "0.16.4"
-dialoguer = { version = "0.12.0", features = ["fuzzy-select"] }
 dom_smoothie = "0.18.0"
 futures = "0.3.32"
 glob = "0.3.4"
 ignore = "0.4.25"
+ratatui = { version = "0.30.2", default-features = false, features = [
+    "crossterm",
+    "unstable-rendered-line-info",
+] }
+ratatui-textarea = "0.9.4"
 regex = "1.13.1"
-reqwest = { version = "0.13.4", features = ["brotli", "deflate", "gzip", "socks"] }
+reqwest = { version = "0.13.4", features = [
+    "brotli",
+    "deflate",
+    "gzip",
+    "socks",
+] }
 rig = { version = "0.41.0", features = ["rmcp"] }
 rmcp = { version = "2.2.0", features = [
     "client",
@@ -23,7 +33,6 @@ rmcp = { version = "2.2.0", features = [
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10.9"
-spinners = "4.2.0"
 tokio = { version = "1.53.1", features = ["full", "macros", "rt-multi-thread"] }
 toml = "1.1.3"
 

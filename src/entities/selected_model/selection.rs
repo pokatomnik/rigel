@@ -1,6 +1,8 @@
 use std::fmt;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SelectedModel {
     pub(crate) id: String,
     pub(crate) context_length: Option<u64>,

@@ -24,17 +24,26 @@ pub(crate) enum ToolPermissionDecision {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ToolPermissionRequest {
     tool_name: String,
+    arguments: serde_json::Value,
 }
 
 impl ToolPermissionRequest {
-    /// Creates a request from the runtime tool name, including unknown names safely.
-    pub(crate) fn new(tool_name: String) -> Self {
-        Self { tool_name }
+    /// Creates a request from the runtime tool name and its complete JSON arguments.
+    pub(crate) fn new(tool_name: String, arguments: serde_json::Value) -> Self {
+        Self {
+            tool_name,
+            arguments,
+        }
     }
 
     /// Returns the exact runtime tool name used for policy lookup and diagnostics.
     pub(crate) fn tool_name(&self) -> &str {
         self.tool_name.as_str()
+    }
+
+    /// Returns the complete arguments shown in the permission modal.
+    pub(crate) fn arguments(&self) -> &serde_json::Value {
+        &self.arguments
     }
 }
 

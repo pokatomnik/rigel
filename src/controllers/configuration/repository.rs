@@ -68,9 +68,11 @@ impl FileConfigurationRepository {
     }
 
     fn parse(content: &str) -> anyhow::Result<RigelConfig> {
-        let config: RigelConfig = toml::from_str(content)?;
+        let config: RigelConfig = toml::from_str(content).map_err(|error| {
+            anyhow::anyhow!("invalid Rigel configuration TOML: {}", error.message())
+        })?;
         for (model_id, model) in &config.models {
-            model.request_parameters(model_id)?;
+            model.validate(model_id)?;
         }
         Ok(config)
     }
@@ -104,17 +106,14 @@ impl FileConfigurationRepository {
             })
     }
 
-    async fn should_write(path: &Path, confirm_override: bool) -> anyhow::Result<bool> {
-        if !confirm_override || !tokio::fs::try_exists(path).await? {
+    async fn should_write(path: &Path, protect_existing: bool) -> anyhow::Result<bool> {
+        if !protect_existing || !tokio::fs::try_exists(path).await? {
             return Ok(true);
         }
-        Ok(dialoguer::Confirm::new()
-            .with_prompt(format!(
-                "Overwrite Rigel configuration file '{}' ?",
-                path.display()
-            ))
-            .report(false)
-            .interact()?)
+        anyhow::bail!(
+            "Rigel configuration file '{}' already exists; remove it first to reinitialize",
+            path.display()
+        )
     }
 }
 
@@ -136,12 +135,12 @@ impl ConfigurationRepository for FileConfigurationRepository {
     fn save_initial(
         &self,
         config: &RigelConfig,
-        confirm_override: bool,
+        protect_existing: bool,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>> {
         let config = config.clone();
         Box::pin(async move {
             let path = Self::default_path()?;
-            if !Self::should_write(path.as_path(), confirm_override).await? {
+            if !Self::should_write(path.as_path(), protect_existing).await? {
                 return Ok(());
             }
             let content = toml::to_string_pretty(&config)
@@ -194,6 +193,18 @@ mod tests {
         )?;
         assert!(result.is_none());
         Ok(())
+    }
+
+    #[test]
+    fn malformed_configuration_errors_do_not_echo_the_source() {
+        let error = match FileConfigurationRepository::parse("secret = \"sk-secret\n") {
+            Ok(_) => return,
+            Err(error) => error,
+        };
+        let message = error.to_string();
+
+        assert!(!message.contains("sk-secret"));
+        assert!(message.contains("invalid Rigel configuration TOML"));
     }
 
     #[test]

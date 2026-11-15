@@ -88,6 +88,13 @@ impl GoalState {
         Ok(report)
     }
 
+    /// Drops an active goal after a stop or failure so a new goal can be started.
+    pub(crate) fn cancel(&self) {
+        let mut mode = self.lock_mode();
+        mode.active_goal = None;
+        mode.report = None;
+    }
+
     /// Takes the pending report exactly once after a successful completion.
     pub(crate) fn take_report(&self) -> Option<GoalReport> {
         self.lock_mode().report.take()
@@ -143,6 +150,17 @@ mod tests {
             state.take_report().as_ref().map(|report| report.as_str()),
             Some("partial result and limitations")
         );
+        assert!(!state.has_pending_report());
+    }
+
+    #[test]
+    fn cancellation_clears_the_active_goal_without_a_report() {
+        let state = GoalState::new();
+        assert!(state.start("goal".to_string()).is_ok());
+
+        state.cancel();
+
+        assert!(!state.is_active());
         assert!(!state.has_pending_report());
     }
 

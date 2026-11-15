@@ -191,6 +191,13 @@ where
         self.history.update(update)
     }
 
+    fn commit_compaction(
+        &self,
+        summary: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>> {
+        self.history.commit_compaction(summary)
+    }
+
     fn begin_compaction(&self) {
         self.history.begin_compaction();
     }
@@ -201,6 +208,12 @@ where
 
     fn is_compaction_in_progress(&self) -> bool {
         self.history.is_compaction_in_progress()
+    }
+
+    fn reset(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>> {
+        self.history.reset()
     }
 }
 

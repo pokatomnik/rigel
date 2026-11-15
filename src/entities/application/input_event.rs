@@ -1,0 +1,128 @@
+use serde::{Deserialize, Serialize};
+
+/// Terminal-independent size reported by a resize event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TerminalSize {
+    /// Number of text columns.
+    pub(crate) width: u16,
+    /// Number of text rows.
+    pub(crate) height: u16,
+}
+
+impl TerminalSize {
+    /// Creates a size from the columns and rows reported by the terminal.
+    pub(crate) const fn new(width: u16, height: u16) -> Self {
+        Self { width, height }
+    }
+}
+
+/// Primary submit chord shown in the UI.
+pub(crate) const SUBMIT_KEY_LABEL: &str = "Enter";
+
+/// Terminal-independent key identity interpreted by the UI workflow.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum KeyStroke {
+    /// Submit in the composer; confirm in modals.
+    Enter,
+    /// Focus or activation movement.
+    Tab,
+    /// Soft stop outside modals; safe refusal inside modals.
+    Escape,
+    /// Remove the previous character.
+    Backspace,
+    /// Remove the next character.
+    Delete,
+    /// Move the cursor one column left.
+    Left,
+    /// Move the cursor one column right.
+    Right,
+    /// Move the cursor one line up.
+    Up,
+    /// Move the cursor one line down.
+    Down,
+    /// Move to the beginning of the line.
+    Home,
+    /// Move to the end of the line.
+    End,
+    /// Scroll one page up.
+    PageUp,
+    /// Scroll one page down.
+    PageDown,
+    /// Insert a line break in the composer and goal editor.
+    CtrlEnter,
+    /// Insert a line break in the composer and goal editor.
+    CmdEnter,
+    /// Insert a line break when the terminal reports Shift+Enter.
+    ShiftEnter,
+    /// A control chord identified by its lowercase character.
+    Ctrl(char),
+}
+
+impl KeyStroke {
+    /// Reports whether this key confirms the active modal selection.
+    pub(crate) const fn confirms_modal(self) -> bool {
+        matches!(
+            self,
+            Self::Enter | Self::CtrlEnter | Self::CmdEnter | Self::ShiftEnter
+        )
+    }
+}
+
+/// Provider-neutral user input delivered to the UI workflow.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum InputEvent {
+    /// Printable text produced by a key press.
+    Text(String),
+    /// Clipboard text that must never be interpreted as a key chord.
+    Paste(String),
+    /// A key press interpreted by the UI workflow.
+    Key(KeyStroke),
+    /// The terminal reported a new size.
+    Resize(TerminalSize),
+    /// The terminal input stream ended.
+    Closed,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{InputEvent, KeyStroke, TerminalSize};
+
+    #[test]
+    fn resize_carries_both_dimensions() {
+        let event = InputEvent::Resize(TerminalSize::new(60, 20));
+
+        assert_eq!(event, InputEvent::Resize(TerminalSize::new(60, 20)));
+    }
+
+    #[test]
+    fn modal_confirmation_accepts_plain_and_modified_enter() {
+        for key in [
+            KeyStroke::Enter,
+            KeyStroke::CtrlEnter,
+            KeyStroke::CmdEnter,
+            KeyStroke::ShiftEnter,
+        ] {
+            assert!(key.confirms_modal());
+        }
+        assert!(!KeyStroke::Ctrl('c').confirms_modal());
+    }
+
+    #[test]
+    fn key_events_round_trip_through_json() -> anyhow::Result<()> {
+        for event in [
+            InputEvent::Key(KeyStroke::CtrlEnter),
+            InputEvent::Key(KeyStroke::CmdEnter),
+            InputEvent::Key(KeyStroke::ShiftEnter),
+            InputEvent::Key(KeyStroke::Ctrl('k')),
+            InputEvent::Key(KeyStroke::Escape),
+            InputEvent::Text("hello".to_string()),
+            InputEvent::Paste("pasted".to_string()),
+            InputEvent::Closed,
+        ] {
+            let json = serde_json::to_value(&event)?;
+            let restored: InputEvent = serde_json::from_value(json)?;
+            assert_eq!(restored, event);
+        }
+        Ok(())
+    }
+}

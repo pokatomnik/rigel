@@ -1,13 +1,26 @@
-use crate::entities::conversation::{
-    context_usage::ContextUsage,
-    turn::{CompactionKind, CompactionResult, HistoryUpdate, TurnStatus},
+use crate::entities::{
+    agent_event::{
+        event::AgentEvent,
+        status::{AgentActivity, NoticeLevel},
+    },
+    conversation::{
+        context_usage::ContextUsage,
+        turn::{CompactionKind, CompactionResult, TurnStatus},
+    },
 };
 
 use super::workflow::Chat;
 
 impl Chat {
-    pub(super) async fn history_updated(&self, update: HistoryUpdate) -> anyhow::Result<()> {
-        self.history.update(update).await
+    /// Clears every history segment and starts the conversation from scratch.
+    pub(super) async fn handle_new(&self) -> anyhow::Result<()> {
+        self.history.reset().await?;
+        self.reset_used_tokens().await;
+        self.emit(AgentEvent::HistoryLoaded {
+            entries: Vec::new(),
+            skipped_lines: 0,
+        });
+        Ok(())
     }
 
     pub(super) async fn compact_context(&self) -> anyhow::Result<bool> {
@@ -18,41 +31,56 @@ impl Chat {
         Ok(result.compacted())
     }
 
-    pub(super) async fn handle_compaction(&self) -> anyhow::Result<()> {
-        self.io.eprintln_gray("Compacting started...");
-        let compacted = self.compact_context().await?;
-        self.io.eprintln_gray(if compacted {
-            "Compacting done."
-        } else {
-            "Compacting failed."
-        });
-        Ok(())
-    }
-
     async fn compact_context_kind(&self, kind: CompactionKind) -> anyhow::Result<CompactionResult> {
         self.session.lock().await.compact(kind).await
     }
 
     pub(super) async fn compact_after_turn(&self, status: &TurnStatus) -> anyhow::Result<()> {
-        if !matches!(status, TurnStatus::Complete { .. })
-            || !status.context_usage().should_compact()
-        {
+        if !status.context_usage().should_compact() {
             return Ok(());
         }
 
-        self.io.eprintln_red("Compacting context...");
+        self.run_automatic_compaction().await
+    }
+
+    pub(super) async fn compact_before_turn(&self) -> anyhow::Result<()> {
+        let usage = *self.context_usage.lock().await;
+        if !usage.should_compact() {
+            return Ok(());
+        }
+        self.run_automatic_compaction().await
+    }
+
+    async fn run_automatic_compaction(&self) -> anyhow::Result<()> {
+        self.emit_activity(AgentActivity::Compacting);
+        self.emit(AgentEvent::CompactionStarted {
+            kind: CompactionKind::Automatic,
+        });
         let result = self
             .session
             .lock()
             .await
             .compact(CompactionKind::Automatic)
-            .await?;
+            .await;
+        self.emit_activity(AgentActivity::Idle);
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                self.emit(AgentEvent::CompactionFailed {
+                    kind: CompactionKind::Automatic,
+                    error: error.to_string(),
+                });
+                self.notice(NoticeLevel::Error, error.to_string());
+                return Err(error);
+            }
+        };
         if result.kind() == CompactionKind::Automatic && result.compacted() {
             self.reset_used_tokens().await;
-            self.io.eprintln_red("Context compacted.");
-        } else {
-            self.io.eprintln_red("Compacting failed.");
         }
+        self.emit(AgentEvent::CompactionFinished {
+            kind: CompactionKind::Automatic,
+            compacted: result.compacted(),
+        });
         Ok(())
     }
 
@@ -63,5 +91,6 @@ impl Chat {
     pub(super) async fn reset_used_tokens(&self) {
         let mut context_usage = self.context_usage.lock().await;
         *context_usage = ContextUsage::new(None, context_usage.max_context_tokens());
+        self.emit(AgentEvent::ContextUsageChanged(*context_usage));
     }
 }

@@ -79,6 +79,9 @@ where
                 error: failure.error().to_string(),
                 context_usage: failure.context_usage(),
             }),
+            StreamRunOutcome::Cancelled { context_usage } => {
+                Ok(RecoveryOutcome::Cancelled { context_usage })
+            }
         }
     }
 }

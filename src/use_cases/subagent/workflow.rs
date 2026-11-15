@@ -1,7 +1,15 @@
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use crate::{
     entities::{
+        agent_event::event::AgentEvent,
         conversation::{
             context_usage::ContextUsage,
             turn::{CompactionKind, TurnStatus},
@@ -11,15 +19,19 @@ use crate::{
     },
     infrastructure::{
         interaction::ChatIO, model::ModelSessionFactory, prompts::PromptProvider,
-        tools::subagent::SubagentRunner,
+        tools::subagent::SubagentRunner, ui::gateway::EventSink,
     },
 };
+
+use super::scoped_sink::ScopedSubagentSink;
 
 /// Runs delegated tasks through provider-neutral model, prompt, and interaction ports.
 pub(crate) struct RunSubagent {
     factory: Arc<dyn ModelSessionFactory>,
     prompts: Arc<dyn PromptProvider>,
     io: Arc<dyn ChatIO>,
+    events: Option<Arc<dyn EventSink>>,
+    next_run_id: AtomicU64,
 }
 
 impl RunSubagent {
@@ -33,21 +45,67 @@ impl RunSubagent {
             factory,
             prompts,
             io,
+            events: None,
+            next_run_id: AtomicU64::new(0),
         }
     }
 
+    /// Publishes child progress to the parent event boundary when it is available.
+    pub(crate) fn with_events(mut self, events: Arc<dyn EventSink>) -> Self {
+        self.events = Some(events);
+        self
+    }
+
     async fn run_task(&self, task: SubagentTask) -> anyhow::Result<SubagentReport> {
-        let session = self
+        let run_id = self
+            .next_run_id
+            .fetch_add(1, Ordering::SeqCst)
+            .saturating_add(1);
+        self.emit(AgentEvent::SubagentStarted {
+            run_id,
+            prompt: task.task.clone(),
+        });
+        let mut session = self
             .factory
             .create(ModelSessionKind::Subagent, task.selected_model().cloned())
             .await?;
+        let scoped = self
+            .events
+            .clone()
+            .map(|events| Arc::new(ScopedSubagentSink::new(events, run_id)));
+        if let Some(scoped) = scoped.clone() {
+            session.attach_events(scoped);
+        }
+        let result = self
+            .execute(session.as_ref(), &task, scoped.as_deref())
+            .await;
+        self.emit(AgentEvent::SubagentFinished {
+            run_id,
+            report: report_text(&result),
+        });
+        result
+    }
+
+    async fn execute(
+        &self,
+        session: &dyn crate::infrastructure::model::ModelSession,
+        task: &SubagentTask,
+        scoped: Option<&ScopedSubagentSink>,
+    ) -> anyhow::Result<SubagentReport> {
         let mut usage = ContextUsage::new(None, session.max_context_tokens());
         let prompt = self.prompts.task(&task.task);
         let status = session.run_turn(prompt, usage).await?;
         usage = status.context_usage();
-        self.compact_if_needed(session.as_ref(), &status, &mut usage)
-            .await?;
+        if Self::should_compact(&status, &usage) {
+            self.activity(scoped, "Compacting context...");
+        }
+        let compacted = self.compact_if_needed(session, &status, &mut usage).await?;
+        self.activity(scoped, compacted);
         self.report(status)
+    }
+
+    fn should_compact(status: &TurnStatus, usage: &ContextUsage) -> bool {
+        matches!(status, TurnStatus::Complete { .. }) && usage.should_compact()
     }
 
     async fn compact_if_needed(
@@ -55,19 +113,32 @@ impl RunSubagent {
         session: &dyn crate::infrastructure::model::ModelSession,
         status: &TurnStatus,
         usage: &mut ContextUsage,
-    ) -> anyhow::Result<()> {
-        if !matches!(status, TurnStatus::Complete { .. }) || !usage.should_compact() {
-            return Ok(());
+    ) -> anyhow::Result<&'static str> {
+        if !Self::should_compact(status, usage) {
+            return Ok("");
         }
-        self.io.eprintln_red("Compacting context...");
         let result = session.compact(CompactionKind::Automatic).await?;
         if result.kind() == CompactionKind::Automatic && result.compacted() {
             *usage = ContextUsage::new(None, usage.max_context_tokens());
-            self.io.eprintln_red("Context compacted.");
-        } else {
-            self.io.eprintln_red("Compacting failed.");
+            return Ok("Context compacted.");
         }
-        Ok(())
+        Ok("Compacting failed.")
+    }
+
+    fn activity(&self, scoped: Option<&ScopedSubagentSink>, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        match scoped {
+            Some(scoped) => scoped.push_text(format!("\n{text}\n")),
+            None => self.io.eprintln_red(text),
+        }
+    }
+
+    fn emit(&self, event: AgentEvent) {
+        if let Some(events) = self.events.as_ref() {
+            events.emit(event);
+        }
     }
 
     fn report(&self, status: TurnStatus) -> anyhow::Result<SubagentReport> {
@@ -75,6 +146,9 @@ impl RunSubagent {
             TurnStatus::Complete { output, .. } => Ok(SubagentReport { report: output }),
             TurnStatus::RecoveryStopped { error, .. } => {
                 anyhow::bail!("subagent recovery stopped: {error}")
+            }
+            TurnStatus::Stopped { .. } => {
+                anyhow::bail!("subagent stopped before completing the task")
             }
         }
     }
@@ -86,6 +160,13 @@ impl SubagentRunner for RunSubagent {
         task: SubagentTask,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<SubagentReport>> + Send + '_>> {
         Box::pin(self.run_task(task))
+    }
+}
+
+fn report_text(result: &anyhow::Result<SubagentReport>) -> String {
+    match result {
+        Ok(report) => report.report.clone(),
+        Err(error) => format!("{error:#}"),
     }
 }
 
@@ -106,13 +187,10 @@ mod tests {
     use crate::{
         entities::model::model_session_kind::ModelSessionKind,
         entities::{
-            application::input_outcome::InputOutcome,
             conversation::{
                 context_usage::ContextUsage,
-                conversation_message::ConversationMessage,
                 turn::{CompactionKind, CompactionResult, TurnStatus},
             },
-            skill::definition::SkillDescriptor,
             tool::tool_entities::{SubagentReport, SubagentTask},
         },
         infrastructure::{
@@ -136,30 +214,12 @@ mod tests {
     }
 
     impl ChatIO for FakeIo {
-        fn readline(&self, _: ContextUsage) -> anyhow::Result<InputOutcome> {
-            Ok(InputOutcome::Eof)
-        }
-
-        fn editor(&self) -> anyhow::Result<String> {
-            Ok(String::new())
-        }
-
-        fn print(&self, _: &str) {}
-        fn eprintln(&self, _: &str) {}
-        fn eprintln_gray(&self, _: &str) {}
-
         fn eprintln_red(&self, message: &str) {
             let _ = self
                 .messages
                 .lock()
                 .map(|mut messages| messages.push(message.to_string()));
         }
-
-        fn eprintln_orange(&self, _: &str) {}
-        fn select_skill(&self, _: &[SkillDescriptor]) -> anyhow::Result<Option<usize>> {
-            Ok(None)
-        }
-        fn display_history(&self, _: &[ConversationMessage]) {}
     }
 
     struct FakeFactory {

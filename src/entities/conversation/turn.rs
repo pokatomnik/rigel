@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use super::context_usage::ContextUsage;
 
 /// Atomic history changes used by persistence-aware conversation state.
@@ -26,6 +28,11 @@ pub(crate) enum TurnStatus {
         /// Latest provider-neutral usage information.
         context_usage: ContextUsage,
     },
+    /// The user requested a soft stop at a safe boundary.
+    Stopped {
+        /// Latest provider-neutral usage information.
+        context_usage: ContextUsage,
+    },
 }
 
 impl TurnStatus {
@@ -40,9 +47,9 @@ impl TurnStatus {
     /// Returns usage for either successful or stopped turns.
     pub(crate) fn context_usage(&self) -> ContextUsage {
         match self {
-            Self::Complete { context_usage, .. } | Self::RecoveryStopped { context_usage, .. } => {
-                *context_usage
-            }
+            Self::Complete { context_usage, .. }
+            | Self::RecoveryStopped { context_usage, .. }
+            | Self::Stopped { context_usage } => *context_usage,
         }
     }
 
@@ -51,21 +58,21 @@ impl TurnStatus {
     pub(crate) fn output(&self) -> Option<&str> {
         match self {
             Self::Complete { output, .. } => Some(output.as_str()),
-            Self::RecoveryStopped { .. } => None,
+            Self::RecoveryStopped { .. } | Self::Stopped { .. } => None,
         }
     }
 
     /// Returns the stopping error only for failed recovery.
     pub(crate) fn error(&self) -> Option<&str> {
         match self {
-            Self::Complete { .. } => None,
+            Self::Complete { .. } | Self::Stopped { .. } => None,
             Self::RecoveryStopped { error, .. } => Some(error.as_str()),
         }
     }
 }
 
 /// Identifies whether compaction was requested by a user or by a threshold.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum CompactionKind {
     /// Explicit `/compact` request.
     Manual,
