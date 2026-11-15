@@ -30,62 +30,20 @@ impl InputSource for CrosstermInput {
 }
 
 fn read_loop(sender: UnboundedSender<InputEvent>) {
-    log_line(&format!(
-        "TERM={:?} TERM_PROGRAM={:?}",
-        std::env::var("TERM"),
-        std::env::var("TERM_PROGRAM")
-    ));
     loop {
         match ratatui::crossterm::event::read() {
             Ok(event) => {
-                log_line(&describe_event(&event));
                 if let Some(event) = map_event(event)
                     && sender.send(event).is_err()
                 {
                     return;
                 }
             }
-            Err(error) => {
-                log_line(&format!("read error: {error}"));
+            Err(_) => {
                 let _ = sender.send(InputEvent::Closed);
                 return;
             }
         }
-    }
-}
-
-fn log_line(line: &str) {
-    let Ok(path) = std::env::var("RIGEL_KEYLOG") else {
-        return;
-    };
-    use std::io::Write as _;
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    {
-        let _ = writeln!(file, "{line}");
-    }
-}
-
-fn describe_event(event: &Event) -> String {
-    match event {
-        Event::Key(key) => {
-            let shortcut = key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
-            let code = match key.code {
-                KeyCode::Char(character) if shortcut => format!("Char({character:?})"),
-                KeyCode::Char(_) => "Char".to_string(),
-                other => format!("{other:?}"),
-            };
-            format!("Key({code}, modifiers={:?})", key.modifiers)
-        }
-        Event::Paste(text) => format!("Paste(len={})", text.len()),
-        Event::Resize(width, height) => format!("Resize({width}, {height})"),
-        Event::FocusGained => "FocusGained".to_string(),
-        Event::FocusLost => "FocusLost".to_string(),
-        Event::Mouse(_) => "Mouse".to_string(),
     }
 }
 
@@ -222,17 +180,6 @@ mod tests {
             map_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
             Some(InputEvent::Key(KeyStroke::ShiftEnter))
         );
-    }
-
-    #[test]
-    fn keylog_redacts_plain_text_and_paste_payloads() {
-        let text = Event::Key(KeyEvent::new(KeyCode::Char('ф'), KeyModifiers::NONE));
-        let shifted = Event::Key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT));
-        let paste = Event::Paste("secret".to_string());
-
-        assert!(!super::describe_event(&text).contains('ф'));
-        assert!(!super::describe_event(&shifted).contains('A'));
-        assert_eq!(super::describe_event(&paste), "Paste(len=6)");
     }
 
     #[test]
