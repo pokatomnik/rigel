@@ -35,10 +35,9 @@ valid layer, or defaults if neither is usable. An explicit `--profile` is
 required, so its read or parse errors are reported; project configuration remains
 optional.
 
-The provider key can be configured in two ways. `apiKey` stores the key itself;
-`envKey` names an environment variable that contains it. `apiKey` takes
-precedence when both are set, and a blank `apiKey` is ignored. Prefer `envKey`
-when the configuration file is shared or version-controlled.
+Rigel never stores the provider key in the configuration file. `envKey` names
+the environment variable that contains the key, and Rigel reads that variable
+when it builds the provider client.
 
 The MCP servers whose tools are exposed to the agent are declared in TOML:
 

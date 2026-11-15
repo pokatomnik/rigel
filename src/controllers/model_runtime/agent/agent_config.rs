@@ -21,21 +21,13 @@ pub(crate) struct AgentConfig {
     config: Arc<RigelConfig>,
 }
 
-fn resolve_api_key(
-    config: &RigelConfig,
-    environment: impl FnOnce(&str) -> Option<String>,
-) -> Option<String> {
-    config
-        .api_key()
-        .map(ToOwned::to_owned)
-        .or_else(|| config.api_key_env().and_then(environment))
-}
-
 impl AgentConfig {
     pub(crate) fn new(config: Arc<RigelConfig>) -> Self {
         Self {
             base_url: config.base_url().to_owned(),
-            api_key: resolve_api_key(&config, |name| std::env::var(name).ok()),
+            api_key: config
+                .api_key_env()
+                .and_then(|name| std::env::var(name).ok()),
             tool_set: AgentToolSet::Chat,
             model_id: None,
             model_context_length: None,
@@ -118,36 +110,6 @@ mod tests {
                 .tool_set,
             AgentToolSet::Subagent
         );
-    }
-
-    #[test]
-    fn agent_config_prefers_the_literal_api_key() -> anyhow::Result<()> {
-        let config: RigelConfig = toml::from_str("apiKey = \"literal-key\"\n")?;
-        let agent = AgentConfig::new(Arc::new(config));
-
-        assert_eq!(agent.api_key.as_deref(), Some("literal-key"));
-        Ok(())
-    }
-
-    #[test]
-    fn literal_api_key_wins_over_the_environment_name() -> anyhow::Result<()> {
-        let config: RigelConfig =
-            toml::from_str("apiKey = \"literal-key\"\nenvKey = \"TEST_KEY\"\n")?;
-        let resolved = super::resolve_api_key(&config, |_| Some("env-key".to_string()));
-
-        assert_eq!(resolved.as_deref(), Some("literal-key"));
-        Ok(())
-    }
-
-    #[test]
-    fn blank_literal_key_falls_back_to_the_environment() -> anyhow::Result<()> {
-        let config: RigelConfig = toml::from_str("apiKey = \"  \"\nenvKey = \"TEST_KEY\"\n")?;
-        let resolved = super::resolve_api_key(&config, |name| {
-            (name == "TEST_KEY").then(|| "env-key".to_string())
-        });
-
-        assert_eq!(resolved.as_deref(), Some("env-key"));
-        Ok(())
     }
 
     #[test]

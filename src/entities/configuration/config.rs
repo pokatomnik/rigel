@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -8,7 +8,7 @@ use super::{model_config::ModelConfig, server_config::McpServerConfig};
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:1234/v1";
 
 /// Immutable data model for merged Rigel configuration layers.
-#[derive(Clone, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub(crate) struct RigelConfig {
     /// OpenAI-compatible API base URL.
     #[serde(rename = "baseUrl", skip_serializing_if = "Option::is_none")]
@@ -16,9 +16,6 @@ pub(crate) struct RigelConfig {
     /// Environment variable containing the provider API key.
     #[serde(rename = "envKey", skip_serializing_if = "Option::is_none")]
     pub(crate) api_key_env: Option<String>,
-    /// Literal provider API key; an empty value is treated as not configured.
-    #[serde(rename = "apiKey", skip_serializing_if = "Option::is_none")]
-    pub(crate) api_key: Option<String>,
     /// Named MCP server definitions.
     #[serde(rename = "mcpServers", default)]
     pub(crate) servers: HashMap<String, McpServerConfig>,
@@ -43,7 +40,6 @@ impl Default for RigelConfig {
         Self {
             base_url: Some(DEFAULT_BASE_URL.to_string()),
             api_key_env: None,
-            api_key: None,
             servers: HashMap::new(),
             models: HashMap::new(),
             policies: HashMap::new(),
@@ -60,14 +56,6 @@ impl RigelConfig {
     /// Returns the environment variable name for the provider key, if configured.
     pub(crate) fn api_key_env(&self) -> Option<&str> {
         self.api_key_env.as_deref()
-    }
-
-    /// Returns the literal provider key, ignoring an empty configured value.
-    pub(crate) fn api_key(&self) -> Option<&str> {
-        self.api_key
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
     }
 
     /// Returns configured MCP servers for the transport adapter.
@@ -135,38 +123,13 @@ impl RigelConfig {
     }
 
     fn merge_layers(global: Self, project: Self) -> Self {
-        let project_owns_credential = project
-            .api_key
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty())
-            || project.api_key_env.is_some();
-        let (api_key, api_key_env) = if project_owns_credential {
-            (project.api_key, project.api_key_env)
-        } else {
-            (global.api_key, global.api_key_env)
-        };
         Self {
             base_url: project.base_url.or(global.base_url),
-            api_key_env,
-            api_key,
+            api_key_env: project.api_key_env.or(global.api_key_env),
             servers: merge_servers(global.servers, project.servers),
             models: merge_models(global.models, project.models),
             policies: merge_policies(global.policies, project.policies),
         }
-    }
-}
-
-impl fmt::Debug for RigelConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("RigelConfig")
-            .field("base_url", &self.base_url)
-            .field("api_key_env", &self.api_key_env)
-            .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
-            .field("servers", &self.servers)
-            .field("models", &self.models)
-            .field("policies", &self.policies)
-            .finish()
     }
 }
 
@@ -226,55 +189,12 @@ mod tests {
     }
 
     #[test]
-    fn literal_api_key_is_used_and_blank_values_are_ignored() -> anyhow::Result<()> {
-        let configured: RigelConfig = toml::from_str("apiKey = \" secret-key \"\n")?;
-        assert_eq!(configured.api_key(), Some("secret-key"));
-
-        let blank: RigelConfig = toml::from_str("apiKey = \"  \"\n")?;
-        assert_eq!(blank.api_key(), None);
-        Ok(())
-    }
-
-    #[test]
-    fn debug_output_redacts_the_literal_api_key() -> anyhow::Result<()> {
-        let config: RigelConfig = toml::from_str("apiKey = \"secret-key\"\n")?;
-        let debug = format!("{config:?}");
-
-        assert!(debug.contains("<redacted>"));
-        assert!(!debug.contains("secret-key"));
-        Ok(())
-    }
-
-    #[test]
-    fn project_credential_replaces_the_global_credential() -> anyhow::Result<()> {
-        let global: RigelConfig = toml::from_str("apiKey = \"global-key\"\n")?;
+    fn project_env_key_overrides_the_global_env_key() -> anyhow::Result<()> {
+        let global: RigelConfig = toml::from_str("envKey = \"GLOBAL_KEY\"\n")?;
         let project: RigelConfig = toml::from_str("envKey = \"PROJECT_KEY\"\n")?;
-        let merged = RigelConfig::merge(Some(global.clone()), Some(project));
-
-        assert_eq!(merged.api_key(), None);
-        assert_eq!(merged.api_key_env(), Some("PROJECT_KEY"));
-
-        let project: RigelConfig = toml::from_str("apiKey = \"project-key\"\n")?;
         let merged = RigelConfig::merge(Some(global), Some(project));
-        assert_eq!(merged.api_key(), Some("project-key"));
-        assert_eq!(merged.api_key_env(), None);
-        Ok(())
-    }
 
-    #[test]
-    fn project_api_key_overrides_global_and_blank_keeps_the_global_key() -> anyhow::Result<()> {
-        let global: RigelConfig = toml::from_str("apiKey = \"global-key\"\n")?;
-        let project: RigelConfig = toml::from_str("apiKey = \"project-key\"\n")?;
-        assert_eq!(
-            RigelConfig::merge(Some(global.clone()), Some(project)).api_key(),
-            Some("project-key")
-        );
-
-        let blank: RigelConfig = toml::from_str("apiKey = \"\"\n")?;
-        assert_eq!(
-            RigelConfig::merge(Some(global), Some(blank)).api_key(),
-            Some("global-key")
-        );
+        assert_eq!(merged.api_key_env(), Some("PROJECT_KEY"));
         Ok(())
     }
 
